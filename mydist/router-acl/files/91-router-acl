@@ -1,0 +1,98 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Re-attach/refresh the router-acl WAN filter whenever an interface comes up,
+# changes address, or goes away. This is what makes pppoe-wan work: that device
+# does not exist when /etc/init.d/router-acl runs at boot, and it is destroyed
+# and recreated on every PPPoE redial.
+#
+# ACTION values are netifd's (see 90-dpd-fastpath for the full list): ifup /
+# ifupdate carry a DEVICE, add / update may not.
+
+. /lib/functions.sh
+. /usr/libexec/router-acl.sh
+
+[ -n "$ACTION" ] || exit 0
+
+acl_uci() {
+	config_load router_acl
+	config_get_bool ACL_ENABLED global enabled 0
+	config_get ACL_MODE global mode guard
+	config_get ACL_WAN global wan wan
+	config_get ACL_LAN global lan lan
+	config_get_bool ACL_ECHO4 global allow_echo 0
+	config_get_bool ACL_ECHO6 global allow_v6_echo 0
+	config_get ACL_UDP global udp_timeout 120
+	config_get ACL_TCP global tcp_timeout 3600
+	config_get ACL_ICMP global icmp_timeout 30
+	config_get ACL_MARK global mark 01000000
+	config_get ACL_MASK global mark_mask ff000000
+	config_get ACL_FWD global forward
+	config_get ACL_IN global input
+	config_get_bool ACL_FULLCONE global fullcone 0
+}
+
+acl_selected() {
+	local i
+
+	[ -n "$INTERFACE" ] || return 1
+	for i in $ACL_WAN; do
+		[ "$i" = "$INTERFACE" ] && return 0
+		[ -n "$DEVICE" ] && [ "$i" = "$DEVICE" ] && return 0
+	done
+	case "$INTERFACE" in
+	wan|wan6|wan_6) return 0 ;;
+	esac
+	return 1
+}
+
+acl_push_config() {
+	[ -x "$ACL_CTL" ] || return 0
+	acl_is_attached "$DEVICE" || return 0
+	"$ACL_CTL" set mode "$ACL_MODE" 2>/dev/null
+	"$ACL_CTL" set echo "$ACL_ECHO4" 2>/dev/null
+	"$ACL_CTL" set v6echo "$ACL_ECHO6" 2>/dev/null
+	"$ACL_CTL" set timeouts "$((ACL_UDP * 1000))" "$((ACL_TCP * 1000))" \
+		"$((ACL_ICMP * 1000))" 2>/dev/null
+	"$ACL_CTL" set mark "0x$ACL_MARK" 2>/dev/null
+	"$ACL_CTL" set fullcone "$ACL_FULLCONE" 2>/dev/null
+	# shellcheck disable=SC2086
+	"$ACL_CTL" set lan $(acl_lan_prefixes "$(acl_resolve_dev "$ACL_LAN")") 2>/dev/null
+	acl_push_ports "$ACL_FWD" "$ACL_IN"
+	acl_import_firewall
+	return 0
+}
+
+case "$ACTION" in
+ifup|ifupdate|add|update)
+	acl_uci
+	[ "$ACL_ENABLED" = "1" ] || exit 0
+	[ -n "$DEVICE" ] || exit 0
+
+	if acl_selected; then
+		if acl_attach_if "$DEVICE"; then
+			acl_push_config
+			acl_log "hotplug $ACTION $INTERFACE -> $DEVICE attached"
+		else
+			acl_log "hotplug $ACTION $INTERFACE -> $DEVICE attach FAILED"
+		fi
+	fi
+
+	# the LAN device name is baked into the bypass includes, so refresh them
+	# whenever the LAN itself comes up
+	case "$INTERFACE" in
+	lan|lan6|lan_6)
+		[ "$ACL_MODE" = "bypass" ] &&
+			acl_nft_apply bypass "$DEVICE" "$ACL_MARK" "$ACL_MASK"
+		;;
+	esac
+	;;
+ifdown|remove)
+	[ -n "$DEVICE" ] || exit 0
+	acl_uci
+	acl_selected && acl_detach_if "$DEVICE" &&
+		acl_log "hotplug $ACTION $INTERFACE -> $DEVICE detached"
+	;;
+esac
+
+exit 0

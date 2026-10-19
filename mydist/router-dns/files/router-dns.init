@@ -1,0 +1,204 @@
+#!/bin/sh /etc/rc.common
+# mydist router-dns: make dnsmasq forward everything to smartdns.
+#
+# Why this is not simply a conffile
+# ---------------------------------
+# /etc/dnsmasq.conf belongs to dnsmasq-full. A second package shipping the same
+# path makes apk refuse the entire install:
+#
+#   ERROR: router-dns-0.1.0-r1: trying to overwrite etc/dnsmasq.conf
+#          owned by dnsmasq-full-2.93-r4.
+#
+# So instead of owning the file we patch three lines into it, at every boot.
+# That is also self-healing: if a dnsmasq upgrade restores the stock file, the
+# forward comes back instead of silently disappearing.
+#
+# Why /etc/dnsmasq.conf is the file to patch
+# -----------------------------------------
+# /etc/init.d/dnsmasq prefers /etc/dnsmasq.<section>.conf and falls back to
+# /etc/dnsmasq.conf (dnsmasq.init:942-949), then passes it as --conf-file=. The
+# per-instance file is never created by a stock image, so /etc/dnsmasq.conf is
+# the one dnsmasq actually reads.
+#
+# START=18: one below dnsmasq (19) so the file is in place before dnsmasq
+# builds its command line, and one below smartdns (19) which is fine -- dnsmasq
+# only needs the port number, not a listener.
+
+START=18
+
+MARK="# mydist router-dns"
+PORT=6053
+CONF=/etc/dnsmasq.conf
+
+log() { logger -t router-dns "$@"; }
+
+block_present() {
+	grep -qF "$MARK" "$CONF" 2>/dev/null
+}
+
+add_block() {
+	[ -f "$CONF" ] || : > "$CONF"
+	{
+		printf '\n%s\n' "$MARK"
+		printf '# dnsmasq no longer resolves anything; smartdns on\n'
+		printf '# 127.0.0.1:%s does it, concurrently, and answers with the\n' "$PORT"
+		printf '# fastest upstream result. Do not enable the uci option\n'
+		printf '# noresolv on dhcp.@dnsmasq[0]: this file is the single place.\n'
+		printf 'no-resolv\n'
+		printf 'server=127.0.0.1#%s\n' "$PORT"
+	} >> "$CONF"
+}
+
+del_block() {
+	awk -v m="$MARK" '
+		$0 == m                    { skip = 5; next }
+		skip > 0 && /^#/           { skip--; next }
+		skip > 0 && /^no-resolv$/  { skip--; next }
+		skip > 0 && /^server=127\.0\.0\.1#6053$/ { skip = 0; next }
+		skip > 0                   { skip = 0 }
+		{ print }
+	' "$CONF" > "$CONF.mydist" && mv "$CONF.mydist" "$CONF"
+}
+
+start() {
+	if ! block_present; then
+		if add_block; then
+			log "added the smartdns forward to $CONF"
+			/etc/init.d/dnsmasq reload >/dev/null 2>&1
+		else
+			log "ERROR: could not write $CONF; dnsmasq will resolve directly"
+			return 1
+		fi
+	fi
+
+	# While honk runs, it intercepts LAN :53 in its own datapath and resolves
+	# through its own upstreams -- i.e. it sits *in front of* the chain above.
+	# Point its `default` upstream at smartdns so the plane stays ours. No-op
+	# when honk is not installed, and it never touches a config the operator
+	# has already pointed somewhere else.
+	[ -x /usr/libexec/router-honk-dns ] && /usr/libexec/router-honk-dns patch
+
+	# DNS/DoH over a chosen egress (WireGuard, a second WAN, ...): the resolver's
+	# upstream sockets carry an fwmark and one policy rule sends that mark to a
+	# private table. See the comment on egress_apply().
+	egress_apply
+
+	# The forward is useless if nobody is listening on the other end. Say it out
+	# loud rather than leaving the operator with a LAN that resolves nothing.
+	if ! uci -q get smartdns.@smartdns[0].enabled | grep -qx 1; then
+		log "WARNING: smartdns is not enabled but dnsmasq forwards to 127.0.0.1:$PORT"
+	fi
+
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# DNS / DoH over a chosen egress
+#
+# Why a mark and a policy rule, and not nft or a bind:
+#
+#   * smartdns's OpenWrt init already supports `option set_mark` per server
+#     section and passes `-set-mark` to smartdns, which sets SO_MARK on that
+#     upstream's sockets. That is per-upstream and needs no netfilter.
+#   * a single `ip rule fwmark <mark> table <table>` plus a default route in that
+#     table then decides the egress, whatever it is: a WireGuard/tun device, a
+#     second WAN, a macvlan. Nothing in the packet is rewritten, so replies just
+#     work (rp_filter is 0 in router-tuning; with strict rp_filter a marked flow's
+#     replies arriving on another device would be dropped).
+#   * it covers both plain DNS and DoH/DoT, because they are the same sockets.
+#
+# Empty `egress` (the default) means "main table", and the rule is removed again,
+# so flipping the option off is a clean revert.
+egress_apply() {
+	local egress mark table dev gw changed=0
+
+	config_load router_dns 2>/dev/null || return 0
+	config_get egress dns egress ''
+	config_get mark dns egress_mark '24659'
+	config_get table dns egress_table '6053'
+
+	# always start from a clean slate: one rule, one table
+	ip rule del fwmark "$mark" table "$table" 2>/dev/null
+	ip route flush table "$table" 2>/dev/null
+
+	if [ -z "$egress" ]; then
+		smartdns_mark "" && log "DNS egress: main table (no mark)"
+		return 0
+	fi
+
+	dev="$egress"
+	[ -e "/sys/class/net/$dev" ] || dev="$(. /lib/functions.sh; . /lib/functions/network.sh; network_get_device dev "$egress" && printf '%s' "$dev")"
+	if [ -z "$dev" ] || [ ! -e "/sys/class/net/$dev" ]; then
+		log "ERROR: DNS egress '$egress' is not a device and no interface resolves to one; staying on the main table"
+		smartdns_mark ""
+		return 1
+	fi
+
+	# A device-only route is only correct for point-to-point/tunnel devices. For an
+	# Ethernet egress the next hop is required, and dropping it silently breaks
+	# resolution (measured 2026-10-18: `default dev eth1` made every marked query
+	# time out even though eth1 was the interface it would have used anyway).
+	# Reuse the main table's next hop when it already leaves via this device, or
+	# take `egress_gateway` from uci; otherwise install the device route and say so.
+	gw="$(uci -q get router_dns.dns.egress_gateway)"
+	if [ -z "$gw" ]; then
+		gw="$(ip route show default dev "$dev" 2>/dev/null |
+			awk '{ for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }')"
+	fi
+	if [ -n "$gw" ]; then
+		ip route replace default via "$gw" dev "$dev" table "$table" || {
+			log "ERROR: could not install the default route via $gw dev $dev in table $table"
+			smartdns_mark ""
+			return 1
+		}
+	else
+		ip route replace default dev "$dev" table "$table" || {
+			log "ERROR: could not install the default route via $dev in table $table"
+			smartdns_mark ""
+			return 1
+		}
+		log "WARNING: no next hop for $dev; installed a device route. Ethernet egresses usually need one -- set router_dns.dns.egress_gateway"
+	fi
+	ip rule add fwmark "$mark" table "$table" || {
+		log "ERROR: could not add the fwmark rule"
+		return 1
+	}
+	smartdns_mark "$mark"
+	log "DNS/DoH egress: device $dev (table $table, mark $mark)"
+	return 0
+}
+
+# Set (or clear) `set_mark` on every smartdns server section, and restart it only
+# when something actually changed.
+smartdns_mark() {
+	local want="$1" sec cur changed=0
+
+	for sec in $(uci -q show smartdns 2>/dev/null | sed -n 's/^smartdns\.\(@server\[[0-9]*\]\)=server$/\1/p'); do
+		cur="$(uci -q get "smartdns.$sec.set_mark")"
+		[ "$cur" = "$want" ] && continue
+		if [ -n "$want" ]; then
+			uci -q set "smartdns.$sec.set_mark=$want"
+		else
+			uci -q delete "smartdns.$sec.set_mark"
+		fi
+		changed=1
+	done
+	[ "$changed" = 1 ] || return 0
+	uci -q commit smartdns
+	/etc/init.d/smartdns restart >/dev/null 2>&1
+	return 0
+}
+
+stop() {
+	if block_present; then
+		del_block && log "removed the smartdns forward from $CONF"
+		/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	fi
+	# leave no policy rule behind
+	local mark table
+	config_load router_dns 2>/dev/null
+	config_get mark dns egress_mark '24659'
+	config_get table dns egress_table '6053'
+	ip rule del fwmark "$mark" table "$table" 2>/dev/null
+	ip route flush table "$table" 2>/dev/null
+}

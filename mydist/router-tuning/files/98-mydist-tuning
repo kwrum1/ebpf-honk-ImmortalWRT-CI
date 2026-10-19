@@ -1,0 +1,30 @@
+#!/bin/sh
+# mydist router-tuning - first boot only.
+#
+# Why this file exists at all, when the service could generate the same file at
+# START=26:
+#
+#   /etc/init.d/sysctl runs at S11, /etc/init.d/network at S20. The tuning
+#   service runs at S26 - after the devices exist. net.core.default_qdisc only
+#   affects devices that are created *after* it is set, so generating the sysctl
+#   file from the service would leave the very first boot without fq.
+#
+#   /etc/uci-defaults is executed by /etc/init.d/boot (S10), i.e. before S11, so
+#   writing the file here gets it applied in the same boot, in the right order.
+#
+# The service regenerates the file on every boot anyway (settings can change),
+# so this is only about the ordering of the first one.
+
+. /lib/functions.sh
+. /usr/libexec/router-tuning.sh
+
+if [ -f /etc/config/router_tuning ]; then
+	rt_config
+	rt_gen_sysctl "$RT_TIER"
+	rt_log "first boot: /etc/sysctl.d/29-router-tuning.conf for tier=$RT_TIER"
+fi
+
+# The package ships the init script but does not enable it.
+[ -x /etc/init.d/router-tuning ] && /etc/init.d/router-tuning enable >/dev/null 2>&1
+
+exit 0

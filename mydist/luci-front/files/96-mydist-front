@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# 96-mydist-front -- move uhttpd to loopback and enable the front end.
+#
+# Why this is safe to do once and not on every boot: these are uhttpd's own
+# listen addresses, not /etc/config/firewall or /etc/config/dhcp. Once moved, the
+# only thing that changes for the user is who answers :80/:443.
+#
+# If luci-front is disabled later, the rollback is:
+#   uci set uhttpd.main.listen_http='0.0.0.0:80'
+#   uci set uhttpd.main.listen_https='0.0.0.0:443'
+#   uci set uhttpd.main.redirect_https='1'
+#   uci commit uhttpd && /etc/init.d/uhttpd restart
+
+. /lib/functions.sh
+
+uci -q get uhttpd.main >/dev/null 2>&1 || exit 0
+
+# The backend: HTTP only, loopback only. TLS is the front end's job.
+uci -q set uhttpd.main.listen_http='127.0.0.1:8080'
+uci -q delete uhttpd.main.listen_https
+uci -q set uhttpd.main.redirect_https='0'
+# keep the certificate where luci-ssl put it; the front end reads the same files
+uci -q commit uhttpd
+
+/etc/init.d/luci-front enable >/dev/null 2>&1
+logger -t luci-front "uhttpd moved to 127.0.0.1:8080; luci-front enabled on :80/:443"
+
+# apply now (the init scripts may already have run in this boot)
+/etc/init.d/uhttpd restart >/dev/null 2>&1
+/etc/init.d/luci-front restart >/dev/null 2>&1
+
+exit 0

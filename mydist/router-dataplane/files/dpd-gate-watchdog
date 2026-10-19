@@ -1,0 +1,49 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# dpd-gate-watchdog -- notice when a transparent proxy takes (or releases) the TC
+# hooks, and re-evaluate the acceleration gate.
+#
+# Why this exists
+# ---------------
+# The gate is otherwise event-driven: boot, einat attaching/detaching, and the
+# manual /usr/libexec/dpd-gate-refresh. honk is not one of our services -- it
+# starts and stops from its own UI at arbitrary times, and while it runs its TCX
+# programs sit ahead of every classic filter on every device we hook
+# (net/core/dev.c: one non-UNSPEC TCX verdict skips the whole classic chain; see
+# docs/proxy-accel-coexistence.md §9). In that state "stateless" is a claim our
+# counters cannot back. Measured 2026-10-18: the closure harness started honk
+# late in the run and dpd still reported stateless, because nothing had asked it
+# to look again.
+#
+# Polling is the honest mechanism here, because the daemon we would otherwise
+# subscribe to is not ours. The loop costs one `bpftool net show` and one uci
+# read every DPD_GATE_WATCH_INTERVAL seconds, and writes nothing unless the
+# answer changed -- so the log gets one line per transition, not one per tick.
+#
+# Do NOT gate the loop on a pin path: this build's maps land in
+# /sys/fs/bpf/tc/globals (libbpf's default), not in /sys/fs/bpf/dpd, and the
+# first version of this script guarded on the latter and therefore slept forever
+# while reporting nothing. procd supervises the script as dpd_fastpath's second
+# instance, so `/etc/init.d/dpd-fastpath stop` kills it with the datapath; when
+# the maps are absent, writing to them is a silent no-op and the next start
+# republishes everything anyway.
+. /lib/functions.sh
+. /usr/libexec/dpd-fastpath.sh
+
+iv="${DPD_GATE_WATCH_INTERVAL:-20}"
+case "$iv" in
+	'' | *[!0-9]*) iv=20 ;;
+	0) iv=20 ;;
+esac
+
+dpd_log "watchdog: watching proxy ownership every ${iv}s"
+own_before=""
+while :; do
+	sleep "$iv"
+	if dpd_honk_owns; then own=1; else own=0; fi
+	[ "$own" = "$own_before" ] && continue
+	own_before="$own"
+	emode="$(dpd_gate_refresh_uci)"
+	dpd_log "watchdog: proxy ownership changed (honk=$own); gate re-evaluated -> $emode"
+done

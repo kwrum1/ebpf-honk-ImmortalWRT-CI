@@ -1,0 +1,65 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# mydist router-tuning: apply the performance profile at boot and on reload.
+#
+# START=26 is deliberate: after network (20) so the devices exist, after the
+# upstream packet_steering (25) so rps_cpus has already been written if it is
+# going to be, and well before einat (60) / dpd (95) / router-qos (97) so
+# nothing we do races with the datapath owners.
+#
+# The sysctl half does not depend on this service for its *first* application:
+# /etc/uci-defaults/98-mydist-tuning generates /etc/sysctl.d/29-router-tuning.conf
+# during /etc/init.d/boot (S10), and /etc/init.d/sysctl (S11) then applies it -
+# still before network creates a single device, which is what makes
+# default_qdisc=fq meaningful.
+
+START=26
+STOP=04
+USE_PROCD=1
+
+. /lib/functions.sh
+. /usr/libexec/router-tuning.sh
+
+start_service() {
+	rt_config
+	if [ "$RT_ENABLED" != 1 ]; then
+		rt_log 'disabled by /etc/config/router_tuning'
+		return 0
+	fi
+	rt_log "apply tier=$RT_TIER profile=$RT_PROFILE ifaces='$RT_IFACES'"
+	rt_gen_sysctl "$RT_TIER"
+	rt_apply_all
+	rt_log 'apply done'
+}
+
+stop_service() {
+	# Deliberately a no-op on the values: a sysctl or a ring size is not a
+	# running process, and silently reverting them on a service restart would
+	# be worse than leaving them. `router-tuning restore` is the way back.
+	rt_log 'stopped (values left in place; use "router-tuning restore" to revert)'
+}
+
+reload_service() {
+	start_service
+}
+
+extra_command "report" "Print what apply would do, changing nothing" || true
+report() {
+	rt_config
+	RT_DRYRUN=1
+	echo "router-tuning report"
+	echo "  tier=$RT_TIER profile=$RT_PROFILE ram=$(rt_mem_mb)MB cpus=$(rt_ncpu) guest=$(rt_is_virt && echo yes || echo no)"
+	if [ "$RT_ENABLED" != 1 ]; then
+		rt_note enabled 0 'service is disabled'
+		return 0
+	fi
+	rt_gen_sysctl "$RT_TIER"
+	rt_apply_all
+}
+
+extra_command "restore" "Put the recorded original values back" || true
+restore() {
+	RT_DRYRUN=0
+	rt_restore
+}

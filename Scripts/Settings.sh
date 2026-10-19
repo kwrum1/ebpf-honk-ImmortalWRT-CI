@@ -95,8 +95,17 @@ generate_config
 sed -i "/attendedsysupgrade/d" $(find ./feeds/luci/collections/ -type f -name "Makefile")
 #修改默认主题
 sed -i "s/luci-theme-bootstrap/luci-theme-$WRT_THEME/g" $(find ./feeds/luci/collections/ -type f -name "Makefile")
+# 默认 IP。WRT_IP 为空时**不能**让这个 sed 把地址替换成空串：
+#   sed "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g"
+# 在 WRT_IP 为空时是「删掉地址」——LAN 就没有 IPv4，br-lan 起不来，
+# 路由器完全无法访问；而且不可逆：下一次再跑时行里已经没有
+# 192.168.x.y 可以匹配，坏状态会永久留在树里。
+# 实测踩过：同一批里 ROCKCHIP 拿到 192.168.10.1，X86 拿到空串，
+# 于是 x86 镜像启动后 network.interface.lan 报 INVALID_ADDRESS "/24"。
+# 语义定为：WRT_IP 为空 = 保留上游默认；否则替换为 WRT_IP。
+LAN_IP="${WRT_IP:-192.168.1.1}"
 #修改immortalwrt.lan关联IP
-sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" $(find ./feeds/luci/modules/luci-mod-system/ -type f -name "flash.js")
+sed -i "s/192\.168\.[0-9]*\.[0-9]*/$LAN_IP/g" $(find ./feeds/luci/modules/luci-mod-system/ -type f -name "flash.js")
 #添加编译日期标识
 sed -i "s/(\(luciversion || ''\))/(\1) + (' \/ $WRT_MARK-$WRT_DATE')/g" $(find ./feeds/luci/modules/luci-mod-status/ -type f -name "10_system.js")
 
@@ -120,7 +129,19 @@ fi
 
 CFG_FILE="./package/base-files/files/bin/config_generate"
 #修改默认IP地址
-sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" $CFG_FILE
+# 先把被清空的 lan 默认值修回来：字面匹配，不依赖正则转义。
+# 少了这一步，下面那个全局替换在坏树里永远匹配不到，LAN 会一直没地址。
+grep -q 'lan) ipad=${ipaddr:-""}' "$CFG_FILE" &&
+	sed -i 's#lan) ipad=${ipaddr:-""}#lan) ipad=${ipaddr:-"192.168.1.1"}#' "$CFG_FILE"
+sed -i "s/192\.168\.[0-9]*\.[0-9]*/$LAN_IP/g" "$CFG_FILE"
+# 兜底断言：LAN 默认地址绝不允许为空。空地址 = 镜像能启动但**路由器访问不到**
+# （br-lan 没有 IPv4、netifd 报 INVALID_ADDRESS、dpd 也挂不上 LAN），
+# 而且要到开机后才暴露。宁可在这里直接失败。
+if grep -q 'lan) ipad=${ipaddr:-""}' "$CFG_FILE"; then
+	echo "ERROR: config_generate 的 LAN 默认地址为空（WRT_IP='${WRT_IP:-<未设置>}'）" >&2
+	echo "       LAN 会没有 IPv4，设备无法访问；检查 WRT_IP 与上面的 sed。" >&2
+	exit 1
+fi
 #修改默认主机名
 sed -i "s/hostname='.*'/hostname='$WRT_NAME'/g" $CFG_FILE
 

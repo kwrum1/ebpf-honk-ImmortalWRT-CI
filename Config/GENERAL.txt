@@ -1,10 +1,92 @@
 # Honk 透明代理核心 + LuCI/Doona
 CONFIG_PACKAGE_honk=y
 CONFIG_PACKAGE_luci-app-honk=y
+# --- mydist 数据面（#18）：TC ingress eBPF 快路径 ---
+# 包不在任何 feed 里。**唯一**的归属地是本仓库的 mydist/router-dataplane/，
+# 由 Scripts/Packages.sh 在构建前拷进构建树的 package/mydist/（和第三方仓库
+# 的落地方式一致，只是走本地拷贝而不是 git clone）。找不到就 fail hard。
+CONFIG_PACKAGE_dpd-fastpath=y
+# --- mydist 数据面（#24）：WAN eBPF ACL / conntrack 逃逸 ---
+# 同样住在 mydist/router-acl/，由 Scripts/Packages.sh 一起拷进 package/mydist/。
+# 默认 enabled='1' + mode='guard'：只丢 WAN 上无主的入站（叠加式，fw4/conntrack
+# 照旧）。注意这比 stock OpenWrt 基线**更严**——einat 开着时 fw4 渲染出来的是
+# 一条 WAN→LAN 全放行，真正把无主入站挡在外面的是这里。
+# bypass = 再加 mark + notrack，把 NAT 流从 conntrack 里彻底拿掉（要求 einat 开着）。
+CONFIG_PACKAGE_router-acl=y
+# --- mydist 数据面（#22）：单条 qdisc + CAKE ---
+# 住在 mydist/router-qos/，同样是纯脚本包（不编译任何东西），由 Packages.sh 拷贝。
+# 默认 enabled='1'，但 upload='0' 时它是空转的（init 只记日志、不装 qdisc）——
+# CAKE 是按你给的速率整形的，编一个速率比不整还糟。真正开起来要设：
+#   uci set router_qos.global.upload='<你的真实上行 kbit，略减一点>'
+# 开启后只在 WAN 设备上 replace root cake —— CAKE 自己做逐流公平和 DSCP→tin，
+# 没有 class、没有 classifier 级联。root qdisc 和 router-acl 建的 clsact
+# （handle ffff:）互不干扰，所以 ACL(90)/dpd(100) 的过滤器链照旧。
+# 下载方向故意不做：需要 IFB，而 mirror 根本不延迟真实包、redirect 又会
+# 掐断 ACL/dpd 或改掉 fw4 匹配 zone 用的 iifname（实测见 router-qos.sh 头注释）。
+CONFIG_PACKAGE_router-qos=y
+# --- mydist 性能档位：首启按 CPU/内存/网卡自动定档 ---
+# 住在 mydist/router-tuning/，纯脚本包，由 Packages.sh 一起拷进 package/mydist/。
+# 它把「只能靠包选择做」的两条一起带上（Makefile 的 DEPENDS）：
+#   kmod-tcp-bbr -> BBRv1 本身（还自带 /etc/sysctl.d/12-tcp-bbr.conf）
+#   kmod-sched   -> 其 KCONFIG 含 CONFIG_NET_SCH_FQ，BBR 的首选 pacing qdisc
+# 脚本自己做：sysctl 档位（随内存缩放）、tcp_mtu_probing、端口区间、
+# ring/coalescing/txqueuelen、xps_cpus 补位、governor。
+# 它**不**碰 CAKE 的 WAN qdisc、**不**抢上游 packet_steering 的 rps_cpus、
+# **不**写 /etc/config/{network,dhcp,firewall}。证据与取舍见
+# docs/kernel-and-tuning-research.md（含「为什么不换 XanMod 内核」）。
+CONFIG_PACKAGE_router-tuning=y
+# --- mydist DNS：smartdns 做解析，dnsmasq 留作前端 ---
+# 住在 mydist/router-dns/，纯脚本包。它只装两样东西：
+#   1. /etc/dnsmasq.conf —— dnsmasq 无条件读它（dnsmasq.init:948 的
+#      `[ -f "$dnsmasqconffile" ] && xappend "--conf-file=..."`），
+#      内容是 no-resolv + server=127.0.0.1#6053。**不写 /etc/config/dhcp。**
+#   2. /etc/uci-defaults/97-mydist-dns —— 把 smartdns 开到 6053 并
+#      auto_set_dnsmasq=0。
+#
+# 为什么不让 smartdns 直接占 :53（它的另一种官方模式 port 53 +
+# auto_set_dnsmasq=1）：那样 dnsmasq 的 port 会被改成 0，盒子就丢掉了
+# /etc/hosts、local=/lan/ 和 odhcpd 往 /tmp/hosts/odhcpd.hosts.lan 里发布的
+# 名字（#25 的成果）。dnsmasq 留在 :53 只做转发，上游行为完全一样
+# （smartdns 并发查询取最快），本地名字服务却保住了。
+#
+# auto_set_dnsmasq=0 是承重的：留 1 的话 smartdns 自己的 init 会去改
+# /etc/config/dhcp（server/noresolv/rebind_protection/domainneeded，或
+# port-53 模式下的 port 与 dhcp_option）。那是上游支持的集成方式，但本发行版
+# 不允许包改写基础配置，所以 dnsmasq 那一半由我们自己用 /etc/dnsmasq.conf 做。
+#
+# 注意 smartdns 的变体：只有选 smartdns-ui 才会走 cargo/npm 和 webui 下载，
+# 这里**只**选核心包（C 实现），Rust 工具链是 honk 本来就要的，不额外增加。
+CONFIG_PACKAGE_router-dns=y
+CONFIG_PACKAGE_smartdns=y
+# smartdns-ui 需要 node/host + rust-bindgen/host 并下载 webui 仓库，不要。
+# CONFIG_PACKAGE_smartdns-ui is not set
+CONFIG_PACKAGE_luci-app-smartdns=y
+# luci-app-smartdns 的 WebUI 也是可选（默认关）。
+# CONFIG_PACKAGE_luci-app-smartdns_INCLUDE_WebUI is not set
+# --- #25：地址分配只有一个权威（odhcpd 全接管 v4 + v6）---
+# 包名从 odhcpd-ipv6only 换成全量 odhcpd（含 DHCPv4）。注意这一项**不能**只靠
+# 这里：odhcpd-ipv6only 是 include/target.mk 的 DEFAULT_PACKAGES.router 里
+# **无 prompt** 的 CONFIG_DEFAULT_*，.config 写 =n 无效（同 §13.1）——真正生效的
+# 是 Scripts/Handles.sh 里把它换成 odhcpd 的那条 sed。这里显式写一行是为了
+# 增量构建时不让旧的 =y 残留下来（否则两个包都会装，文件冲突）。
+# 配套的还有 Handles.sh 里给 dnsmasq 的 dhcp.conf 加 `option ignore 1`
+# （dnsmasq.init:541 会直接 return，DNS 不受影响）和改 odhcpd.defaults 的
+# maindhcp/dhcpv6 —— odhcpd 的 config.c:1282 要求 maindhcp=1 才发 v4 地址。
+#
+# 这里必须**显式**写 =y：odhcpd 有变体（full / ipv6only），变体包的符号是三态的，
+# 只靠 DEFAULT_PACKAGES 里的名字只会得到 CONFIG_PACKAGE_odhcpd=m
+# —— =m 是「编出来但不装进镜像」，于是 v4 代码根本不在 rootfs 里，静默失效。
+# 实测：只改 include/target.mk 之后 make defconfig 给出
+#     CONFIG_DEFAULT_odhcpd=y / CONFIG_PACKAGE_odhcpd=m / CONFIG_PACKAGE_odhcpd-ipv6only=y
+# 所以两行都要写死。
+CONFIG_PACKAGE_odhcpd=y
+# CONFIG_PACKAGE_odhcpd-ipv6only is not set
+# tc 必须是有 libbpf 的变体，否则加载不了带 BTF 的 .bpf.o。
+# 注意不要用 tc-full：它会拖回 libxtables（我们正在砍 iptables）。
+CONFIG_PACKAGE_tc-bpf=y
 #增加插件
 CONFIG_PACKAGE_luci-app-autoreboot=y
 CONFIG_PACKAGE_luci-app-partexp=y
-CONFIG_PACKAGE_luci-app-upnp=y
 #删除插件
 CONFIG_PACKAGE_luci-app-attendedsysupgrade=n
 CONFIG_PACKAGE_luci-app-wol=n
@@ -24,33 +106,35 @@ CONFIG_KERNEL_DEBUG_INFO_BTF=y
 CONFIG_KERNEL_XDP_SOCKETS=y
 #内核调整
 CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
 CONFIG_PACKAGE_kmod-bonding=y
 CONFIG_PACKAGE_kmod-dsa=y
 CONFIG_PACKAGE_kmod-dummy=y
-CONFIG_PACKAGE_kmod-fs-btrfs=y
-CONFIG_PACKAGE_kmod-fuse=y
-CONFIG_PACKAGE_kmod-inet-diag=y
-CONFIG_PACKAGE_kmod-inet-mptcp-diag=y
 CONFIG_PACKAGE_kmod-mtd-rw=y
-CONFIG_PACKAGE_kmod-netlink-diag=y
 CONFIG_PACKAGE_kmod-nft-arp=y
 CONFIG_PACKAGE_kmod-nft-bridge=y
 CONFIG_PACKAGE_kmod-nft-connlimit=y
 CONFIG_PACKAGE_kmod-nft-core=y
 CONFIG_PACKAGE_kmod-nft-dup-inet=y
 CONFIG_PACKAGE_kmod-nft-fib=y
-CONFIG_PACKAGE_kmod-nft-fullcone=y
 CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-nft-netdev=y
-CONFIG_PACKAGE_kmod-nft-offload=y
-CONFIG_PACKAGE_kmod-nft-queue=y
+# flow offloading 已全部关掉（Handles.sh 把 fw4 默认配置里的 flow_offloading /
+# flow_offloading_hw 改成 0），所以 nft 的 flowtable 支持没有使用者。它的两个
+# 来源（firewall4 的 DEPENDS、include/target.mk 的 DEFAULT_PACKAGES）都在
+# Handles.sh 里摘掉了；这里显式写死，免得增量构建沿用 .config 里陈旧的 =y。
+# verify-packages.sh 里它在禁用清单。
+# CONFIG_PACKAGE_kmod-nft-offload is not set
+# #23：honk 的 NFQUEUE 模式在打包层关掉了（docs/honk-nfqueue-trim.md），
+# honk/Makefile 里那条 +kmod-nft-queue 也摘了。这一行是当初跟着它一起加进来的，
+# 现在一并去掉 —— 查过全镜像没有别的使用者（homeproxy/snort3/ua2f/
+# etherwake-nfqueue 都不在清单里），内核里 nft-queue 是独立的 KernelPackage，
+# 没有别的 kmod 依赖它。verify-packages.sh 已把它放进禁用清单。
 CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nft-xfrm=y
-CONFIG_PACKAGE_kmod-sound-core=y
 CONFIG_PACKAGE_kmod-tun=y
 CONFIG_PACKAGE_kmod-usb3=y
-CONFIG_PACKAGE_kmod-usb-audio=y
 CONFIG_PACKAGE_kmod-usb-core=y
 CONFIG_PACKAGE_kmod-usb-dwc3=y
 CONFIG_PACKAGE_kmod-usb-net=y
@@ -75,15 +159,12 @@ CONFIG_PACKAGE_kmod-usb-uhci=y
 CONFIG_PACKAGE_kmod-usb-xhci=y
 CONFIG_PACKAGE_kmod-veth=y
 CONFIG_PACKAGE_kmod-wireguard=y
-CONFIG_PACKAGE_kmod-sched-bpf=y
-CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
 #组件调整
 CONFIG_PACKAGE_autocore=y
 CONFIG_PACKAGE_automount=y
 CONFIG_PACKAGE_blkid=y
 CONFIG_PACKAGE_cfdisk=y
 CONFIG_PACKAGE_cgdisk=y
-CONFIG_PACKAGE_coremark=y
 CONFIG_PACKAGE_cpufreq=y
 CONFIG_PACKAGE_curl=y
 CONFIG_PACKAGE_dmesg=y
@@ -94,6 +175,9 @@ CONFIG_PACKAGE_iperf3=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_libimobiledevice=y
 CONFIG_PACKAGE_lsblk=y
+# eBPF 可观测性（#26）：包名是 bpftool-minimal / bpftool-full（无裸 bpftool 包）
+#   minimal = 仅 +libelf；full = 另加 +libbfd +libopcodes（体积大，本用途不需要）
+CONFIG_PACKAGE_bpftool-minimal=y
 CONFIG_PACKAGE_luci-base=y
 CONFIG_PACKAGE_luci-compat=y
 CONFIG_PACKAGE_luci-lib-base=y
@@ -112,3 +196,210 @@ CONFIG_PACKAGE_usb-modeswitch=y
 CONFIG_PACKAGE_usbmuxd=y
 CONFIG_PACKAGE_usbutils=y
 CONFIG_PACKAGE_xz-utils=y
+
+# =====================================================================
+# 基线瘦身（mydist）—— 2026-10-17
+#
+# 依据：已构建 x86 树的**真实根文件系统实测**（379 MB 未压缩）。
+# 结论：Docker 栈一项 = 243.7 MB = 64%，是唯一值得砍的大头；
+#       其余候选（iptables 0.1 MB / 诊断 0.4 MB / 驱动 ~8 MB）收益极小。
+#
+# 用户已确认的取舍（2026-10-16）：
+#   保留 x86 无线、保留全部 USB 网卡、保留全量网卡驱动、保留 WireGuard；
+#   USB 存储只留 U 盘基础；传统 iptables 砍掉。
+# =====================================================================
+
+# --- Docker 栈：家用路由不需要 ---
+CONFIG_PACKAGE_docker=n
+CONFIG_PACKAGE_dockerd=n
+CONFIG_PACKAGE_containerd=n
+CONFIG_PACKAGE_runc=n
+CONFIG_PACKAGE_tini=n
+CONFIG_PACKAGE_docker-compose=n
+CONFIG_PACKAGE_luci-app-dockerman=n
+CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn=n
+
+# --- UPnP：家用路由不需要 ---
+CONFIG_PACKAGE_miniupnpd-nftables=n
+CONFIG_PACKAGE_luci-app-upnp=n
+CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=n
+
+# --- 无意义 / 纯诊断 ---
+CONFIG_PACKAGE_coremark=n
+CONFIG_PACKAGE_shellsync=n
+CONFIG_PACKAGE_kmod-net-selftests=n
+CONFIG_PACKAGE_kmod-inet-diag=n
+CONFIG_PACKAGE_kmod-inet-mptcp-diag=n
+CONFIG_PACKAGE_kmod-netlink-diag=n
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=n
+CONFIG_PACKAGE_kmod-nf-ipvs=n
+
+# --- x86 核显 / DRM 栈：想砍，但砍不掉（如实记录）---
+#     最初以为写 CONFIG_PACKAGE_video-support=n 就行，实测失败：最终 .config 里
+#     video-support=m、i915-firmware-dmc=m、kmod-drm-i915=m，而且内核一路在编译
+#     drivers/gpu/drm/i915（这一大块明显拖慢内核构建）。
+#     根因和下面的文件系统完全一样，是同一类陷阱（详见本节末尾的通用结论）：
+#       target/linux/x86/Makefile:  DEFAULT_PACKAGES += video-support i915-firmware-dmc
+#       kmod-drm-i915 的 DEPENDS 里带 video-support，会把它反向 select 回来
+#       生成的 CONFIG_DEFAULT_video-support 是 **无 prompt** 的 bool
+#       => make defconfig 每次重算，.config 覆盖（含 `# ... is not set`）一律无效
+#     下面三条是**无效声明**，保留仅作记录。真要砍必须改 x86 的 DEFAULT_PACKAGES，
+#     本项目不允许在源码树里散改，所以接受现状（约 1~2 MB + 一段构建时间）。
+# CONFIG_PACKAGE_video-support=n     # 无效
+# CONFIG_PACKAGE_i915-firmware-dmc=n # 无效
+# CONFIG_PACKAGE_kmod-drm-i915=n     # 无效
+
+# --- USB 存储：**收窄失败，如实记录** -------------------------------------
+#     原始意图：只留 U 盘基础，砍掉 btrfs / ntfs3 / exfat / fuse，宣称省 5.6 MB。
+#     实测（Scripts/../cut-audit.sh）**这个意图不成立**，原因全在 select：
+#
+#       automount  DEPENDS +kmod-fs-exfat +ntfs3-mount      -> exfat, ntfs3
+#       ntfs3-mount DEPENDS +kmod-fs-ntfs3
+#       luci-app-partexp select PACKAGE_btrfs-progs         -> kmod-fs-btrfs
+#                        select PACKAGE_f2fs-tools
+#       x86 DEFAULT_PACKAGES 里直接有 kmod-fs-f2fs f2fs-tools mkf2fs e2fsprogs...
+#
+#     而 automount 与 luci-app-partexp 都是「保留」项（后者还要用来扩容 root），
+#     f2fs 更是被 x86 目标默认值直接钉死。所以 exfat / ntfs3 / btrfs / f2fs
+#     在保留这些功能的前提下**砍不掉**，写 =n 只会自欺欺人 —— Kconfig 的
+#     select 优先于 .config 里的 =n。
+#     结论：撤回「省 5.6 MB」的说法；真正省掉的只有 fuse 那一支。
+#     想把它们砍掉只有一个办法：同时砍掉 automount + luci-app-partexp，
+#     并且打补丁改 target/linux/x86/Makefile 的 DEFAULT_PACKAGES（本项目不允许）。
+#
+#     真正生效的只有这一条：fuse 没有任何消费者了（ntfs-3g / libfuse / davfs2
+#     都没被选中），所以 kmod-fuse 可以干净地消失。
+CONFIG_PACKAGE_kmod-fuse=n
+
+# --- 关于 x86 目标默认值的通用结论（踩过两次坑，写在这里）-----------------
+#     target/linux/x86/Makefile 的 DEFAULT_PACKAGES 会生成一堆 **无 prompt** 的
+#     CONFIG_DEFAULT_<pkg> / CONFIG_MODULE_DEFAULT_<pkg> 符号，当前 .config 里有
+#     61 个 CONFIG_DEFAULT_*=y。因为无 prompt，make defconfig 每次都会重算它们，
+#     .config 里的覆盖（包括 `# CONFIG_DEFAULT_x is not set`）**一律无效**。
+#     这意味着：x86 目标默认带的东西 —— i915-firmware-dmc、video-support、
+#     kmod-fs-f2fs、mkf2fs、f2fs-tools、e2fsprogs、losetup、grub2-bios-setup、
+#     autocore、cpufreq、automount、以及那一长串网卡驱动 —— 都**无法**从
+#     .config 里砍掉。要砍只能改 target/linux/x86/Makefile，本项目明确不做。
+#     所以下面这几条 =n 是**无效声明**，仅作为「我们试过」的记录保留，不要以为
+#     它们真的删掉了什么：
+# CONFIG_PACKAGE_kmod-fs-btrfs=n      # 无效：luci-app-partexp select
+# CONFIG_PACKAGE_kmod-fs-ntfs3=n      # 无效：automount -> ntfs3-mount select
+# CONFIG_PACKAGE_kmod-fs-exfat=n      # 无效：automount select
+# CONFIG_PACKAGE_kmod-fs-f2fs=n       # 无效：x86 DEFAULT_PACKAGES
+# CONFIG_PACKAGE_btrfs-progs=n        # 无效：luci-app-partexp select
+# CONFIG_PACKAGE_ntfs3-mount=n        # 无效：automount select
+# CONFIG_PACKAGE_f2fs-tools=n         # 无效：x86 DEFAULT_PACKAGES
+# CONFIG_PACKAGE_mkf2fs=n             # 无效：x86 DEFAULT_PACKAGES
+
+# --- full-cone NAT（硬性需求）：只走 fullconenat-sonic ---
+#     fullconenat-sonic 是个「标记包」：不分发代码，只通过
+#         KCONFIG:=CONFIG_NF_NAT_FULLCONE=y CONFIG_NF_CT_PROTO_UDPLITE=y ...
+#     打开内核里的 SONiC full-cone 补丁。它的 Makefile 里写死了
+#         SONIC_LEGACY_PACKAGES:=kmod-nft-fullcone kmod-ipt-fullconenat \
+#                               iptables-mod-fullconenat ip6tables-mod-fullconenat
+#         CONFLICTS:=$(SONIC_LEGACY_PACKAGES)
+#         EXTRA_DEPENDS:=... !$(pkg) (>=0) ...   # apk 不发 CONFLICTS，用依赖拒绝
+#     所以上游那份 CONFIG_PACKAGE_kmod-nft-fullcone=y 必须去掉，否则两条
+#     full-cone 实现互相冲突。已核实构建出的内核 .config：
+#         CONFIG_NF_NAT_FULLCONE=y        （net/netfilter/Kconfig:434 打过补丁）
+#     验证方法：Scripts/verify-packages.sh + 内核 config 里搜 FULLCONE。
+CONFIG_PACKAGE_kmod-nft-fullcone=n
+
+# --- USB 音频：路由器不需要声卡（上游默认带了 ALSA）---
+CONFIG_PACKAGE_kmod-sound-core=n
+CONFIG_PACKAGE_kmod-usb-audio=n
+CONFIG_PACKAGE_alsa-utils=n
+
+# --- 传统 iptables：fw4 用 nft，honk/einat 都不用 iptables ---
+#     重要发现（trim-proof 实测）：把本段整段删掉，最终选择集合**完全相同**，
+#     即 noipt−full = ∅ —— 这一整段是 no-op。
+#     原因：基线里的 iptables/libxtables/libiptext/libcap/libseccomp/kmod-ipt-*
+#     真正来源只有一条链：luci-app-dockerman -> docker/dockerd -> (libxtables,
+#     libcap, libseccomp, ca-certificates, ucode-mod-socket, ttyd)。
+#     Docker 段一砍，iptables 自然就没了；实测 iptables 全家只有 0.1 MB。
+#     所以本段保留的意义只是「双保险」：万一将来有人把 docker 加回来，
+#     也不会顺手把 iptables 全家带回数据面。若第三方脚本报错，删掉本段即可回退。
+CONFIG_PACKAGE_iptables-nft=n
+CONFIG_PACKAGE_ip6tables-nft=n
+CONFIG_PACKAGE_xtables-nft=n
+CONFIG_PACKAGE_iptables-mod-extra=n
+CONFIG_PACKAGE_kmod-iptables=n
+CONFIG_PACKAGE_kmod-ip6tables=n
+CONFIG_PACKAGE_kmod-ipt-core=n
+CONFIG_PACKAGE_kmod-ipt-extra=n
+CONFIG_PACKAGE_kmod-ipt-nat=n
+CONFIG_PACKAGE_kmod-ipt-nat6=n
+CONFIG_PACKAGE_kmod-ipt-physdev=n
+CONFIG_PACKAGE_kmod-ipt-conntrack=n
+CONFIG_PACKAGE_libiptext0=n
+CONFIG_PACKAGE_libiptext6-0=n
+CONFIG_PACKAGE_libiptext-nft0=n
+CONFIG_PACKAGE_libxtables12=n
+CONFIG_PACKAGE_kmod-nf-ipt=n
+CONFIG_PACKAGE_kmod-nf-ipt6=n
+
+# =====================================================================
+# 功能补全（mydist）—— 2026-10-17，由动态验证的 manifest 实测发现
+#
+# 依据：x86（391 包）与 ROCKCHIP（360 包）两版镜像的 manifest 逐条核对，
+#       并在构建树里确认了包定义确实存在（不是第三方 feed）。
+# =====================================================================
+
+# --- WireGuard：用户明确要求「保留」，但基线只有内核模块 ---
+#     实测两个 manifest 里都**只有** kmod-wireguard，没有 wireguard-tools，
+#     也没有 luci-proto-wireguard。也就是「内核能加载，但没有 wg 命令、
+#     LuCI 里也没有 WireGuard 协议可选」——等于保留了半个功能。
+#     两个包都在树内：
+#       package/network/utils/wireguard-tools
+#       feeds/luci/protocols/luci-proto-wireguard
+CONFIG_PACKAGE_wireguard-tools=y
+CONFIG_PACKAGE_luci-proto-wireguard=y
+
+# --- QoS CAKE（计划 #22）---
+#     package/kernel/linux/modules/netsupport.mk:829 定义
+#         KCONFIG:=CONFIG_NET_SCH_CAKE
+#     实测构建出的内核 .config 里 CONFIG_NET_SCH_CAKE **未开启**。
+#     计划里的 QoS 是「单个 TC 程序 + CAKE qdisc」，所以 CAKE 必须编进内核。
+#     这里加的是包名，真正生效的是它带出的内核选项。
+CONFIG_PACKAGE_kmod-sched-cake=y
+
+# --- einat-ebpf：锁定的 NAT 实现（全锥形必需）---
+#     包定义在 mydist/einat-ebpf（预编译二进制包，理由见 §13.14），
+#     DEPENDS 里的 @(x86_64||aarch64) 正好覆盖 x86 与 RK/IPQ60xx。
+#     本行把它装进镜像；服务**默认开启**（/etc/config/einat enabled='1'）。
+#     开启后它会给 fw4 发 procd data 把 masquerade 关掉，所以配套加了自证：
+#     einat.init 的 einat_verify 在把 masquerade-off 交给 fw4 之后盯着 WAN 的
+#     TCX link（bpftool link show，TCX 不出现在 tc filter show 里），超时没出现
+#     就 stop 掉服务、让 fw4 的 masquerade 回来。否则「eBPF NAT 没起来 +
+#     fw4 已被通知别做 NAT」= LAN 直接没有 NAT。
+#     注意 verify 里**故意不写 uci**：一次瞬时失败不该永久关掉数据面。
+#     要回退到 fw4 masquerade：uci set einat.config.enabled='0' && uci commit
+#     einat && /etc/init.d/einat stop && /etc/init.d/firewall reload
+CONFIG_PACKAGE_einat-ebpf=y
+
+# --- 内核软件 flowtable / nft offload：已按计划砍掉 ---
+#     原来是「计划明确 rejected，但砍不掉」：firewall4/Makefile:25 写死了
+#         +kmod-nft-core +kmod-nft-fib +kmod-nft-offload
+#     所以 .config 里写 =n 属于无效声明（包的 DEPENDS 会反 select 回来）。
+#     现在改法照 DRM 那条走 —— 在 Scripts/Handles.sh 里 sed 两个来源：
+#       1) firewall4 的 DEPENDS 去掉 +kmod-nft-offload
+#       2) include/target.mk 的 DEFAULT_PACKAGES 去掉 kmod-nft-offload
+#          （它同时也在默认包列表里，只删一个没用）
+#     再加上 Handles.sh 早先把 fw4 默认配置的 flow_offloading / flow_offloading_hw
+#     都改成了 0，这个模块就彻底没有使用者了。
+#     实际那一行写在上面 kmod-nft-* 那一堆里（# CONFIG_PACKAGE_kmod-nft-offload
+#     is not set）；verify-packages.sh 里它在禁用清单。
+#     （旧注释里说的「这里不写」已经过时了 —— 现在两处来源都摘了，写得进去。）
+
+# ---- LuCI: the mydist console, and the stock pages that no longer apply -----
+# firewall4/nft is not the datapath (einat + router-acl are), dnsmasq does not
+# resolve (SmartDNS does), smartdns's own UI edits a config we generate, and
+# fullconenat-sonic is a conntrack NAT that einat replaces.
+CONFIG_PACKAGE_luci-app-mydist=y
+# CONFIG_PACKAGE_luci-app-smartdns is not set
+# CONFIG_PACKAGE_luci-app-fullconenat-sonic is not set
+# CONFIG_PACKAGE_luci-app-firewall is not set
+
+# luci-front: the public HTTP(S) side of LuCI (built on pingora). uhttpd keeps the
+# Lua CGI and the ubus bridge, on loopback only. See mydist/luci-front/.
+CONFIG_PACKAGE_luci-front=y

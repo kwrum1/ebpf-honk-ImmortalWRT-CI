@@ -1,0 +1,37 @@
+{
+	"admin/network/smartdns": {
+		"title": "DNS",
+		"order": 70,
+		"action": {
+			"type": "view",
+			"path": "smartdns/smartdns"
+		},
+		"depends": {
+			"acl": [ "luci-app-smartdns" ],
+			"uci": { "smartdns": true }
+		}
+	},
+	"admin/network/proxy": {
+		"title": "\u4EE3\u7406",
+		"order": 71,
+		"action": {
+			"type": "view",
+			"path": "honk/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-honk" ],
+			"uci": { "honk": true }
+		}
+	},
+	"admin/network/qos": {
+		"title": "QoS",
+		"order": 72,
+		"action": {
+			"type": "view",
+			"path": "mydist/qos"
+		},
+		"depends": {
+			"uci": { "router_qos": true }
+		}
+	}
+}

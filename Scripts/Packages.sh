@@ -1,6 +1,28 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 VIKINGYFY
+#
+# =============================================================================
+#  第三方包引入 —— 单基线裁剪版
+# =============================================================================
+#  原脚本从 ~25 个第三方仓库拉插件。实测（对照 ref-X86.manifest / ref-ROCKCHIP.manifest）
+#  真正进入固件的只有 5 个：
+#
+#      aurora           -> luci-theme-aurora / luci-i18n-aurora-*      （默认主题）
+#      aurora-config    -> luci-app-aurora-config                       （主题配置页）
+#      honk             -> honk / luci-app-honk / doona                 （透明代理，本项目的核心）
+#      v2ray-geodata    -> v2ray-geoip / v2ray-geosite                  （honk 需要的地域数据）
+#      partexp          -> luci-app-partexp                             （分区扩容，x86 装机要用）
+#
+#  其余 homeproxy/passwall/openclash/momo/nikki/tailscale/ddns-go/diskman/
+#  easytier/mosdns/netspeedtest/netwizard/openlist/qbittorrent/qmodem/
+#  quickfile/timecontrol/viking/vnt/argon/kucat 在基线的软件清单里**全部不存在**，
+#  删除后不影响任何已选中的包。保留它们只会让每次 CI 多克隆十几 MB 的垃圾、
+#  并在 make defconfig 时引入无用的 Kconfig 符号。
+#
+#  如果以后要重新引入某个插件，把对应的 UPDATE_PACKAGE 行加回来，并确认它在
+#  Scripts/verify-packages.sh 的允许清单里。
+# =============================================================================
 
 #安装和更新软件包
 UPDATE_PACKAGE() {
@@ -47,40 +69,67 @@ UPDATE_PACKAGE() {
 # UPDATE_PACKAGE "open-app-filter" "destan19/OpenAppFilter" "master" "" "luci-app-appfilter oaf" 这样会把原有的open-app-filter，luci-app-appfilter，oaf相关组件删除，不会出现coremark错误。
 
 # UPDATE_PACKAGE "包名" "项目地址" "项目分支" "pkg/name，可选，pkg为从大杂烩中单独提取包名插件；name为重命名为包名"
-UPDATE_PACKAGE "argon" "sbwml/luci-theme-argon" "openwrt-25.12"
+
+# 默认主题：aurora（Settings.sh 里的 WRT_THEME=aurora 要与之对应）
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
-UPDATE_PACKAGE "kucat" "sirpdboy/luci-theme-kucat" "master"
-UPDATE_PACKAGE "kucat-config" "sirpdboy/luci-app-kucat-config" "master"
 
-UPDATE_PACKAGE "homeproxy" "VIKINGYFY/homeproxy" "main"
-UPDATE_PACKAGE "momo" "nikkinikki-org/OpenWrt-momo" "main"
-UPDATE_PACKAGE "nikki" "nikkinikki-org/OpenWrt-nikki" "main"
-UPDATE_PACKAGE "openclash" "vernesong/OpenClash" "dev" "pkg"
-UPDATE_PACKAGE "passwall" "Openwrt-Passwall/openwrt-passwall" "main" "pkg"
-UPDATE_PACKAGE "passwall2" "Openwrt-Passwall/openwrt-passwall2" "main" "pkg"
-
-UPDATE_PACKAGE "luci-app-tailscale" "asvow/luci-app-tailscale" "main"
-
-UPDATE_PACKAGE "ddns-go" "sirpdboy/luci-app-ddns-go" "main"
-UPDATE_PACKAGE "diskman" "sbwml/luci-app-diskman" "main"
-UPDATE_PACKAGE "diskmanager" "4IceG/luci-app-mini-diskmanager" "main"
-UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "main"
-UPDATE_PACKAGE "mosdns" "sbwml/luci-app-mosdns" "v5" "" "v2dat"
-UPDATE_PACKAGE "netspeedtest" "sirpdboy/netspeedtest" "main" "" "homebox ookla-speedtest"
-UPDATE_PACKAGE "netwizard" "sirpdboy/luci-app-netwizard" "main"
-UPDATE_PACKAGE "openlist2" "sbwml/luci-app-openlist2" "main"
-UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
-UPDATE_PACKAGE "qbittorrent" "sbwml/luci-app-qbittorrent" "master" "" "qt6base qt6tools rblibtorrent"
-UPDATE_PACKAGE "qmodem" "FUjr/QModem" "main"
-UPDATE_PACKAGE "quickfile" "sbwml/luci-app-quickfile" "main"
-UPDATE_PACKAGE "timecontrol" "sirpdboy/luci-app-timecontrol" "main"
-UPDATE_PACKAGE "viking" "VIKINGYFY/packages" "main" "" "gecoosac luci-app-timewol luci-app-wolplus"
-UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
 # Honk 核心 + LuCI/Doona 管理界面
-UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg"
+# honk: X86/ROCKCHIP use the mydist branch (DNS stays in dnsmasq -> SmartDNS,
+# honk resolves through 127.0.0.1:6053); IPQ and the rest keep mainline honk.
+case "$WRT_CONFIG" in
+	X86|ROCKCHIP) UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "mydist" "pkg" ;;
+	*)            UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg" ;;
+esac
 # Honk 所需的 GeoIP / GeoSite 数据包
 UPDATE_PACKAGE "v2ray-geodata" "kenzok8/wall" "main" "pkg" "v2ray-geoip v2ray-geosite"
+
+# x86 装机用：把剩余空间扩到根分区
+UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
+
+# =============================================================================
+# 本项目自己的包：mydist/（TC ingress eBPF 快路径 + eBPF full-cone NAT）
+# =============================================================================
+# mydist/ 是**唯一**的分发逻辑归属地，所以它必须是「仓库内一个目录」，而不是
+# 散落在 upstream 文件里的改动。它不属于任何第三方仓库，所以走本地拷贝而不是
+# git clone —— 落地方式与 UPDATE_PACKAGE 一致（都进构建树的 package/）。
+#
+# 整个 mydist/ 一起拷，不逐个列举：以后往里加包（einat-ebpf 已经在了）不需要
+# 再改这个脚本，符合「所有分发逻辑一个目录」的约定。
+#
+# 找不到就**直接失败**。静默产出一个「没有数据面」的固件是最糟的结果：
+# 镜像照样能启动、能上网，只有透明代理的快路径悄悄没了。verify-packages.sh
+# 里也登记了 dpd-fastpath 作为第二道闸。
+MYDIST_ROOT=""
+for _c in "$GITHUB_WORKSPACE/wrt/mydist" \
+          "$GITHUB_WORKSPACE/mydist" \
+          "$GITHUB_WORKSPACE/wrt/package/mydist" \
+          "$(pwd)/mydist"; do
+	[ -d "$_c/router-dataplane" ] && { MYDIST_ROOT="$_c"; break; }
+done
+
+if [ -n "$MYDIST_ROOT" ]; then
+	echo " "
+	# 第三个候选位置就是 ./mydist 本身（上一次构建留下的），此时不能先 rm
+	if [ "$(readlink -f "$MYDIST_ROOT" 2>/dev/null)" = "$(readlink -f ./mydist 2>/dev/null)" ]; then
+		echo "mydist already in place at $(pwd)/mydist"
+	else
+		rm -rf ./mydist
+		mkdir -p ./mydist
+		cp -rf "$MYDIST_ROOT"/. ./mydist/
+	fi
+	find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
+	echo "mydist installed into package/ (from $MYDIST_ROOT):"
+	ls ./mydist | sed 's/^/  /'
+else
+	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+	echo "!! FATAL: mydist/router-dataplane not found."
+	echo "!! 期望位置: \$GITHUB_WORKSPACE/mydist/router-dataplane"
+	echo "!! 没有它，固件里不会有 eBPF 数据面。中止构建。"
+	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+	exit 1
+fi
 
 #更新软件包版本
 UPDATE_VERSION() {
@@ -123,8 +172,11 @@ UPDATE_VERSION() {
 	done
 }
 
-#UPDATE_VERSION "软件包名" "测试版，true，可选，默认为否"
-UPDATE_VERSION "sing-box"
+# 注意：原先这里有一句 UPDATE_VERSION "sing-box"。
+# 基线软件清单里**没有任何 sing-box 包**（对照 ref-X86.manifest / ref-ROCKCHIP.manifest），
+# 所以它每次 CI 都会：访问 GitHub API 取 release -> 下载整包 -> sha256 -> 改 Makefile，
+# 全程没有任何效果，纯属浪费时间和网络。已删除。
+# 如果需要它，请连同对应的 sing-box 插件一起加回来，并在 verify-packages.sh 里登记。
 
 #引入私有扩展脚本
 if [ -f "$GITHUB_WORKSPACE/Scripts/PRIVATE.sh" ]; then

@@ -1,0 +1,107 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# mydist-posture -- enforce this firmware's shipped posture after the network and
+# firewall services have settled.
+#
+# Why a service and not only an uci-default: /etc/uci-defaults runs at S10, and
+# router-role (S19) rewrites the firewall zones later in the same boot, which is
+# exactly how the WAN zone ended up back at forward=REJECT on the first try.
+# START=26 is after network (20) and firewall (19), so what we set here survives.
+#
+# USE_PROCD=1 is required for /etc/rc.common to call start_service() at all when
+# the script is started as a service.
+#
+# Everything below is idempotent: it writes only when the value differs, and only
+# reloads the service that actually changed.
+
+START=26
+STOP=10
+USE_PROCD=1
+
+set_uci() {
+	# set_uci <config> <section> <option> <value>; returns 0 when it changed
+	[ "$(uci -q get "$1.$2.$3")" = "$4" ] && return 1
+	uci -q set "$1.$2.$3=$4" || return 1
+	echo "  set $1.$2.$3=$4"
+	return 0
+}
+
+wan_zone() {
+	uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p" | head -1
+}
+
+start_service() {
+	local z changed=0
+
+	# --- firewall posture: open by default, full-cone IPv4 -------------------
+	z=$(wan_zone)
+	if [ -n "$z" ]; then
+		set_uci firewall "$z" forward ACCEPT && changed=1
+	fi
+	set_uci firewall '@defaults[0]' fullcone 1 && changed=1
+
+	if ! uci -q get firewall.mydist999 >/dev/null 2>&1; then
+		uci -q set firewall.mydist999=rule
+		uci -q set firewall.mydist999.name=999
+		uci -q set firewall.mydist999.src=wan
+		uci -q set firewall.mydist999.dest=lan
+		uci -q set firewall.mydist999.target=REJECT
+		echo "  created firewall.mydist999"
+		changed=1
+	fi
+	# rule 999 is the shipped default posture ("no unsolicited inbound") and is
+	# not exposed in the UI: it stays enabled so port rows are the only way in.
+	if [ "$(uci -q get firewall.mydist999.enabled)" != "1" ]; then
+		uci -q set firewall.mydist999.enabled=1
+		echo "  firewall.mydist999 enabled"
+		changed=1
+	fi
+	if [ "$changed" = 1 ]; then
+		uci -q commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+
+	# --- DNS: SmartDNS is the only resolver ---------------------------------
+	# dnsmasq is not needed for DHCP (odhcpd owns it) and its DNS role is what
+	# the owner asked to remove, so it is stopped and disabled outright.
+	set_uci smartdns '@smartdns[0]' port 53 && changed=1
+	# dnsmasq keeps no DNS role at all: port 0 means "listen nowhere" even if
+	# procd respawns the process. odhcpd is the DHCP authority, so nothing else
+	# needs dnsmasq.
+	set_uci dhcp '@dnsmasq[0]' port 0 && changed=1
+	set_uci dhcp '@dnsmasq[0]' noresolv 1 && changed=1
+	if [ "$changed" = 1 ]; then
+		uci -q commit smartdns
+		uci -q commit dhcp
+		/etc/init.d/dnsmasq stop >/dev/null 2>&1
+		ubus call service delete '{"name":"dnsmasq"}' >/dev/null 2>&1
+		killall dnsmasq >/dev/null 2>&1
+		/etc/init.d/smartdns restart >/dev/null 2>&1
+	fi
+	if [ -x /etc/init.d/dnsmasq ]; then
+		/etc/init.d/dnsmasq stop >/dev/null 2>&1
+		/etc/init.d/dnsmasq disable >/dev/null 2>&1
+		# procd respawns a stopped instance unless it is removed outright
+		if pgrep -f /usr/sbin/dnsmasq >/dev/null 2>&1; then
+			ubus call service delete '{"name":"dnsmasq"}' >/dev/null 2>&1
+			killall dnsmasq >/dev/null 2>&1
+		fi
+	fi
+
+	# --- DHCP: odhcpd is the authority, and nothing may have disabled it -------
+	# (router-role used to leave dhcp.lan.ignore=1 here; it is disabled in the lab
+	# image now, but keep this idempotent guard so DHCPv4 is never silently off.)
+	set_uci dhcp lan ignore 0 && changed=1
+	set_uci dhcp lan master 1 && changed=1
+	if [ "$changed" = 1 ]; then
+		uci -q commit dhcp
+		/etc/init.d/odhcpd restart >/dev/null 2>&1
+	fi
+
+	logger -t mydist-posture "posture enforced (wan forward, fullcone, rule 999 off, SmartDNS only)"
+}
+
+stop_service() {
+	:
+}

@@ -1,0 +1,54 @@
+#!/bin/sh
+# 99-luci-mydist-trim -- one-time defaults for this firmware's UI and posture.
+#
+#  1) No "Services" menu: SmartDNS and honk are network tools here and are
+#     re-registered under Network by zz-mydist-network.json.
+#  2) Firewall posture: open by default. The WAN zone forwards, IPv4 is full-cone
+#     (fullcone + masq), and the catch-all "rule 999" (external source ->
+#     internal destination, v4+v6) exists but ships disabled. Port control is
+#     done from Network -> 防火墙, which writes stock fw4 redirects.
+#  3) DNS: SmartDNS owns :53 and is the only resolver. dnsmasq keeps the DHCP
+#     lease names only, on loopback:6053, and SmartDNS forwards *only* the local
+#     domain suffix to it.
+set -u
+
+rm -f /usr/share/luci/menu.d/luci-app-firewall.json 2>/dev/null
+rm -f /usr/share/luci/menu.d/luci-app-smartdns.json 2>/dev/null
+rm -f /usr/share/luci/menu.d/luci-app-honk.json 2>/dev/null
+
+# --- firewall posture -------------------------------------------------------
+uci -q set firewall.@zone[1].forward='ACCEPT'
+uci -q set firewall.@defaults[0].fullcone='1'
+if ! uci -q get firewall.mydist999 >/dev/null 2>&1; then
+	uci -q set firewall.mydist999='rule'
+	uci -q set firewall.mydist999.name='999'
+	uci -q set firewall.mydist999.src='wan'
+	uci -q set firewall.mydist999.dest='lan'
+	uci -q set firewall.mydist999.target='REJECT'
+	uci -q set firewall.mydist999.enabled='0'
+fi
+uci -q commit firewall
+
+# --- DNS ownership ----------------------------------------------------------
+uci -q set smartdns.@smartdns[0].port='53'
+uci -q set dhcp.@dnsmasq[0].port='6053'
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server
+uci -q commit dhcp
+# local DHCP names stay resolvable: only that suffix is handed to dnsmasq
+if ! uci -q get smartdns.@smartdns[0] >/dev/null 2>&1; then
+	logger -t mydist "smartdns section missing; DNS ownership left alone"
+else
+	case "$(uci -q get smartdns.@smartdns[0].server)" in
+	*'/lan/127.0.0.1:6053'*) ;;
+	*) uci -q add_list smartdns.@smartdns[0].server='/lan/127.0.0.1:6053' ;;
+	esac
+	uci -q commit smartdns
+fi
+
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+/etc/init.d/smartdns restart >/dev/null 2>&1
+/etc/init.d/firewall reload >/dev/null 2>&1
+
+logger -t mydist "luci: firewall posture open + rule 999 present/off; SmartDNS owns :53"
+exit 0
