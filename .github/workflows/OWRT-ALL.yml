@@ -39,10 +39,10 @@ jobs:
           # X86 / ROCKCHIP: the mydist source fork (eBPF datapath + honk handover)
           - CONFIG: ROCKCHIP
             SOURCE: kwrum1/immortalwrt
-            BRANCH: owrt
+            BRANCH: mydist
           - CONFIG: X86
             SOURCE: kwrum1/immortalwrt
-            BRANCH: owrt
+            BRANCH: mydist
           # IPQ60XX stays on the upstream source, unchanged
           - CONFIG: IPQ60XX
             SOURCE: VIKINGYFY/immortalwrt
