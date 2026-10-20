@@ -17,7 +17,18 @@ Three files, all maintained by `/usr/libexec/router-dns-sync`, which runs at
 |---|---|
 | `/var/etc/router-dns/resolv.upstream` | the resolvers netifd actually learned (DHCP option 6), with loopback and **every address this box owns filtered out**. smartdns reads it as `resolv-file`. |
 | `/var/etc/router-dns/hosts.lan` | the router's own name plus the names odhcpd publishes, in both `name` and `name.lan` form. smartdns reads it as `hosts-file`. |
+| `/var/etc/router-dns/hosts.lan.conf` | the same names as static `address /name/ip` rules, rendered into a file smartdns includes with `conf-file` (`smartdns.@smartdns[0].conf_files`). **This is what actually answers.** |
 | `/tmp/resolv.conf` | `nameserver 127.0.0.1` + `search lan`. `/etc/resolv.conf` is a symlink to it, so the router resolves through this box like a LAN client. |
+
+The hosts *file* alone is not enough on smartdns 48.4: it turns a hosts-file
+entry into a cache record with a 120 s TTL and, when that expires, asks
+upstream instead of re-reading the file. Measured 2026-10-20 on the lab VM:
+`OWRT.lan` answered for the first ~120 s after every smartdns start, then went
+NXDOMAIN for good while the file, its mtime and the smartdns pid were all
+unchanged (the upstream answers NXDOMAIN for `.lan`, and that gets negatively
+cached too). An `address` rule is consulted on every query and never
+forwarded, which is why the rules are the authoritative copy and the hosts
+file is kept only for tools that read it.
 
 Why: `resolv-file` defaults to netifd's own `/tmp/resolv.conf.d/resolv.conf.auto`,
 i.e. the nameservers from the WAN lease. A lease that points at the router

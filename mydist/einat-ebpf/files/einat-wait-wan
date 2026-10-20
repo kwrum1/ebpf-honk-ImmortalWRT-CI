@@ -101,8 +101,28 @@ wan_dev() {
 }
 
 i=0
+# procd stops an instance by signalling it and then removing its cgroup. A
+# bare `sleep "$IV"` is a separate child: when TERM reaches the shell, the
+# sleep is still in the cgroup and procd warns
+#
+#   failed to remove busy cgroup of einat::wait-wan
+#
+# on every stop/reload. Run the sleep as a child we can reap ourselves and take
+# it down from the TERM trap, so the cgroup is empty by the time the shell exits.
+EINAT_WAIT_TERM=0
+EINAT_WAIT_SLEEP=
+einat_wait_stop() {
+	EINAT_WAIT_TERM=1
+	[ -n "$EINAT_WAIT_SLEEP" ] && kill "$EINAT_WAIT_SLEEP" 2>/dev/null
+}
+trap einat_wait_stop TERM INT
+
 while [ "$i" -lt "$TRIES" ]; do
-	sleep "$IV"
+	sleep "$IV" &
+	EINAT_WAIT_SLEEP=$!
+	wait "$EINAT_WAIT_SLEEP" 2>/dev/null
+	EINAT_WAIT_SLEEP=
+	[ "$EINAT_WAIT_TERM" = 1 ] && exit 0
 	i=$((i + 1))
 	dev="$(wan_dev)"
 	if [ -n "$dev" ]; then

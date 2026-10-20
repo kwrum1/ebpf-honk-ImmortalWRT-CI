@@ -105,7 +105,28 @@ ifup|ifupdate|add|update)
 		dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE not up yet; waiting for it"
 		dpd_wait_for_dev "$DEVICE" &
 	else
-		dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE attach FAILED"
+		# Also not necessarily a failure: the lan hotplug fires before
+		# dpd_fastpath.init has loaded the program, and dpdctl then fails
+		# for a moment. "attach FAILED" in that window was misleading --
+		# the filter appears a second later and nothing is broken. Retry
+		# briefly and describe the race honestly if it still does not
+		# attach; the init and the next ifup are the real retries.
+		tries=0
+		attached=0
+		while [ "$tries" -lt 3 ]; do
+			sleep 1
+			tries=$((tries + 1))
+			if dpd_attach_if "$DEVICE"; then
+				attached=1
+				break
+			fi
+		done
+		if [ "$attached" = 1 ]; then
+			dpd_push_config
+			dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE attached after ${tries}s (racing the init)"
+		else
+			dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE attach deferred (program not ready); the init and the next ifup retry"
+		fi
 	fi
 	;;
 ifdown|remove)
