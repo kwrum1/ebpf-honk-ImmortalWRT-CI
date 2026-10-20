@@ -99,7 +99,7 @@ start_service() {
 		/etc/init.d/odhcpd restart >/dev/null 2>&1
 	fi
 
-	logger -t mydist-posture "posture enforced (wan forward, fullcone, rule 999 off, SmartDNS only)"
+	logger -t mydist-posture "posture enforced (wan forward, fullcone, rule 999 on, SmartDNS only)"
 }
 
 stop_service() {

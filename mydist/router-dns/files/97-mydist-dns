@@ -1,15 +1,14 @@
 #!/bin/sh
-# mydist router-dns: put smartdns on 6053 and stop it from touching
-# /etc/config/dhcp. Runs once, on the first boot after flashing.
+# mydist router-dns: SmartDNS is the only resolver (port 53); dnsmasq keeps no
+# DNS role at all. Runs once, on the first boot after flashing.
 #
-# The dnsmasq half of this lives in /etc/init.d/router-dns, which patches
-# no-resolv + server=127.0.0.1#6053 into /etc/dnsmasq.conf at every boot (that
-# file is owned by dnsmasq-full, so it cannot be shipped by this package). The
-# two have to agree about the port, so 6053 is written down here and repeated
-# there; grep for 6053 in both before changing it.
+# This is the same state mydist-posture enforces at every boot (S26): smartdns
+# 53, dnsmasq port 0. The uci-defaults just makes the first boot *before* S26
+# consistent, so a boot that never reaches S26 cannot leave dnsmasq holding :53.
 #
-# Nothing here runs at every boot: /etc/uci-defaults is executed by
-# /etc/init.d/boot (before any START=1x service) and then the file is removed.
+# /etc/init.d/router-dns still patches /etc/dnsmasq.conf with a forward to
+# 127.0.0.1:6053; that file is simply unused while dnsmasq is off. Do not "fix"
+# it by moving smartdns back to 6053 -- port 53 is the shipped design.
 
 CONF=/etc/config/smartdns
 
@@ -27,15 +26,19 @@ if ! uci -q get smartdns.@smartdns[0].enabled >/dev/null 2>&1; then
 fi
 
 uci -q set smartdns.@smartdns[0].enabled='1'
-# 6053, not 53: dnsmasq keeps :53 so it can still serve /etc/hosts, local=/lan/
-# and the names odhcpd publishes in /tmp/hosts/odhcpd.hosts.lan. See the
-# Makefile for why that is preferred over letting smartdns take :53.
-uci -q set smartdns.@smartdns[0].port='6053'
+# 53: smartdns is the only resolver. dnsmasq is not a DNS front end here --
+# odhcpd owns DHCP and the LAN names are not needed by the shipped UI.
+uci -q set smartdns.@smartdns[0].port='53'
 # Load-bearing. Left at its default of 1, smartdns's own init rewrites
-# /etc/config/dhcp (server/noresolv/rebind_protection/domainneeded, or port and
-# dhcp_option in the port-53 mode). This distribution does not let a package
-# rewrite the base config, so the dnsmasq side is done in /etc/dnsmasq.conf.
+# /etc/config/dhcp. This distribution does not let a package rewrite the base
+# config, so smartdns stays off the dhcp config and we set dnsmasq ourselves.
 uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
+
+# dnsmasq keeps no DNS role: port 0 means "listen nowhere" even if procd
+# respawns it (mydist-posture also stops and disables it at S26).
+uci -q set dhcp.@dnsmasq[0].port='0'
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+uci -q commit dhcp
 
 # Upstreams, only when none are configured yet. These are DNS-over-TLS, not
 # plain UDP, and that is not a preference -- it is the only transport measured to
@@ -96,6 +99,6 @@ uci -q commit smartdns
 # /etc/init.d/router-dns patches the dnsmasq forward at every boot (START=18).
 /etc/init.d/router-dns enable >/dev/null 2>&1
 
-log "smartdns enabled on 127.0.0.1:6053; dnsmasq forwards to it via /etc/dnsmasq.conf"
+log "smartdns enabled on 127.0.0.1:53; dnsmasq keeps no DNS role (port 0)"
 
 exit 0

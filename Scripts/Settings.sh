@@ -46,6 +46,10 @@ EOF
 
 function set_kernel_size() {
 
+  # 只有 qualcommax 有这些 image/*.mk；x86/rockchip 上直接跳过，避免无谓的
+  # sed 报错（glob 不展开时 sed 会拿到字面量路径）。
+  [ -d target/linux/qualcommax/image ] || return 0
+
   for file in target/linux/qualcommax/image/*.mk; do
     sed -i 's/KERNEL_SIZE := [0-9]*k/KERNEL_SIZE := 12288k/g' "$file"
   done
@@ -60,14 +64,13 @@ function generate_config() {
 
   config_file=".config"
 
-  cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
-      "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
-
-  local target=$(echo "$WRT_ARCH" | cut -d'_' -f2)
-
-  # 删除 WIFI
-  if [[ "$WRT_CONFIG" == *"NOWIFI"* ]]; then
-    remove_wifi "$target"
+  # 与 WRT-CORE 的 "Custom Settings" 保持一致：TEST 配置只吃自己那份，
+  # 不能再把 GENERAL 拼进去（否则 WRT-TEST 的“只输出配置”语义会被覆盖）。
+  if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
+    cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" > "$config_file"
+  else
+    cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
+        "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
   fi
 
   # skb recycler
@@ -78,6 +81,13 @@ function generate_config() {
 
   # kernel 6.18 perf config
   pin_arm_perf_kernel_config
+
+  # luci-front 是 x86_64 预编译前端（PKGARCH:=x86_64）。其它目标显式关掉：
+  # 不写这一行 defconfig 只会报 “not available”，而且容易误以为 RK/MTK/IPQ
+  # 也带了这个 pingora 前端。
+  if [ "${WRT_TARGET}" != "x86" ]; then
+    echo "# CONFIG_PACKAGE_luci-front is not set" >> "$config_file"
+  fi
 
 }
 
