@@ -166,12 +166,11 @@ jobs:
         run: |
           cd ./wrt/
 
-          if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
-          else
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL.txt >> .config
-          fi
-
+          # .config 由 Settings.sh 统一生成：
+          #   X86 / ROCKCHIP -> Config/GENERAL.txt（mydist 数据面）
+          #   其它目标        -> Config/GENERAL-STOCK.txt（原版逻辑）
+          #   *TEST*         -> 只用 Config/<TEST>.txt
+          # 这里不再自己 cat，避免和 Settings.sh 互相覆盖。
           $GITHUB_WORKSPACE/Scripts/Settings.sh
 
           make defconfig -j$(nproc) && make clean -j$(nproc)

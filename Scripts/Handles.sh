@@ -75,6 +75,14 @@ if [ -f "$RUST_FILE" ]; then
 fi
 
 #=============================================================================
+# 以下全部是 mydist 专属修改：只对 X86 / ROCKCHIP 生效
+#=============================================================================
+# IPQ / MTK 走原版逻辑（NSS + 原版 honk + 原版 config）：GPU 裁剪、flow offload、
+# nft-offload、odhcpd 接管、dnsmasq ignore、honk NFQUEUE 都是 mydist 数据面的配套，
+# 不适用于它们。
+if [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
+
+#=============================================================================
 # 裁剪 x86 的 GPU / DRM 栈
 #=============================================================================
 # 背景（实测，见 工作计划.md §13.1）：
@@ -432,6 +440,8 @@ if [ -d "$HONK_DIR" ]; then
 else
 	echo "!! 找不到 $HONK_DIR（Packages.sh 应该先把它 clone 下来）" >&2
 fi
+
+fi  # WRT_CONFIG = X86 / ROCKCHIP
 
 echo " "
 

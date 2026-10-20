@@ -154,6 +154,10 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # 找不到就**直接失败**。静默产出一个「没有数据面」的固件是最糟的结果：
 # 镜像照样能启动、能上网，只有透明代理的快路径悄悄没了。verify-packages.sh
 # 里也登记了 dpd-fastpath 作为第二道闸。
+# mydist 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
+# 不拷贝、也不启用 einat/dpd/router-* 这一套；它们的 GENERAL 用的是原版清单。
+case "$WRT_CONFIG" in
+X86|ROCKCHIP)
 MYDIST_ROOT=""
 for _c in "$GITHUB_WORKSPACE/wrt/mydist" \
           "$GITHUB_WORKSPACE/mydist" \
@@ -184,6 +188,11 @@ else
 	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 	exit 1
 fi
+	;;
+*)
+	echo "mydist: $WRT_CONFIG uses the original logic, datapath packages skipped"
+	;;
+esac
 
 #更新软件包版本
 UPDATE_VERSION() {

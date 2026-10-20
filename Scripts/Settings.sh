@@ -64,13 +64,23 @@ function generate_config() {
 
   config_file=".config"
 
-  # 与 WRT-CORE 的 "Custom Settings" 保持一致：TEST 配置只吃自己那份，
-  # 不能再把 GENERAL 拼进去（否则 WRT-TEST 的“只输出配置”语义会被覆盖）。
+  # 配置来源按目标分开：
+  #   X86 / ROCKCHIP -> GENERAL.txt        （mydist 数据面 + 魔改 UI/DNS）
+  #   其它           -> GENERAL-STOCK.txt  （原版逻辑：NSS、原版 honk、原版包集）
+  # TEST 只吃自己那份，不拼 GENERAL。
   if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" > "$config_file"
-  else
+  elif [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
+    # luci-front 是 x86_64 预编译前端（PKGARCH:=x86_64）；RK 上没有它，
+    # 显式关掉，避免 defconfig 打 “not available” 警告。
+    if [ "${WRT_CONFIG}" = "ROCKCHIP" ]; then
+      echo "# CONFIG_PACKAGE_luci-front is not set" >> "$config_file"
+    fi
+  else
+    cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
+        "$GITHUB_WORKSPACE/Config/GENERAL-STOCK.txt" > "$config_file"
   fi
 
   # skb recycler
@@ -81,13 +91,6 @@ function generate_config() {
 
   # kernel 6.18 perf config
   pin_arm_perf_kernel_config
-
-  # luci-front 是 x86_64 预编译前端（PKGARCH:=x86_64）。其它目标显式关掉：
-  # 不写这一行 defconfig 只会报 “not available”，而且容易误以为 RK/MTK/IPQ
-  # 也带了这个 pingora 前端。
-  if [ "${WRT_TARGET}" != "x86" ]; then
-    echo "# CONFIG_PACKAGE_luci-front is not set" >> "$config_file"
-  fi
 
 }
 
