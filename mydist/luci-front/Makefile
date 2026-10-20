@@ -25,8 +25,7 @@ define Package/luci-front
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
   TITLE:=LuCI front end (pingora): TLS/HTTP2 + static, dynamic proxied to uhttpd
-  DEPENDS:=+luci-base +uhttpd
-  PKGARCH:=x86_64
+  DEPENDS:=@(x86_64||aarch64) +luci-base +uhttpd
 endef
 
 define Package/luci-front/description
@@ -50,9 +49,17 @@ endef
 RSTRIP:=:
 STRIP:=:
 
+# One prebuilt static musl binary per supported arch. `ARCH` is the OpenWrt CPU
+# arch (x86_64 / aarch64); anything else is excluded by DEPENDS above.
+ifeq ($(ARCH),aarch64)
+  LUCI_FRONT_BIN:=./files/luci-front-aarch64
+else
+  LUCI_FRONT_BIN:=./files/luci-front
+endif
+
 define Package/luci-front/install
 	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_BIN) ./files/luci-front $(1)/usr/sbin/luci-front
+	$(INSTALL_BIN) $(LUCI_FRONT_BIN) $(1)/usr/sbin/luci-front
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/luci_front.init $(1)/etc/init.d/luci-front
 	$(INSTALL_DIR) $(1)/etc/config

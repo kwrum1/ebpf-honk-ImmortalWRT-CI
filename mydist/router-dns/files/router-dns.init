@@ -61,6 +61,12 @@ del_block() {
 }
 
 start() {
+	# Upstreams, /etc/resolv.conf and the local-name hosts file, all derived from
+	# what netifd currently knows. Runs before smartdns (S19) builds its config;
+	# /etc/hotplug.d/iface/89-router-dns-sync repeats it after every ifup, which
+	# is when the WAN lease's resolvers actually appear.
+	[ -x /usr/libexec/router-dns-sync ] && /usr/libexec/router-dns-sync
+
 	if ! block_present; then
 		if add_block; then
 			log "added the smartdns forward to $CONF"

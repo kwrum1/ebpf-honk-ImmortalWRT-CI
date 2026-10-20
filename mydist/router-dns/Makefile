@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist / router-dns : smartdns becomes the resolver, dnsmasq stays the front.
+# mydist / router-dns : smartdns is the only resolver (it owns :53).
+#
+# Round 10 (2026-10-20): the upstream/name handling moved into
+# /usr/libexec/router-dns-sync (see that file and README.md). In short: smartdns
+# reads its upstreams from a filtered copy of what netifd learned (never our own
+# addresses), /etc/resolv.conf is pointed at 127.0.0.1, and the router's own name
+# plus odhcpd's LAN names are rendered into a hosts file smartdns reads.
+# Everything below about dnsmasq-as-a-front is the earlier design and is kept for
+# its reasoning; dnsmasq now has port 0 and no DNS role.
 #
 # Script-only package: nothing to compile. It ships two things and nothing else.
 #
@@ -88,27 +96,19 @@ include $(INCLUDE_DIR)/package.mk
 define Package/router-dns
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=mydist DNS (smartdns resolves, dnsmasq stays the front)
+  TITLE:=mydist DNS (smartdns is the only resolver)
   URL:=https://github.com/kwrum1/openwrt-honk
-  DEPENDS:=+smartdns +dnsmasq
+  DEPENDS:=+smartdns +dnsmasq +jsonfilter
 endef
 
 define Package/router-dns/description
-  smartdns does the resolution, dnsmasq stays the front end on :53.
+  SmartDNS is the resolver and owns :53. dnsmasq keeps no DNS role (port 0) and
+  odhcpd is the DHCP authority.
 
-  dnsmasq keeps serving /etc/hosts, local=/lan/ and the names odhcpd publishes,
-  and forwards everything else to smartdns on 127.0.0.1:6053. smartdns races the
-  configured upstreams concurrently and answers with the fastest result, so
-  "smartdns replaces dnsmasq's resolution" holds without giving up the local
-  name service.
-
-  The dnsmasq side is two lines patched into /etc/dnsmasq.conf at boot by
-  /etc/init.d/router-dns (no-resolv + one server= line); /etc/config/dhcp is
-  not rewritten. The smartdns side is a uci-defaults script, so the whole
-  change is visible in one place.
-
-  Upstreams default to AliDNS + DNSPod. Edit
-  /etc/config/smartdns (list server ...) to change them.
+  Upstreams are the resolvers netifd learned from the WAN lease, with this box's
+  own addresses filtered out; /etc/resolv.conf points at 127.0.0.1; the router's
+  own name and the names odhcpd publishes resolve as <name> and <name>.lan. All
+  three are maintained by /usr/libexec/router-dns-sync at boot and on ifup.
 endef
 
 # Script-only package. Without this the default Build/Compile runs `make` in a
@@ -124,10 +124,12 @@ define Package/router-dns/install
 	$(INSTALL_BIN) ./files/97-mydist-dns $(1)/etc/uci-defaults/97-mydist-dns
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./files/honk-dns.sh $(1)/usr/libexec/router-honk-dns
+	$(INSTALL_BIN) ./files/router-dns-sync.sh $(1)/usr/libexec/router-dns-sync
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/router_dns.config $(1)/etc/config/router_dns
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/88-router-dns-egress $(1)/etc/hotplug.d/iface/88-router-dns-egress
+	$(INSTALL_BIN) ./files/89-router-dns-sync $(1)/etc/hotplug.d/iface/89-router-dns-sync
 endef
 
 $(eval $(call BuildPackage,router-dns))

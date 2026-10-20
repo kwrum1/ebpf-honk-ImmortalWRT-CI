@@ -80,17 +80,25 @@ add_dot_upstream() {
 	uci -q set "smartdns.$section.port=853"
 	uci -q set "smartdns.$section.host_name=$2"
 }
-if [ -z "$(uci -q get smartdns.@smartdns[0].server)" ] &&
-	[ -z "$(uci -q get smartdns.@server[0].ip)" ]; then
+if [ -z "$(uci -q get smartdns.@server[0].ip)" ]; then
 	add_dot_upstream 223.5.5.5    dns.alidns.com	# AliDNS
 	add_dot_upstream 119.29.29.29 dot.pub		# DNSPod
-	# One plain-UDP entry stays as a fallback for the case DoT cannot be used at
-	# all (a network that filters 853). It cannot carry the box on its own while
-	# honk runs, but with honk stopped -- the default -- 53 is the more likely of
-	# the two to be open, and smartdns races all of them and takes the first
-	# answer, so a dead one costs nothing but a timeout.
-	uci -q add_list smartdns.@smartdns[0].server='223.5.5.5'
+	# No plain-UDP entry is seeded here on purpose: plaintext upstreams are now
+	# derived at every boot/ifup from the resolvers netifd actually learned
+	# (see /usr/libexec/router-dns-sync). A hardcoded 223.5.5.5:53 was wrong on
+	# every network that filters public DNS -- the lab here only allows its own
+	# resolvers -- and it also hid the case where no upstream worked at all,
+	# because smartdns kept answering from cache until a TTL ran out.
 fi
+
+# Retire the dnsmasq-front handover: a `/lan/` upstream on 127.0.0.1:6053 that
+# nothing listens on any more (dnsmasq has port 0). Kept out of every config
+# that still carries it, so `.lan` lookups stop waiting for a dead port.
+for s in $(uci -q get smartdns.@smartdns[0].server 2>/dev/null); do
+	case "$s" in
+	*/127.0.0.1:6053|127.0.0.1:6053) uci -q del_list "smartdns.@smartdns[0].server=$s" ;;
+	esac
+done
 
 uci -q commit smartdns
 

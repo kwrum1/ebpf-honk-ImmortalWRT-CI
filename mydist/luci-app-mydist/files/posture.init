@@ -31,6 +31,52 @@ wan_zone() {
 	uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p" | head -1
 }
 
+# --- DHCP: never lease an address to the router we are running on ------------
+#
+# A router whose DHCP *client* sits in the same broadcast domain as its own
+# DHCP *server* -- a single-NIC lab VM, a flat switch, a WAN port mis-cabled
+# into the LAN -- gets an answer to its own DISCOVER. Measured 2026-10-20 on the
+# lab VM: `udhcpc: lease of 10.1.18.240 obtained from 10.1.18.236`, i.e. its own
+# br-lan address, then `default via 10.1.18.236 dev eth1`, and nothing could
+# leave the box at all.
+#
+# odhcpd cannot be told "do not answer on this interface" (the request arrives
+# on the LAN interface with no other identity than the client MAC), but it can
+# be told to ignore a client: a `config host` section with `option ip 'ignore'`
+# sets lease_cfg->ignore4 in odhcpd and no offer is made for that MAC (see
+# odhcpd's config.c, LEASE_CFG_ATTR_IPV4, and dhcpv4.c). That is the right
+# behaviour in every topology: a DHCP server must never hand a lease to the
+# router it runs on.
+#
+# One section per DHCP-client interface, named dhcp.mydist_self_<iface>, so it
+# is obvious where it came from and it can be updated when a MAC changes.
+dhcp_self_guard() {
+	local iface dev mac changed=0
+
+	for iface in $(uci -q show network 2>/dev/null |
+			sed -n "s/^network\.\([^.=]*\)\.proto='dhcp'$/\1/p"); do
+		dev=$(uci -q get "network.$iface.device")
+		[ -n "$dev" ] || dev=$(uci -q get "network.$iface.ifname")
+		case "$dev" in '@'*|'') continue ;; esac
+		[ -r "/sys/class/net/$dev/address" ] || continue
+		mac=$(cat "/sys/class/net/$dev/address")
+		[ -n "$mac" ] || continue
+		[ "$(uci -q get "dhcp.mydist_self_$iface.mac")" = "$mac" ] &&
+			[ "$(uci -q get "dhcp.mydist_self_$iface.ip")" = "ignore" ] &&
+			continue
+		uci -q set "dhcp.mydist_self_$iface=host"
+		uci -q set "dhcp.mydist_self_$iface.mac=$mac"
+		uci -q set "dhcp.mydist_self_$iface.ip=ignore"
+		uci -q set "dhcp.mydist_self_$iface.name=$iface-self"
+		echo "  dhcp: our own $iface ($dev, $mac) is not served a lease"
+		changed=1
+	done
+
+	[ "$changed" = 1 ] || return 0
+	uci -q commit dhcp
+	/etc/init.d/odhcpd restart >/dev/null 2>&1
+}
+
 start_service() {
 	local z changed=0
 
@@ -98,6 +144,15 @@ start_service() {
 		uci -q commit dhcp
 		/etc/init.d/odhcpd restart >/dev/null 2>&1
 	fi
+	dhcp_self_guard
+
+	# --- the router's own resolver ------------------------------------------
+	# /etc/init.d/boot makes /tmp/resolv.conf a symlink to netifd's copy on
+	# every boot, so the router ends up asking the WAN's nameservers -- after a
+	# bad lease, its own address. router-dns-sync already ran at S18; run it
+	# again here, after dnsmasq has been stopped, so the first boot is
+	# consistent too (the ifup hotplug repeats it for every later change).
+	[ -x /usr/libexec/router-dns-sync ] && /usr/libexec/router-dns-sync
 
 	logger -t mydist-posture "posture enforced (wan forward, fullcone, rule 999 on, SmartDNS only)"
 }
