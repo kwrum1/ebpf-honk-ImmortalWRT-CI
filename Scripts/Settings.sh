@@ -73,11 +73,7 @@ function generate_config() {
   elif [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
-    # luci-front 是 x86_64 预编译前端（PKGARCH:=x86_64）；RK 上没有它，
-    # 显式关掉，避免 defconfig 打 “not available” 警告。
-    if [ "${WRT_CONFIG}" = "ROCKCHIP" ]; then
-      echo "# CONFIG_PACKAGE_luci-front is not set" >> "$config_file"
-    fi
+
   else
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL-STOCK.txt" > "$config_file"
