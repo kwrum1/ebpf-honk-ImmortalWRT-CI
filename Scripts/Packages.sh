@@ -82,38 +82,56 @@ case "$WRT_CONFIG" in
 	*)            UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg" ;;
 esac
 
-# honk/generated-stage.mk 被 .gitignore 忽略，由 openwrt-honk 的 release.yml 作为
-# asset 发布。没有它 HONK_HASH_* 会停在 SKIP，download.pl 直接失败：
-#   Cannot find appropriate hash command, ensure the provided hash is either ...
-# 按 package 里的 CORE_COMMIT 找对应的 release，取它的 generated-stage.mk。
+# honk/ 下三个 generated-* 文件都被 .gitignore 忽略，由 openwrt-honk 的 release.yml
+# 作为 asset 发布。缺任何一个都会在编译/打包阶段失败：
+#   generated-stage.mk        -> HONK_HASH_* 停在 SKIP，download.pl 报错
+#   generated-provenance.json -> honk 的 install 阶段 cannot stat
+#   generated-doona-stage.mk  -> luci-app-honk 的 Doona 源地址/哈希
+# 按 package 里的 CORE_COMMIT 找到对应 release，把三个都取下来，并把里面写死的
+# kenzok8/openwrt-honk URL 改成实际的 release 目录（asset 发布在 kwrum1 这边）。
 fetch_honk_stage() {
-	local core url
+	local core rel_json base stage prov doona
 	[ -d ./honk ] || return 0
 	core=$(sed -n 's/^CORE_COMMIT:=//p' ./honk/Makefile 2>/dev/null | head -1)
 	[ -n "$core" ] || return 0
-	url=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null |
-		jq -r --arg c "$core" '[.[] | select(.assets != null) | select([.assets[].name] | index("honk-core-" + $c + "-x86_64.tar.gz"))][0].assets[]? | select(.name == "generated-stage.mk") | .browser_download_url' 2>/dev/null | head -1)
-	if [ -n "$url" ] && [ "$url" != "null" ]; then
-		if curl -fsSL -o ./honk/generated-stage.mk "$url"; then
-			# generated-stage.mk 里的 PKG_SOURCE_URL 是生成时写死的（上游写的是
-			# kenzok8 的 release），但 asset 实际发布在我们取到它的那个 release，
-			# 不改就会 404。统一改成同一个 release 目录。
-			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${url%/*}/|" ./honk/generated-stage.mk
-			echo "honk: generated-stage.mk <- ${url##*/source-}"
-			echo "honk: PKG_SOURCE_URL=$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)"
-			# 早失败：这里 HEAD 一下 x86_64 资产，省得编译 1.5 小时才发现 404。
-			_probe="$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)$(sed -n 's/^HONK_ASSET_X86_64:=//p' ./honk/generated-stage.mk | head -1)"
-			if curl -fsL -I --connect-timeout 10 --max-time 30 "$_probe" >/dev/null 2>&1; then
-				echo "honk: core asset reachable"
-			else
-				echo "!! honk: core asset NOT reachable: $_probe" >&2
-			fi
-		fi
-	elif [ -f ./honk/generated-stage.mk ]; then
-		echo "honk: keeping the generated-stage.mk already present"
-	else
+	rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+	pick() {
+		printf '%s' "$rel_json" | jq -r --arg c "$core" --arg n "$1" \
+			'[.[] | select(.assets != null) | select([.assets[].name] | index("honk-core-" + $c + "-x86_64.tar.gz"))][0].assets[]? | select(.name == $n) | .browser_download_url' 2>/dev/null | head -1
+	}
+	stage=$(pick generated-stage.mk)
+	if [ -z "$stage" ] || [ "$stage" = "null" ]; then
 		echo "!! honk: no generated-stage.mk for CORE_COMMIT=$core; honk will fail at download" >&2
+		return 0
+	fi
+	base="${stage%/*}/"
+	if ! curl -fsSL -o ./honk/generated-stage.mk "$stage"; then
+		echo "!! honk: could not download $stage" >&2
+		return 0
+	fi
+	sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./honk/generated-stage.mk
+
+	prov=$(pick generated-provenance.json)
+	if [ -n "$prov" ] && [ "$prov" != "null" ]; then
+		curl -fsSL -o ./honk/generated-provenance.json "$prov" || true
+	fi
+
+	doona=$(pick generated-doona-stage.mk)
+	if [ -n "$doona" ] && [ "$doona" != "null" ] && [ -d ./luci-app-honk ]; then
+		if curl -fsSL -o ./luci-app-honk/generated-doona-stage.mk "$doona"; then
+			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./luci-app-honk/generated-doona-stage.mk
+		fi
+	fi
+
+	echo "honk: stage assets <- ${base}"
+	echo "honk: PKG_SOURCE_URL=$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)"
+	# 早失败：HEAD 一下 x86_64 资产，省得编译 1.5 小时才发现 404。
+	_probe="${base}$(sed -n 's/^HONK_ASSET_X86_64:=//p' ./honk/generated-stage.mk | head -1)"
+	if curl -fsL -I --connect-timeout 10 --max-time 30 "$_probe" >/dev/null 2>&1; then
+		echo "honk: core asset reachable"
+	else
+		echo "!! honk: core asset NOT reachable: $_probe" >&2
 	fi
 }
 fetch_honk_stage
