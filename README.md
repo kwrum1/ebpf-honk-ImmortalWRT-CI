@@ -111,11 +111,18 @@ WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl 
 | **router-acl** | 本仓库：`src/acl.bpf.c` + `aclctl` | WAN 侧 eBPF ACL/guard：丢弃无主入站；`bypass` 模式加 mark + notrack，把 NAT 流从 conntrack 摘出 | 叠加在 fw4 之上（fw4 仍是兜底）；比 stock 更严：真正挡住无主入站的是这里 | `enabled=1`，`mode=guard`，`import_firewall=1` |
 | **router-qos** | 本仓库（纯脚本包） | WAN 上单条 `root cake`，按实际上行整形 | 替换默认 `fq_codel`；CAKE 默认 `triple-isolate` 逐主机公平、`diffserv4` 分档 | `enabled=1`，`upload=0` 时空转（构建镜像默认由 CI/首启设置） |
 | **router-tuning** | 本仓库（纯脚本包） | 首启按 CPU/内存/网卡选档：BBR、`fq`、sysctl、ring/coalescing、XPS、governor | 不替换 qdisc（CAKE 仍接管 WAN）；只调内核/网卡参数 | `profile=auto` |
-| **router-dns** | 本仓库（纯脚本包） | **SmartDNS 独占 :53**；dnsmasq 端口 0、停用；DoT 上游（223.5.5.5 / 119.29.29.29）；honk 的 DNS 交接 | 替换 dnsmasq 的解析角色；dnsmasq 不再是解析器 | SmartDNS `:53`，dnsmasq `:0` |
+| **router-dns** | 本仓库（纯脚本包） | **SmartDNS 独占 :53**；dnsmasq 端口 0、停用；`router-dns-sync` 从 DHCP 租约派生真实上游（过滤本机地址）并写 `hosts.lan`；`/tmp/resolv.conf` → `127.0.0.1`；honk 的 DNS 交接 | 替换 dnsmasq 的解析角色；dnsmasq 不再是解析器 | SmartDNS `:53`，dnsmasq `:0`，上游来自租约而不是写死 |
 | **luci-front** | 本仓库；Rust + pingora 0.9，静态 musl（x86_64 / aarch64 各一份预编译） | 接管 :80/:443：HTTP/2、TLS、HSTS/CSP 等安全头、静态文件 ETag/304；`/cgi-bin`、`/ubus` 反代到 uhttpd | 替换 uhttpd 的对外监听；uhttpd 退到 `127.0.0.1:8080`，只保留 Lua CGI 与 ubus 桥 | 两个架构自动选二进制 |
 | **luci-app-mydist** | 本仓库 | 菜单（DNS/代理/防火墙/QoS）、端口控制（五元组单行表格）、QoS 页、`mydist-posture` | 替换原版 firewall/smartdns/honk 菜单入口 | `rule 999` 默认开启且不在 UI 显示 |
 
-### 5.4 高通平台为什么不同
+### 5.4 DNS 上游与自租约（round 10）
+
+- **上游不再写死**：`/usr/libexec/router-dns-sync` 在 S18 和每次 `ifup/ifupdate` 从 netifd/ubus 与 `resolv.conf.auto` 取真实 nameserver，过滤掉本机地址，写成显式 `config server` 段；DoT 保留为并行上游。
+- **自身解析**：`/tmp/resolv.conf` 固定为 `nameserver 127.0.0.1` + `search lan`（`/etc/resolv.conf` 覆盖同一内容），路由器像 LAN 客户端一样走自己。
+- **`.lan` 名字**：`/var/etc/router-dns/hosts.lan`（本机名 + odhcpd 租约名），smartdns 用 `hosts-file` 读取。
+- **DHCP 自租约守卫**：`mydist-posture` 把本机各接口 MAC 注册成 `dhcp.mydist_self_<iface>`（`option ip 'ignore'`），odhcpd 不再给本机发租约；单网卡/同广播域拓扑下不会再出现“默认路由指向自己”。
+
+### 5.5 高通平台为什么不同
 
 - IPQ / MTK 走 **NSS**（原版 ImmortalWrt 的硬件加速），与 einat 是两套互斥方案：同一台设备不会同时启用。
 - `einat-ebpf` 只支持 x86_64 / aarch64；IPQ60XX（armv7）根本装不上。
@@ -182,6 +189,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 6. `Handles.sh` 增加 mydist 补丁块并对目标门控。
 7. `.config` 只在 `Settings.sh` 生成一次。
 8. 发布 tag 带源码所有者与分支，便于区分 `kwrum1` 与 `VIKINGYFY`。
+9. 第 10 轮：DHCP 自租约守卫、outer-dns-sync 上游派生、esolv.conf/.lan 修复、ccept-full.sh 断言加强（62 项）。
 
 ---
 
