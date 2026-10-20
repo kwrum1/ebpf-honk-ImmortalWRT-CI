@@ -1,54 +1,214 @@
-# OpenWRT-CI
+# OWRT-CI（mydist 版）
 
-官方版：
+本仓库是 [VIKINGYFY](https://github.com/VIKINGYFY) 的 OpenWRT 云编译 CI 的二次开发版：
 
-https://github.com/immortalwrt/immortalwrt.git
+- **X86 / ROCKCHIP**：使用带 eBPF 数据面的新源码（[`kwrum1/immortalwrt`](https://github.com/kwrum1/immortalwrt)，分支 `mydist`）构建，honk 使用 `mydist` 分支。
+- **IPQ60XX / IPQ807X / MTK**：完全保持原版逻辑 —— 源码仍是 `VIKINGYFY/immortalwrt`，honk 仍是 `main`，高通平台继续用 **NSS**，不注入任何 eBPF 数据面。
 
-自用版：
+---
 
-https://github.com/VIKINGYFY/immortalwrt.git
+## 1. 产物矩阵
 
-# U-BOOT
+| 工作流 | 配置 | 源码 | 分支 | honk | 数据面 | Web 前端 |
+|---|---|---|---|---|---|---|
+| OWRT-ALL | `X86` | `kwrum1/immortalwrt` | `mydist` | `mydist` | einat + dpd + ACL + CAKE + SmartDNS | pingora（x86_64） |
+| OWRT-ALL | `ROCKCHIP` | `kwrum1/immortalwrt` | `mydist` | `mydist` | 同上 | pingora（aarch64） |
+| OWRT-ALL | `IPQ60XX` | `VIKINGYFY/immortalwrt` | `main` | `main` | 原版（NSS） | uhttpd |
+| QCA-ALL | `IPQ60XX-WIFI-*`、`IPQ807X-WIFI-*` | `VIKINGYFY/immortalwrt` | `main` | `main` | 原版（NSS） | uhttpd |
+| QCA-PPE | `IPQ60XX-WIFI-NO`、`IPQ807X-WIFI-NO` | `VIKINGYFY/immortalwrt` | `main` | `main` | 原版（NSS/PPE） | uhttpd |
+| MTK-ALL | `MEDIATEK-WIFI-*` | `VIKINGYFY/immortalwrt` | `owrt` | `main` | 原版 | uhttpd |
+| WRT-TEST | 手动输入 | 手动输入 | 手动输入 | 按配置 | 按配置 | 按配置 |
 
-高通版-沉心：
+发布 tag 形如：
 
-https://github.com/chenxin527/uboot-ipq60xx-emmc-build.git
+```
+X86-kwrum1-mydist-26.10.20-15.41.39
+ROCKCHIP-kwrum1-mydist-26.10.20-15.40.32
+IPQ807X-WIFI-YES-VIKINGYFY-main-26.10.20-15.41.33
+MEDIATEK-WIFI-NO-VIKINGYFY-owrt-26.10.20-15.40.30
+```
 
-https://github.com/chenxin527/uboot-ipq60xx-nand-build.git
+`CONFIG-源码所有者-分支-构建时间`，源码与分支一眼可查。
 
-https://github.com/chenxin527/uboot-ipq60xx-nor-build.git
+---
 
-高通版-小猪：
+## 2. 触发方式
 
-https://github.com/1980490718/u-boot-2016.git
+| 方式 | 行为 |
+|---|---|
+| 定时 | `Auto-Clean` 每天 22:00 UTC 清理旧 Release |
+| 自动 | `Auto-Clean` 完成后，`OWRT-ALL` / `QCA-ALL` / `MTK-ALL` / `QCA-PPE` 四个工作流通过 `workflow_run` **同时**触发 |
+| 手动 | Actions → 选工作流 → Run workflow（`WRT-TEST` 只输出 `.config`，不编译） |
 
-联发科-全新版：
+四个工作流共用 `WRT-CORE.yml`，矩阵在各自文件里定义；改源码/分支只改对应工作流的 `matrix`。
 
-https://github.com/VIKINGYFY/UBOOT-CI/releases
+---
 
-联发科-官方版：
+## 3. 目录
 
-https://drive.wrt.moe/uboot/mediatek
+```
+.github/workflows/   OWRT-ALL / QCA-ALL / QCA-PPE / MTK-ALL / WRT-TEST / WRT-CORE
+Config/              每个目标的 .config 片段
+  GENERAL.txt          X86 / ROCKCHIP 专用（mydist 数据面 + 魔改 UI/DNS）
+  GENERAL-STOCK.txt    IPQ / MTK 专用（原版包集，逐字恢复）
+  X86.txt / ROCKCHIP.txt / IPQ*.txt / MEDIATEK*.txt
+Scripts/
+  Packages.sh          第三方包、honk 分支选择、honk 资产获取、mydist 拷贝
+  Settings.sh          .config 生成、LAN IP/WiFi/主机名、内核尺寸
+  Handles.sh           构建期源码修补（mydist 部分只对 X86/RK 生效）
+  verify-packages.sh   固件包清单闸门（手动运行）
+```
 
-# 固件简要说明
+---
 
-固件每天早上6点自动编译。
+## 4. 构建流水线（`WRT-CORE.yml`）
 
-固件信息里的时间为编译开始的时间，方便核对上游源码提交时间。
+| 步骤 | 做的事 |
+|---|---|
+| Initialization Environment | 安装 ImmortalWrt 官方构建依赖，`/mnt/build_wrt` 软链到 `./wrt` |
+| Initialization Values | 解析 `WRT_TARGET` / `WRT_INFO` / 日期 |
+| Clone Code | `git clone --depth=1 --branch $WRT_BRANCH $WRT_REPO ./wrt`，并去掉国内源 |
+| Check Caches | 缓存 `ccache` + `staging_dir/host*`、`tool*`（key 含 `WRT_CONFIG-WRT_INFO-WRT_HASH`） |
+| Update Feeds | `feeds update -a && install -a` |
+| Custom Packages | `Packages.sh` + `Handles.sh`（cwd 为 `wrt/package`） |
+| Custom Settings | `Settings.sh` 生成 `.config`，`make defconfig && make clean` |
+| Download Packages | `make download -j` |
+| Compile Firmware | `make -j || make -j1 V=s` |
+| Package Firmware | 收集 `bin/targets`，按 `CONFIG-OWNER-BRANCH-DATE` 重命名 |
+| Release Firmware | `softprops/action-gh-release` 发布 |
 
-MEDIATEK系列、QUALCOMMAX系列nss-fw/ppe可供选择、ROCKCHIP系列、X86系列。
+---
 
-# 目录简要说明
+## 5. X86 / ROCKCHIP 的加速栈
 
-workflows——自定义CI配置
+### 5.1 为什么不是“开个 offload”
 
-Scripts——自定义脚本
+ImmortalWrt 自带的软件/硬件 flow offload 会把首个包之后的流量交给 netfilter flowtable，**绕过 TC**；而本方案的 NAT 与快路径都在 TC/eBPF 上。两者互斥，所以 X86/RK 的镜像里：
 
-Config——自定义配置
+- `/etc/config/firewall` 默认 `flow_offloading=0`、`flow_offloading_hw=0`；
+- `kmod-nft-offload` 从 `DEFAULT_PACKAGES` 与 firewall4 的依赖里移除；
+- 这属于 **源码/构建期默认值**，不是运行期覆盖。
 
-# 鹅叫说明
+### 5.2 钩子顺序（实测）
 
-已知ipq的PPE会和鹅叫冲突
+```
+WAN ingress :  honk TCX(wan_ingress) → einat TCX(reverse SNAT) → router-acl (classic, pref 90) → dpd_fastpath (classic, pref 100)
+LAN ingress :                                                     router-acl?               → dpd_fastpath (classic, pref 100)
+WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl (classic, pref 90) → CAKE root qdisc
+```
 
-大鹅大鹅叫叫叫
+两条关键事实：
 
+1. **TCX 先于 classic `cls_bpf` 执行**。honk 用 TCX，einat 用 TCX；router-acl / dpd 用 classic。因此 honk 决定代理的流根本到不了 dpd，dpd 只加速 honk 放行的直连流。
+2. **classic 链内按 pref 排序**：router-acl（90）先表态，dpd（100）在后。dpd 在挂载时会检查“有没有别人的 pref 比我大”，有就自动降级为 `observe`。
+
+### 5.3 组件清单
+
+| 组件 | 来源 | 功能 | 替换 / 对比 | 默认 |
+|---|---|---|---|---|
+| **einat-ebpf** | `EHfive/einat-ebpf` v0.1.11，上游 release 的静态 musl 二进制（x86_64 / aarch64） | 在 TC 上实现 **Full Cone NAT44**（EIM + EIF），不依赖 conntrack | 替换 `fw4` 生成的 `MASQUERADE`（conntrack + 端口受限映射）；与普通 NAT 相比外网可主动回连 | `enabled=1`，端口段 `20000-29999`，hairpin 开 |
+| **dpd-fastpath** | 本仓库：`src/dpd_fastpath.bpf.c` + `dpdctl`，构建时用 host clang 编 BPF | TC **ingress** 快路径：已建立连接的家用转发走 `bpf_fib_lookup` 直接重定向 | 替换“每个包都走 netfilter 规则链”的路径；**不做 NAT**（NAT 唯一归属 einat），**不共享 einat 的 map/ABI** | `mode=stateless`，有 uplink 才启用；无 WAN/无 einat 时自动降级 `observe` |
+| **router-acl** | 本仓库：`src/acl.bpf.c` + `aclctl` | WAN 侧 eBPF ACL/guard：丢弃无主入站；`bypass` 模式加 mark + notrack，把 NAT 流从 conntrack 摘出 | 叠加在 fw4 之上（fw4 仍是兜底）；比 stock 更严：真正挡住无主入站的是这里 | `enabled=1`，`mode=guard`，`import_firewall=1` |
+| **router-qos** | 本仓库（纯脚本包） | WAN 上单条 `root cake`，按实际上行整形 | 替换默认 `fq_codel`；CAKE 默认 `triple-isolate` 逐主机公平、`diffserv4` 分档 | `enabled=1`，`upload=0` 时空转（构建镜像默认由 CI/首启设置） |
+| **router-tuning** | 本仓库（纯脚本包） | 首启按 CPU/内存/网卡选档：BBR、`fq`、sysctl、ring/coalescing、XPS、governor | 不替换 qdisc（CAKE 仍接管 WAN）；只调内核/网卡参数 | `profile=auto` |
+| **router-dns** | 本仓库（纯脚本包） | **SmartDNS 独占 :53**；dnsmasq 端口 0、停用；DoT 上游（223.5.5.5 / 119.29.29.29）；honk 的 DNS 交接 | 替换 dnsmasq 的解析角色；dnsmasq 不再是解析器 | SmartDNS `:53`，dnsmasq `:0` |
+| **luci-front** | 本仓库；Rust + pingora 0.9，静态 musl（x86_64 / aarch64 各一份预编译） | 接管 :80/:443：HTTP/2、TLS、HSTS/CSP 等安全头、静态文件 ETag/304；`/cgi-bin`、`/ubus` 反代到 uhttpd | 替换 uhttpd 的对外监听；uhttpd 退到 `127.0.0.1:8080`，只保留 Lua CGI 与 ubus 桥 | 两个架构自动选二进制 |
+| **luci-app-mydist** | 本仓库 | 菜单（DNS/代理/防火墙/QoS）、端口控制（五元组单行表格）、QoS 页、`mydist-posture` | 替换原版 firewall/smartdns/honk 菜单入口 | `rule 999` 默认开启且不在 UI 显示 |
+
+### 5.4 高通平台为什么不同
+
+- IPQ / MTK 走 **NSS**（原版 ImmortalWrt 的硬件加速），与 einat 是两套互斥方案：同一台设备不会同时启用。
+- `einat-ebpf` 只支持 x86_64 / aarch64；IPQ60XX（armv7）根本装不上。
+- 所以这些目标的 `Config` 使用 `GENERAL-STOCK.txt`，`Packages.sh` 不拷贝 `mydist/`，`Handles.sh` 跳过全部魔改补丁。
+
+---
+
+## 6. 配置分层
+
+| 文件 | 使用者 | 内容 |
+|---|---|---|
+| `Config/GENERAL.txt` | X86 / ROCKCHIP | einat/dpd/ACL/QoS/DNS/luci-front/luci-app-mydist、SmartDNS、关闭 docker/upnp/iptables、关 offload、odhcpd 接管 |
+| `Config/GENERAL-STOCK.txt` | IPQ / MTK | 原版 CI 的 GENERAL（逐字恢复）：保留 `kmod-nft-offload`、`kmod-nft-queue`、upnp、coremark 等 |
+
+选择逻辑在 `Scripts/Settings.sh`：
+
+```sh
+X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
+其它            -> Config/<CONFIG>.txt + Config/GENERAL-STOCK.txt
+*TEST*          -> 只用 Config/<TEST>.txt
+```
+
+---
+
+## 7. 脚本要点
+
+### 7.1 `Packages.sh`
+
+- **第三方包**：只保留 aurora / aurora-config / honk / v2ray-geodata / partexp（其余插件在基线的固件清单里本就不存在）。
+- **honk 分支**：
+
+  ```sh
+  case "$WRT_CONFIG" in
+  	X86|ROCKCHIP) UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "mydist" "pkg" ;;
+  	*)            UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg" ;;
+  esac
+  ```
+
+- **honk 资产**：`honk/generated-stage.mk`、`generated-provenance.json`、`luci-app-honk/generated-doona-stage.mk` 都是 `.gitignore` 的 release asset。脚本按 `CORE_COMMIT` 找到对应 release，下载三个文件，把里面写死的 `kenzok8` URL 改写成实际 release 目录，并对 x86_64 资产做 HEAD 预检（早失败，不等编译 1.5 小时）。
+- **mydist**：只在 `X86|ROCKCHIP` 拷贝；优先用源码树里的 `wrt/mydist`（fork），回落到本仓库的 `mydist/`；找不到直接失败。
+
+### 7.2 `Settings.sh`
+
+- `.config` 唯一生成点（WRT-CORE 不再自己 cat）。
+- `WRT_IP` 为空时保留上游默认，并断言 LAN 默认地址不为空。
+- qualcommax 的 `KERNEL_SIZE` 只在该目录存在时修改。
+- WiFi SSID/密码/国家、主机名按工作流输入写入。
+
+### 7.3 `Handles.sh`
+
+- 前半段是原版逻辑：homeproxy 规则、argon/aurora 主题、mini-diskmanager、tailscale、rust。
+- 后半段（x86 DRM 裁剪、flow offload、`kmod-nft-offload`、odhcpd 接管、dnsmasq `ignore 1`、honk NFQUEUE 裁剪）**整段包在 `if [[ "$WRT_CONFIG" == "X86" || "$WRT_CONFIG" == "ROCKCHIP" ]]` 里**。
+- 这些 sed 全部幂等，重复执行不会叠加。
+
+---
+
+## 8. 与上游 CI 的差异
+
+1. 矩阵按目标指定源码/分支（`include` 矩阵），不再所有配置共用一份源码。
+2. 新增 `mydist/` 分发（8 个包）与按目标的拷贝开关。
+3. 新增 honk 分支选择与 `generated-*` 资产获取（上游没有这套包）。
+4. 新增 `Config/GENERAL-STOCK.txt`，`GENERAL.txt` 变为 X86/RK 专用。
+5. `Settings.sh` 按目标选配置、修复 `WRT_IP` 为空导致 LAN 无地址的问题。
+6. `Handles.sh` 增加 mydist 补丁块并对目标门控。
+7. `.config` 只在 `Settings.sh` 生成一次。
+8. 发布 tag 带源码所有者与分支，便于区分 `kwrum1` 与 `VIKINGYFY`。
+
+---
+
+## 9. 已知限制
+
+- **IPQ60XX（armv7）没有 einat**：einat 只发布 x86_64 / aarch64；该机型按原版 NSS 逻辑构建。
+- **`verify-packages.sh` 未接进流水线**：它断言 einat/dpd 等必备包，armv7 上必然失败，目前作为手动闸门。
+- **X86/RK 的源码基线固定**在上游 `5fda931`（验证过的提交），IPQ/MTK 跟随最新 `main`/`owrt`。
+- **luci-front 只有 x86_64 / aarch64** 两个预编译二进制；其它架构没有前端（这些目标本来也不启用 mydist）。
+
+---
+
+## 10. 排障
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `package/honk: Cannot find appropriate hash command` | `generated-stage.mk` 没取到；看 `Custom Packages` 日志里的 `honk:` 行 |
+| honk 资产 404/403 | `PKG_SOURCE_URL` 指向了 `kenzok8`；脚本会改写成实际 release 目录并打印 `PKG_SOURCE_URL=` |
+| 改了源码但镜像没变 | 缓存 key 是 `CONFIG-OWNER-HASH`；确认分支 hash 变了，或删对应缓存 |
+| X86/RK 镜像里没有 `luci-front` | 检查是否用了 `GENERAL.txt`；RK 需要 aarch64 二进制 |
+| IPQ/MTK 里出现 einat | 检查 `Packages.sh` 的 `case` 与 `Handles.sh` 的门控是否被改动 |
+
+---
+
+## 11. 来源与许可
+
+- CI 框架：`VIKINGYFY`（MIT）。
+- einat：`EHfive/einat-ebpf`（GPL-2.0）。
+- honk：`Glassyiris/honk`，打包与 Doona 集成见 `kwrum1/openwrt-honk`。
+- 其余 `mydist` 组件为本仓库原创（GPL-2.0-only）。

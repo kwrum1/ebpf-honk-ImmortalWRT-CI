@@ -11,8 +11,8 @@
 #     wants to see the qname, and
 #   * its datapath therefore redirects LAN :53 into its own engine, which
 #     answers from its own `dns.upstream` entries.
-# So the dnsmasq -> smartdns chain that this very package builds is bypassed for
-# every LAN client the moment honk starts.
+# So the SmartDNS plane (dnsmasq is not a resolver in this firmware: port 0)
+# is bypassed for every LAN client the moment honk starts.
 #
 # Measured 2026-10-18 in QEMU (x86_64, honk 995a80cd, real node):
 #   * a client's by-name fetch failed ("Could not resolve host"), and honk
@@ -27,11 +27,11 @@
 #
 # The fix is three lines of policy, each doing one job:
 #   1. `dport(53) -> direct(must)` as the FIRST routing rule: DNS belongs to the
-#      kernel path, so dnsmasq (and smartdns behind it) answer LAN clients, and
+#      kernel path, so SmartDNS answers LAN clients, and
 #      the router's own queries are attributable to a rule and go out normally.
 #   2. drop the now-redundant `&& !dport(53)` from the two direct(must) rules, so
 #      the file says one thing instead of two contradicting ones.
-#   3. `dns.upstream.default` -> `udp://127.0.0.1:6053`, so anything honk still
+#   3. `dns.upstream.default` -> `udp://127.0.0.1:53`, so anything honk still
 #      resolves itself (its own node/domain dialling) uses smartdns too. Its
 #      internal sockets carry honk's own mark and are therefore not caught by
 #      honk's datapath, which is why this direction works where a plain client
@@ -61,7 +61,7 @@
 
 CONF="${HONK_CONF:-/etc/honk/config.dae}"
 MARK="# mydist: honk-dns"
-SMARTDNS='udp://127.0.0.1:6053'
+SMARTDNS='udp://127.0.0.1:53'
 STOCK_DNS="default: *'https://223\\.5\\.5\\.5/dns-query"
 RULE='dport(53) -> direct(must)'
 
