@@ -10,7 +10,7 @@ smartdns is the only resolver and owns `:53`. dnsmasq has no DNS role at all
 
 ## Upstreams, `resolv.conf` and local names (current)
 
-Three files, all maintained by `/usr/libexec/router-dns-sync`, which runs at
+The files below are all maintained by `/usr/libexec/router-dns-sync`, which runs at
 `S18` and on every interface event (`/etc/hotplug.d/iface/89-router-dns-sync`):
 
 | path | what |
