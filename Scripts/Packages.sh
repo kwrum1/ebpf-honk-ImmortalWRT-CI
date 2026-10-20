@@ -95,7 +95,21 @@ fetch_honk_stage() {
 		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null |
 		jq -r --arg c "$core" '[.[] | select(.assets != null) | select([.assets[].name] | index("honk-core-" + $c + "-x86_64.tar.gz"))][0].assets[]? | select(.name == "generated-stage.mk") | .browser_download_url' 2>/dev/null | head -1)
 	if [ -n "$url" ] && [ "$url" != "null" ]; then
-		curl -fsSL -o ./honk/generated-stage.mk "$url" && echo "honk: generated-stage.mk <- ${url##*/source-}"
+		if curl -fsSL -o ./honk/generated-stage.mk "$url"; then
+			# generated-stage.mk 里的 PKG_SOURCE_URL 是生成时写死的（上游写的是
+			# kenzok8 的 release），但 asset 实际发布在我们取到它的那个 release，
+			# 不改就会 404。统一改成同一个 release 目录。
+			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${url%/*}/|" ./honk/generated-stage.mk
+			echo "honk: generated-stage.mk <- ${url##*/source-}"
+			echo "honk: PKG_SOURCE_URL=$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)"
+			# 早失败：这里 HEAD 一下 x86_64 资产，省得编译 1.5 小时才发现 404。
+			_probe="$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)$(sed -n 's/^HONK_ASSET_X86_64:=//p' ./honk/generated-stage.mk | head -1)"
+			if curl -fsL -I --connect-timeout 10 --max-time 30 "$_probe" >/dev/null 2>&1; then
+				echo "honk: core asset reachable"
+			else
+				echo "!! honk: core asset NOT reachable: $_probe" >&2
+			fi
+		fi
 	elif [ -f ./honk/generated-stage.mk ]; then
 		echo "honk: keeping the generated-stage.mk already present"
 	else
