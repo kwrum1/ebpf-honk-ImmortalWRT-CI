@@ -81,6 +81,28 @@ case "$WRT_CONFIG" in
 	X86|ROCKCHIP) UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "mydist" "pkg" ;;
 	*)            UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg" ;;
 esac
+
+# honk/generated-stage.mk 被 .gitignore 忽略，由 openwrt-honk 的 release.yml 作为
+# asset 发布。没有它 HONK_HASH_* 会停在 SKIP，download.pl 直接失败：
+#   Cannot find appropriate hash command, ensure the provided hash is either ...
+# 按 package 里的 CORE_COMMIT 找对应的 release，取它的 generated-stage.mk。
+fetch_honk_stage() {
+	local core url
+	[ -d ./honk ] || return 0
+	core=$(sed -n 's/^CORE_COMMIT:=//p' ./honk/Makefile 2>/dev/null | head -1)
+	[ -n "$core" ] || return 0
+	url=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null |
+		jq -r --arg c "$core" '[.[] | select(.assets != null) | select([.assets[].name] | index("honk-core-" + $c + "-x86_64.tar.gz"))][0].assets[]? | select(.name == "generated-stage.mk") | .browser_download_url' 2>/dev/null | head -1)
+	if [ -n "$url" ] && [ "$url" != "null" ]; then
+		curl -fsSL -o ./honk/generated-stage.mk "$url" && echo "honk: generated-stage.mk <- ${url##*/source-}"
+	elif [ -f ./honk/generated-stage.mk ]; then
+		echo "honk: keeping the generated-stage.mk already present"
+	else
+		echo "!! honk: no generated-stage.mk for CORE_COMMIT=$core; honk will fail at download" >&2
+	fi
+}
+fetch_honk_stage
 # Honk 所需的 GeoIP / GeoSite 数据包
 UPDATE_PACKAGE "v2ray-geodata" "kenzok8/wall" "main" "pkg" "v2ray-geoip v2ray-geosite"
 
