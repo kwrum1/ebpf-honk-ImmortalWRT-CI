@@ -20,11 +20,13 @@
 | TCP 单流 / 4 流 | 2.60 / 2.32 Gbit/s | 3.21 / 3.23 Gbit/s |
 | 64 字节小包 | 322 768 pps | 363 393 pps |
 | 固定 2 Gbit/s 时的路由 CPU | 44 % | **28 %** |
-| 满载 RTT | 3.36 ms | 10.49 ms |
+| 满载 RTT | 3.36 ms | 10.49 ms¹ |
 
 > 2 vCPU 虚拟机里两者**吞吐同一档**（瓶颈在 vSwitch / 软中断），eBPF 的收益是**同负载更省 CPU**、
 > full-cone NAT 与策略能力。测试方法、原始数据、噪声范围和复现脚本见
 > [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
+>
+> ¹ eBPF 组测时已跑在 3.2 Gbit/s、原版只有 2.3 Gbit/s，排队长度不同，RTT 不能直接比。
 
 ---
 
