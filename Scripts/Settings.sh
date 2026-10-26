@@ -74,10 +74,6 @@ function generate_config() {
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
 
-  elif [[ "${WRT_CONFIG}" == *"-SFE"* ]]; then
-    # 基准测试变体：文件自包含（target + 完整包列表），不再拼接 GENERAL*.txt。
-    # 这样 stock / SFE / eBPF 三份固件只差加速组件本身。
-    cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" > "$config_file"
   else
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL-STOCK.txt" > "$config_file"

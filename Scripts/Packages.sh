@@ -70,38 +70,6 @@ UPDATE_PACKAGE() {
 
 # UPDATE_PACKAGE "包名" "项目地址" "项目分支" "pkg/name，可选，pkg为从大杂烩中单独提取包名插件；name为重命名为包名"
 
-# -----------------------------------------------------------------------------
-# SFE 基准变体：shortcut-fe + fast-classifier
-#
-# immortalwrt/obsolete 里也有这两个包，但那个仓库冻结在 2021-11（内核 5.x），
-# 无法在本树的 kernel 6.18 上编译。coolsnowwolf/lede 一直在跟内核更新同名包，
-# 所以从那里稀疏拉取（只取 package/qca/shortcut-fe，不拉整个仓库）。
-# 这两个包与 mydist/einat 无关，仅用于三变体对比。
-# -----------------------------------------------------------------------------
-if [[ "${WRT_CONFIG}" == *"-SFE"* ]]; then
-	rm -rf ./sfe-src ./shortcut-fe ./fast-classifier
-	git clone --depth=1 --filter=blob:none --sparse \
-		https://github.com/coolsnowwolf/lede.git sfe-src
-	( cd sfe-src && git sparse-checkout set package/qca/shortcut-fe )
-	cp -rf ./sfe-src/package/qca/shortcut-fe/shortcut-fe ./
-	cp -rf ./sfe-src/package/qca/shortcut-fe/fast-classifier ./
-	rm -rf ./sfe-src
-	# shortcut-fe 还需要 Lean 的内核补丁：给 sk_buff 加 fast_forwarded 位、
-	# bridge 统计钩子、net/core/dev.c 钩子。缺了它会报
-	# "'struct sk_buff' has no member named 'fast_forwarded'"。
-	# 用的是裁剪版：原补丁里 nf_conntrack_ecache.{c,h} 两段与 OpenWrt 自带的
-	# 952-net-conntrack-events-support-multiple-registrant.patch 冲突，而这两段
-	# 只被 sfe_cm.c 使用；cm 与 fast-classifier 互斥，本变体不构建它。
-	for D in ../target/linux/generic/hack-6.18 ../target/linux/generic/hack-6.12; do
-		if [ -d "$D" ]; then
-			cp "$GITHUB_WORKSPACE/Scripts/sfe/953-sfe-kernel.patch" \
-				"$D/953-net-patch-linux-kernel-to-support-shortcut-fe.patch" \
-				&& echo "SFE: kernel patch -> $D"
-		fi
-	done
-	echo "SFE: shortcut-fe + fast-classifier <- coolsnowwolf/lede"
-fi
-
 # 默认主题：aurora（Settings.sh 里的 WRT_THEME=aurora 要与之对应）
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"

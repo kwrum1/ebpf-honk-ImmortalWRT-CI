@@ -5,6 +5,27 @@
 - **X86 / ROCKCHIP**：使用带 eBPF 数据面的新源码（[`kwrum1/immortalwrt`](https://github.com/kwrum1/immortalwrt)，分支 `mydist`）构建，honk 使用 `mydist` 分支。
 - **IPQ60XX / IPQ807X / MTK**：完全保持原版逻辑 —— 源码仍是 `VIKINGYFY/immortalwrt`，honk 仍是 `main`，高通平台继续用 **NSS**，不注入任何 eBPF 数据面。
 
+### 我该刷哪个？
+
+| 设备 | 选这个 | 说明 |
+|---|---|---|
+| x86 软路由 / 虚拟机 | `OWRT-ALL` → `X86` | eBPF 数据面 + pingora 前端（本文档的主体） |
+| RK3399 / RK3568 等 ARM64 | `OWRT-ALL` → `ROCKCHIP` | 同上，aarch64 版 |
+| 高通 IPQ / MTK 路由器 | `QCA-ALL` / `QCA-PPE` / `MTK-ALL` | 原版 NSS，硬件加速更强，**不要**刷 X86 那套 |
+
+### 实测速览（2026-10-26，ESXi + vmxnet3，2 vCPU）
+
+| 指标 | 原版无加速 | 本方案（eBPF） |
+|---|---|---|
+| TCP 单流 / 4 流 | 2.60 / 2.32 Gbit/s | 3.21 / 3.23 Gbit/s |
+| 64 字节小包 | 322 768 pps | 363 393 pps |
+| 固定 2 Gbit/s 时的路由 CPU | 44 % | **28 %** |
+| 满载 RTT | 3.36 ms | 10.49 ms |
+
+> 2 vCPU 虚拟机里两者**吞吐同一档**（瓶颈在 vSwitch / 软中断），eBPF 的收益是**同负载更省 CPU**、
+> full-cone NAT 与策略能力。测试方法、原始数据、噪声范围和复现脚本见
+> [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
+
 ---
 
 ## 1. 产物矩阵
@@ -189,7 +210,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 6. `Handles.sh` 增加 mydist 补丁块并对目标门控。
 7. `.config` 只在 `Settings.sh` 生成一次。
 8. 发布 tag 带源码所有者与分支，便于区分 `kwrum1` 与 `VIKINGYFY`。
-9. 第 10 轮：DHCP 自租约守卫、outer-dns-sync 上游派生、esolv.conf/.lan 修复、ccept-full.sh 断言加强（62 项）。
+9. 第 10 轮：DHCP 自租约守卫、router-dns-sync 上游派生、resolv.conf/.lan 修复、accept-full.sh 断言加强（62 项）。
 
 ---
 
