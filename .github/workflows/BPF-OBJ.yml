@@ -1,0 +1,44 @@
+name: BPF-OBJ
+
+# Temporary helper: compile the dpd BPF object from a source branch so it can be
+# attached to a running router and tested before rebuilding a full image.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'branch in kwrum1/immortalwrt'
+        required: true
+        default: 'fix/dpd-dhcp'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kwrum1/immortalwrt
+          ref: ${{ inputs.ref }}
+          path: src
+
+      - name: Install clang and BPF headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm libbpf-dev linux-libc-dev
+
+      - name: Compile dpd_fastpath.bpf.o
+        run: |
+          cd src/mydist/router-dataplane/src
+          clang -target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable \
+            -D__KERNEL__ -D__BPF_TRACING__ -DDPD_MODE_DEFAULT=1 \
+            -I/usr/include/x86_64-linux-gnu -I/usr/include \
+            -c dpd_fastpath.bpf.c -o dpd_fastpath.bpf.o
+          ls -l dpd_fastpath.bpf.o
+          readelf -S dpd_fastpath.bpf.o | grep -E 'BTF|classifier|\.maps' || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpd-bpf-obj
+          path: src/mydist/router-dataplane/src/dpd_fastpath.bpf.o
