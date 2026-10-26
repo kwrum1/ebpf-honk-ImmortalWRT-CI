@@ -70,6 +70,25 @@ UPDATE_PACKAGE() {
 
 # UPDATE_PACKAGE "包名" "项目地址" "项目分支" "pkg/name，可选，pkg为从大杂烩中单独提取包名插件；name为重命名为包名"
 
+# -----------------------------------------------------------------------------
+# SFE 基准变体：shortcut-fe + fast-classifier
+#
+# immortalwrt/obsolete 里也有这两个包，但那个仓库冻结在 2021-11（内核 5.x），
+# 无法在本树的 kernel 6.18 上编译。coolsnowwolf/lede 一直在跟内核更新同名包，
+# 所以从那里稀疏拉取（只取 package/qca/shortcut-fe，不拉整个仓库）。
+# 这两个包与 mydist/einat 无关，仅用于三变体对比。
+# -----------------------------------------------------------------------------
+if [[ "${WRT_CONFIG}" == *"-SFE"* ]]; then
+	rm -rf ./sfe-src ./shortcut-fe ./fast-classifier
+	git clone --depth=1 --filter=blob:none --sparse \
+		https://github.com/coolsnowwolf/lede.git sfe-src
+	( cd sfe-src && git sparse-checkout set package/qca/shortcut-fe )
+	cp -rf ./sfe-src/package/qca/shortcut-fe/shortcut-fe ./
+	cp -rf ./sfe-src/package/qca/shortcut-fe/fast-classifier ./
+	rm -rf ./sfe-src
+	echo "SFE: shortcut-fe + fast-classifier <- coolsnowwolf/lede"
+fi
+
 # 默认主题：aurora（Settings.sh 里的 WRT_THEME=aurora 要与之对应）
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"

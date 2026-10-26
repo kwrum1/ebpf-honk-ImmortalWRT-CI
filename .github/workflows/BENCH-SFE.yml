@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+#
+# One-off benchmark build.
+#
+# Stock baseline is the official VIKINGYFY/OpenWRT-CI X86 image (no action
+# needed here).  This workflow only produces the SFE variant: the same
+# upstream tree and the same package list, plus shortcut-fe and
+# fast-classifier.  Everything else is identical so the three variants
+# (stock / SFE / mydist eBPF) differ only in the acceleration mechanism.
+
+name: BENCH-SFE
+
+on:
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  sfe:
+    name: X86-SFE
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: X86-SFE
+      WRT_THEME: aurora
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: 12345678
+      WRT_IP: 192.168.10.1
+      WRT_PW: none
+      WRT_REPO: https://github.com/VIKINGYFY/immortalwrt.git
+      WRT_BRANCH: main
+      WRT_SOURCE: VIKINGYFY/immortalwrt
+      WRT_TEST: 'false'
