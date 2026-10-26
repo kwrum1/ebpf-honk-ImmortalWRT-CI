@@ -86,6 +86,16 @@ if [[ "${WRT_CONFIG}" == *"-SFE"* ]]; then
 	cp -rf ./sfe-src/package/qca/shortcut-fe/shortcut-fe ./
 	cp -rf ./sfe-src/package/qca/shortcut-fe/fast-classifier ./
 	rm -rf ./sfe-src
+	# shortcut-fe 还需要 Lean 的内核补丁：给 sk_buff 加 fast_forwarded 位、
+	# 给 conntrack 加 chain notifier、bridge 统计钩子。缺了它 sfe_ipv4.c 会报
+	# "'struct sk_buff' has no member named 'fast_forwarded'"。
+	for D in ../target/linux/generic/hack-6.18 ../target/linux/generic/hack-6.12; do
+		if [ -d "$D" ]; then
+			curl -fsSL -o "$D/953-net-patch-linux-kernel-to-support-shortcut-fe.patch" \
+				"https://raw.githubusercontent.com/coolsnowwolf/lede/master/target/linux/generic/hack-6.18/953-net-patch-linux-kernel-to-support-shortcut-fe.patch" \
+				&& echo "SFE: kernel patch -> $D"
+		fi
+	done
 	echo "SFE: shortcut-fe + fast-classifier <- coolsnowwolf/lede"
 fi
 
