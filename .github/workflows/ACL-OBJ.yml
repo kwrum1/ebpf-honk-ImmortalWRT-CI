@@ -27,7 +27,7 @@ jobs:
         run: |
           set -eux
           cd src/mydist/router-acl/src
-          FLAGS="-target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable -D__KERNEL__ -D__BPF_TRACING__"
+          FLAGS="-target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable -D__KERNEL__ -D__BPF_TRACING__ -I/usr/include/x86_64-linux-gnu"
           clang $FLAGS -DACL_BUILD_INGRESS -c acl.bpf.c -o "$GITHUB_WORKSPACE/acl_ingress.bpf.o"
           clang $FLAGS -DACL_BUILD_EGRESS  -c acl.bpf.c -o "$GITHUB_WORKSPACE/acl_egress.bpf.o"
           ls -l "$GITHUB_WORKSPACE"/acl_*.o
