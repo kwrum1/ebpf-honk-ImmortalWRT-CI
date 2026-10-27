@@ -1,0 +1,39 @@
+name: ACL-OBJ
+
+# Temporary: compile router-acl's eBPF objects on a stock Ubuntu runner so the
+# verifier fix can be tested without waiting for a full image build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout mydist
+        uses: actions/checkout@v4
+        with:
+          repository: kwrum1/immortalwrt
+          ref: mydist
+          path: src
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev linux-libc-dev
+
+      - name: Compile ACL objects
+        run: |
+          set -eux
+          cd src/mydist/router-acl/src
+          FLAGS="-target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable -D__KERNEL__ -D__BPF_TRACING__"
+          clang $FLAGS -DACL_BUILD_INGRESS -c acl.bpf.c -o "$GITHUB_WORKSPACE/acl_ingress.bpf.o"
+          clang $FLAGS -DACL_BUILD_EGRESS  -c acl.bpf.c -o "$GITHUB_WORKSPACE/acl_egress.bpf.o"
+          ls -l "$GITHUB_WORKSPACE"/acl_*.o
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acl-obj
+          path: acl_*.o
+          if-no-files-found: error
