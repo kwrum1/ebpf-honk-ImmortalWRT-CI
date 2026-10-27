@@ -445,3 +445,31 @@ fi  # WRT_CONFIG = X86 / ROCKCHIP
 
 echo " "
 
+#=============================================================================
+# offload guard: IPQ/MTK must keep hardware flow offload
+#=============================================================================
+# The X86/ROCKCHIP block above turns fw4's flow_offloading off on purpose (the
+# eBPF datapath has to see every packet). Every other target keeps it on --
+# that is its acceleration path (PPE / NSS front end, firewall4 default patch
+# 002 enables flow_offloading + flow_offloading_hw + fullcone).
+#
+# A future edit to the shared scripts could silently flip that for the QCA/MTK
+# images too, and nothing would fail: the image builds, it is just slower. So
+# assert it here and make the build log say which way it went.
+if [[ "${WRT_CONFIG}" != "X86" && "${WRT_CONFIG}" != "ROCKCHIP" ]]; then
+	F4P="$GITHUB_WORKSPACE/wrt/package/network/config/firewall4/patches/002-default-enable-fullcone.patch"
+	if [ -f "$F4P" ]; then
+		if grep -qE '^\+[[:space:]]*option[[:space:]]+flow_offloading_hw[[:space:]]+1$' "$F4P"; then
+			echo "offload: $WRT_CONFIG keeps flow_offloading_hw=1"
+		else
+			echo "!! offload: $WRT_CONFIG lost hardware flow offload (firewall4 patch)" >&2
+		fi
+		if grep -qE '^\+[[:space:]]*option[[:space:]]+flow_offloading[[:space:]]+1$' "$F4P"; then
+			echo "offload: $WRT_CONFIG keeps flow_offloading=1"
+		else
+			echo "!! offload: $WRT_CONFIG lost software flow offload (firewall4 patch)" >&2
+		fi
+	else
+		echo "!! offload: firewall4 patch not found; cannot confirm offload defaults for $WRT_CONFIG" >&2
+	fi
+fi
