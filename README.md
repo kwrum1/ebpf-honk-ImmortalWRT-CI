@@ -13,20 +13,18 @@
 | RK3399 / RK3568 等 ARM64 | `OWRT-ALL` → `ROCKCHIP` | 同上，aarch64 版 |
 | 高通 IPQ / MTK 路由器 | `QCA-ALL` / `QCA-PPE` / `MTK-ALL` | 原版 NSS，硬件加速更强，**不要**刷 X86 那套 |
 
-### 实测速览（2026-10-26，ESXi + vmxnet3，2 vCPU）
+### 实测速览（2026-10-27，ESXi + vmxnet3，2 vCPU）
 
-| 指标 | 原版无加速 | 本方案（eBPF） |
-|---|---|---|
-| TCP 单流 / 4 流 | 2.60 / 2.32 Gbit/s | 3.21 / 3.23 Gbit/s |
-| 64 字节小包 | 322 768 pps | 363 393 pps |
-| 固定 2 Gbit/s 时的路由 CPU | 44 % | **28 %** |
-| 满载 RTT | 3.36 ms | 10.49 ms¹ |
+| 指标 | 原版无加速 | eBPF 优化前 | eBPF 优化后 |
+|---|---|---|---|
+| TCP 单流 | 2.68 Gbit/s | 3.91 Gbit/s | **4.85 Gbit/s** |
+| TCP 4 流 | 4.47 Gbit/s | 4.25 Gbit/s | **5.37 Gbit/s** |
+| 64 字节小包 | 279 018 pps | 350 446 pps | **390 625 pps** |
+| 固定 3 Gbit/s 路由 CPU | 53 % | 48 % | **41 %** |
+| 满载 RTT | 12.73 ms | 12.38 ms | **5.24 ms** |
 
-> 2 vCPU 虚拟机里两者**吞吐同一档**（瓶颈在 vSwitch / 软中断），eBPF 的收益是**同负载更省 CPU**、
-> full-cone NAT 与策略能力。测试方法、原始数据、噪声范围和复现脚本见
-> [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
->
-> ¹ eBPF 组测时已跑在 3.2 Gbit/s、原版只有 2.3 Gbit/s，排队长度不同，RTT 不能直接比。
+> 优化后吞吐、小包 pps、满载延迟三项均优于原版；低负载 CPU 三者接近，3 G 以上优化后更省。
+> 方法、原始数据、噪声范围和复现脚本见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
 
 ---
 
