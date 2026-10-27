@@ -5,9 +5,8 @@
 # builds run on their own schedule (OWRT-ALL). Keeping the two apart is what
 # makes the pipeline independent of upstream's nightly chain.
 #
-# Retention: the last 6 firmware releases and 14 days of run history are kept;
-# all build caches are dropped (they are keyed by source commit, so a new build
-# would otherwise restore a stale staging_dir/toolchain).
+# Retention: the last 12 firmware releases (six matrices, several platforms)
+# and 14 days of run history are kept; all build caches are dropped.
 
 name: Clean
 
@@ -27,7 +26,7 @@ jobs:
         with:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           delete_releases: true
-          releases_keep_latest: 6
+          releases_keep_latest: 12
           delete_tags: true
           delete_workflows: true
           workflows_keep_day: 14

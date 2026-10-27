@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 kwrum1
 #
-# OWRT-ALL: the only firmware pipeline in this repository.
+# OWRT-ALL: the eBPF targets (X86, ROCKCHIP), built from
+# kwrum1/immortalwrt@mydist (TC ingress fastpath + honk handover).
 #
-# Targets: X86 and ROCKCHIP, both built from kwrum1/immortalwrt@mydist
-# (eBPF datapath + honk handover). Everything else (MTK/QCA/IPQ) was removed
-# with the upstream CI: this repo no longer tracks upstream's platform matrix
-# and no longer chains off upstream's nightly Auto-Clean run.
+# The other platforms have their own pipelines and their own source branch:
+#   MTK-ALL  -> MEDIATEK-WIFI-YES/NO      (kwrum1/immortalwrt@owrt, stock NSS)
+#   QCA-ALL  -> IPQ60XX/IPQ807X (wifi)    (kwrum1/immortalwrt@owrt, stock NSS)
+#   QCA-PPE  -> IPQ60XX/IPQ807X (no wifi) (kwrum1/immortalwrt@owrt)
+#   WRT-TEST -> one configuration on demand
 #
-# Triggers are self-contained on purpose:
-#   * schedule  - one build a day, UTC 20:00 (04:00 CST)
-#   * dispatch  - manual, with optional extra packages
-# A new commit alone does NOT build: a build pins the source commit recorded in
-# its provenance file, so an accidental push cannot silently change the image.
+# Triggers are self-contained: a schedule per pipeline, a manual dispatch, and
+# no dependency on upstream's workflow order (the old Auto-Clean chain).
+# A push alone does NOT build; each release records the source commit.
 
 name: OWRT-ALL
 
 on:
   schedule:
-    - cron: 0 20 * * *
+    - cron: 0 19 * * *
   workflow_dispatch:
     inputs:
       PACKAGE:

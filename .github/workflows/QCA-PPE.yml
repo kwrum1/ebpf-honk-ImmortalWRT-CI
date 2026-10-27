@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 VIKINGYFY
+#
+# QCA-PPE-NOWIFI-ALL: the no-wifi IPQ60xx/IPQ807x images (PPE/NSS builds used
+# as routers behind another AP). Same stock NSS datapath as QCA-ALL.
+
+name: QCA-PPE-NOWIFI-ALL
+
+on:
+  schedule:
+    - cron: 0 20 * * *
+  workflow_dispatch:
+    inputs:
+      PACKAGE:
+        description: 'Extra package lines for .config'
+        required: false
+        type: string
+      TEST:
+        description: 'Config-only run (no image)'
+        default: 'false'
+        required: false
+        type: boolean
+
+permissions: write-all
+
+jobs:
+  config:
+    name: ${{ matrix.CONFIG }}
+    strategy:
+      fail-fast: false
+      matrix:
+        CONFIG: [IPQ60XX-WIFI-NO, IPQ807X-WIFI-NO]
+        SOURCE: [kwrum1/immortalwrt]
+        BRANCH: [owrt]
+
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: ${{ matrix.CONFIG }}
+      WRT_THEME: aurora
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: 12345678
+      WRT_IP: 192.168.10.1
+      WRT_PW: 无
+      WRT_REPO: https://github.com/${{ matrix.SOURCE }}.git
+      WRT_BRANCH: ${{ matrix.BRANCH }}
+      WRT_SOURCE: ${{ matrix.SOURCE }}
+      WRT_PACKAGE: ${{ inputs.PACKAGE }}
+      WRT_TEST: ${{ inputs.TEST }}

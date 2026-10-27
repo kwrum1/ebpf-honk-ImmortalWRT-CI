@@ -153,87 +153,50 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # 里也登记了 dpd-fastpath 作为第二道闸。
 # mydist 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
 # 不拷贝、也不启用 einat/dpd/router-* 这一套；它们的 GENERAL 用的是原版清单。
-# mydist/ is the only carrier of the datapath (TC ingress eBPF fastpath +
-# eBPF full-cone NAT + the router-* packages). It must come from the firmware
-# tree that is being built -- $GITHUB_WORKSPACE/wrt/mydist -- and from nowhere
-# else: a second copy in this repository used to shadow it and shipped whatever
-# it happened to contain. If it is missing, fail loudly; a firmware without a
-# datapath must never be produced silently.
-MYDIST_ROOT="$GITHUB_WORKSPACE/wrt/mydist"
+# mydist/ is the only carrier of the eBPF datapath (TC ingress fastpath +
+# full-cone NAT + router-* packages). It is installed for X86/ROCKCHIP only:
+# IPQ/MTK keep their stock NSS/PPE path and the mainline package set.
+#
+# It must come from the firmware tree that is being built --
+# $GITHUB_WORKSPACE/wrt/mydist -- and from nowhere else: a second copy in this
+# repository used to shadow it and shipped whatever it happened to contain.
+case "$WRT_CONFIG" in
+X86|ROCKCHIP)
+	MYDIST_ROOT="$GITHUB_WORKSPACE/wrt/mydist"
 
-if [ ! -d "$MYDIST_ROOT/router-dataplane" ]; then
-	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	echo "!! FATAL: $MYDIST_ROOT/router-dataplane not found."
-	echo "!! The source tree ($WRT_SOURCE@$WRT_BRANCH) must carry mydist/."
-	echo "!! A firmware without the eBPF datapath is not a valid build."
-	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	exit 1
-fi
-
-echo " "
-rm -rf ./mydist
-mkdir -p ./mydist
-cp -rf "$MYDIST_ROOT"/. ./mydist/
-find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
-	-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
-
-# Provenance: hash the exact source directory that is compiled, not the one we
-# intended to copy (see docs/BENCHMARK.md provenance section).
-DPD_SRC_SHA=$(find ./mydist -type f \( -name '*.c' -o -name '*.h' \) -print0 |
-	sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
-echo "mydist installed into package/ (from $MYDIST_ROOT)"
-echo "mydist src sha256: $DPD_SRC_SHA"
-if [ -n "$GITHUB_ENV" ]; then
-	echo "DPD_SRC_SHA=$DPD_SRC_SHA" >> "$GITHUB_ENV"
-fi
-
-#更新软件包版本
-UPDATE_VERSION() {
-	local PKG_NAME=$1
-	local PKG_MARK=${2:-false}
-	local PKG_FILES=$(find ./ ../feeds/packages/ -maxdepth 3 -type f -wholename "*/$PKG_NAME/Makefile")
-
-	if [ -z "$PKG_FILES" ]; then
-		echo "$PKG_NAME not found!"
-		return
+	if [ ! -d "$MYDIST_ROOT/router-dataplane" ]; then
+		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+		echo "!! FATAL: $MYDIST_ROOT/router-dataplane not found."
+		echo "!! The source tree ($WRT_SOURCE@$WRT_BRANCH) must carry mydist/."
+		echo "!! A firmware without the eBPF datapath is not a valid build."
+		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+		exit 1
 	fi
 
-	echo -e "\n$PKG_NAME version update has started!"
+	echo " "
+	rm -rf ./mydist
+	mkdir -p ./mydist
+	cp -rf "$MYDIST_ROOT"/. ./mydist/
+	find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
 
-	for PKG_FILE in $PKG_FILES; do
-		local PKG_REPO=$(grep -Po "PKG_SOURCE_URL:=https://.*github.com/\K[^/]+/[^/]+(?=.*)" $PKG_FILE)
-		local PKG_TAG=$(curl -sL "https://api.github.com/repos/$PKG_REPO/releases" | jq -r "map(select(.prerelease == $PKG_MARK)) | first | .tag_name")
-
-		local OLD_VER=$(grep -Po "PKG_VERSION:=\K.*" "$PKG_FILE")
-		local OLD_URL=$(grep -Po "PKG_SOURCE_URL:=\K.*" "$PKG_FILE")
-		local OLD_FILE=$(grep -Po "PKG_SOURCE:=\K.*" "$PKG_FILE")
-		local OLD_HASH=$(grep -Po "PKG_HASH:=\K.*" "$PKG_FILE")
-
-		local PKG_URL=$([[ "$OLD_URL" == *"releases"* ]] && echo "${OLD_URL%/}/$OLD_FILE" || echo "${OLD_URL%/}")
-
-		local NEW_VER=$(echo $PKG_TAG | sed -E 's/[^0-9]+/\./g; s/^\.|\.$//g')
-		local NEW_URL=$(echo $PKG_URL | sed "s/\$(PKG_VERSION)/$NEW_VER/g; s/\$(PKG_NAME)/$PKG_NAME/g")
-		local NEW_HASH=$(curl -sL "$NEW_URL" | sha256sum | cut -d ' ' -f 1)
-
-		echo "old version: $OLD_VER $OLD_HASH"
-		echo "new version: $NEW_VER $NEW_HASH"
-
-		if [[ "$NEW_VER" =~ ^[0-9].* ]] && dpkg --compare-versions "$OLD_VER" lt "$NEW_VER"; then
-			sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=$NEW_VER/g" "$PKG_FILE"
-			sed -i "s/PKG_HASH:=.*/PKG_HASH:=$NEW_HASH/g" "$PKG_FILE"
-			echo "$PKG_FILE version has been updated!"
-		else
-			echo "$PKG_FILE version is already the latest!"
-		fi
-	done
-}
-
-# 注意：原先这里有一句 UPDATE_VERSION "sing-box"。
-# 基线软件清单里**没有任何 sing-box 包**（对照 ref-X86.manifest / ref-ROCKCHIP.manifest），
-# 所以它每次 CI 都会：访问 GitHub API 取 release -> 下载整包 -> sha256 -> 改 Makefile，
-# 全程没有任何效果，纯属浪费时间和网络。已删除。
-# 如果需要它，请连同对应的 sing-box 插件一起加回来，并在 verify-packages.sh 里登记。
-
+	# Provenance: hash the exact source directory that is compiled, not the
+	# one we intended to copy.
+	DPD_SRC_SHA=$(find ./mydist -type f \( -name '*.c' -o -name '*.h' \) -print0 |
+		sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+	echo "ebpf datapath installed into package/ (from $MYDIST_ROOT)"
+	echo "ebpf datapath src sha256: $DPD_SRC_SHA"
+	if [ -n "$GITHUB_ENV" ]; then
+		echo "DPD_SRC_SHA=$DPD_SRC_SHA" >> "$GITHUB_ENV"
+	fi
+	;;
+*)
+	# IPQ / MTK / PPE keep their stock NSS/PPE datapath and the stock package
+	# set; the eBPF packages are not installed at all.
+	echo " "
+	echo "ebpf datapath: $WRT_CONFIG uses the stock path, packages skipped"
+	;;
+esac
 #引入私有扩展脚本
 if [ -f "$GITHUB_WORKSPACE/Scripts/PRIVATE.sh" ]; then
 	source "$GITHUB_WORKSPACE/Scripts/PRIVATE.sh"

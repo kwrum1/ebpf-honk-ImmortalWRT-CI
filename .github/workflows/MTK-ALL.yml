@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 VIKINGYFY
+#
+# MTK-ALL: MediaTek (Filogic) images.
+#
+# Runs on a schedule of its own instead of chaining off upstream's nightly
+# Auto-Clean: this repository no longer depends on upstream's workflow order.
+# Source is our own fork (kwrum1/immortalwrt@owrt, a mirror of upstream owrt),
+# so a build can always be traced to a commit we control.
+
+name: MTK-ALL
+
+on:
+  schedule:
+    - cron: 30 19 * * *
+  workflow_dispatch:
+    inputs:
+      PACKAGE:
+        description: 'Extra package lines for .config'
+        required: false
+        type: string
+      TEST:
+        description: 'Config-only run (no image)'
+        default: 'false'
+        required: false
+        type: boolean
+
+permissions: write-all
+
+jobs:
+  config:
+    name: ${{ matrix.CONFIG }}
+    strategy:
+      fail-fast: false
+      matrix:
+        CONFIG: [MEDIATEK-WIFI-YES, MEDIATEK-WIFI-NO]
+        SOURCE: [kwrum1/immortalwrt]
+        BRANCH: [owrt]
+
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: ${{ matrix.CONFIG }}
+      WRT_THEME: aurora
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: 12345678
+      WRT_IP: 192.168.10.1
+      WRT_PW: 无
+      WRT_REPO: https://github.com/${{ matrix.SOURCE }}.git
+      WRT_BRANCH: ${{ matrix.BRANCH }}
+      WRT_SOURCE: ${{ matrix.SOURCE }}
+      WRT_PACKAGE: ${{ inputs.PACKAGE }}
+      WRT_TEST: ${{ inputs.TEST }}

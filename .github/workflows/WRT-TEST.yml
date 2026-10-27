@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 VIKINGYFY
+#
+# WRT-TEST: build ONE configuration by hand (config-only by default). Useful to
+# reproduce a single platform without waiting for the nightly matrices.
+#
+# Branch matrix (this repository's fork):
+#   X86 / ROCKCHIP            -> mydist   (eBPF datapath + honk handover)
+#   IPQ / MEDIATEK / TEST     -> owrt     (stock NSS/PPE + mainline honk)
+
+name: WRT-TEST
+
+on:
+  workflow_dispatch:
+    inputs:
+      CONFIG:
+        default: 'MEDIATEK-WIFI-YES'
+        required: true
+        type: choice
+        options:
+          - IPQ60XX-WIFI-YES
+          - IPQ60XX-WIFI-NO
+          - IPQ807X-WIFI-YES
+          - IPQ807X-WIFI-NO
+          - MEDIATEK-WIFI-YES
+          - MEDIATEK-WIFI-NO
+          - ROCKCHIP
+          - X86
+          - TEST
+      SOURCE:
+        default: 'kwrum1/immortalwrt'
+        required: true
+        type: string
+      BRANCH:
+        default: 'owrt'
+        required: true
+        type: string
+      PACKAGE:
+        required: false
+        type: string
+      TEST:
+        description: 'Config-only run (no image)'
+        default: 'true'
+        required: true
+        type: boolean
+
+permissions: write-all
+
+jobs:
+  config:
+    name: ${{ inputs.CONFIG }}
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: ${{ inputs.CONFIG }}
+      WRT_THEME: aurora
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: 12345678
+      WRT_IP: 192.168.10.1
+      WRT_PW: 无
+      WRT_REPO: https://github.com/${{ inputs.SOURCE }}.git
+      WRT_BRANCH: ${{ inputs.BRANCH }}
+      WRT_SOURCE: ${{ inputs.SOURCE }}
+      WRT_PACKAGE: ${{ inputs.PACKAGE }}
+      WRT_TEST: ${{ inputs.TEST }}
