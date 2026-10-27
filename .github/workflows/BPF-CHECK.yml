@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# BPF-CHECK: compile the datapath (BPF object + dpdctl) on a plain Ubuntu
+# runner, in about a minute.
+#
+# Why this exists: the image build takes ~90 minutes, and a single typo in
+# dpd_fastpath.bpf.c only surfaces at the end of it. This job compiles exactly
+# the two artifacts the router runs, with the same clang target, so the slow
+# pipeline is never the first thing that reads the source.
+#
+# It does NOT load the program (no kernel on the runner to attach to); semantic
+# checks stay on the lab box (`dpdctl stats`, tc filter show).
+
+name: BPF-CHECK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/BPF-CHECK.yml'
+  schedule:
+    - cron: 0 18 * * 0
+
+permissions: read-all
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Toolchain
+        run: |
+          sudo apt-get -yqq update
+          sudo apt-get -yqq install clang llvm libbpf-dev libelf-dev pkg-config
+
+      - name: Fetch datapath source
+        run: |
+          git clone --depth=1 --single-branch --branch mydist \
+            https://github.com/kwrum1/immortalwrt.git src
+          test -f src/mydist/router-dataplane/src/dpd_fastpath.bpf.c
+
+      - name: Compile BPF object
+        run: |
+          SRC=src/mydist/router-dataplane/src
+          clang -target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable \
+            -D__KERNEL__ -D__BPF_TRACING__ -DDPD_MODE_DEFAULT=1 \
+            -I/usr/include/$(uname -m)-linux-gnu \
+            -c "$SRC/dpd_fastpath.bpf.c" -o dpd_fastpath.bpf.o
+          echo "--- sections ---"
+          llvm-readelf -S dpd_fastpath.bpf.o | grep -E 'BTF|classifier|\.maps' || true
+          echo "--- size ---"
+          stat -c '%s bytes' dpd_fastpath.bpf.o
+          sha256sum dpd_fastpath.bpf.o
+          echo "--- ABI ---"
+          grep -oP '^#define DPD_ABI_VERSION\s+\K[0-9]+' "$SRC/dpd_common.h"
+
+      - name: Compile dpdctl
+        run: |
+          SRC=src/mydist/router-dataplane/src
+          cc -O2 -Wall -Wextra -I"$SRC" -o dpdctl "$SRC/dpdctl.c" -lbpf -lelf -lz
+          ./dpdctl version
+
+      - name: Upload objects
+        uses: actions/upload-artifact@main
+        with:
+          name: datapath-objects
+          path: |
+            dpd_fastpath.bpf.o
+            dpdctl
