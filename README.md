@@ -245,10 +245,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 
 ## 9. 已知限制
 
-- **IPQ60XX（armv7）没有 einat**：einat 只发布 x86_64 / aarch64；该机型按原版 NSS 逻辑构建。
-- **`verify-packages.sh` 未接进流水线**：它断言 einat/dpd 等必备包，armv7 上必然失败，目前作为手动闸门。
-- **X86/RK 的源码基线固定**在上游 `5fda931`（验证过的提交），IPQ/MTK 跟随最新 `main`/`owrt`。
-- **luci-front 只有 x86_64 / aarch64** 两个预编译二进制；其它架构没有前端（这些目标本来也不启用 mydist）。
+- **IPQ-MTK 没有 einat**：einat 只发布 x86_64 / RK；其他机型按原版 加速 逻辑构建。
 - **honk 直连加速依赖 p1 core**：本 fork 的 `core-p1` 把 direct 判决交回 classic；用上游原版 core（direct 返回 `OK`）时 dpd 门控会自动 `observe`，直连不会加速。两个包必须一起升级（honk p1 + `dpd-fastpath` 的 marker 门控）。
 
 ---
