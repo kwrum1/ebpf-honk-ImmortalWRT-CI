@@ -128,7 +128,8 @@ WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl 
 | 组件 | 来源 | 功能 | 替换 / 对比 | 默认 |
 |---|---|---|---|---|
 | **einat-ebpf** | `EHfive/einat-ebpf` v0.1.11，上游 release 的静态 musl 二进制（x86_64 / aarch64） | 在 TC 上实现 **Full Cone NAT44**（EIM + EIF），不依赖 conntrack | 替换 `fw4` 生成的 `MASQUERADE`（conntrack + 端口受限映射）；与普通 NAT 相比外网可主动回连 | `enabled=1`，端口段 `20000-29999`，hairpin 开 |
-| **dpd-fastpath** | 本仓库：`src/dpd_fastpath.bpf.c` + `dpdctl`，构建时用 host clang 编 BPF | TC **ingress** 快路径：已建立连接的家用转发走 `bpf_fib_lookup` 直接重定向 | 替换“每个包都走 netfilter 规则链”的路径；**不做 NAT**（NAT 唯一归属 einat），**不共享 einat 的 map/ABI** | `mode=stateless`，有 uplink 才启用；无 WAN/无 einat 时自动降级 `observe` |
+| **dpd-fastpath** | 本仓库：`src/dpd_fastpath.bpf.c` + `dpdctl`，构建时用 host clang 编 BPF | TC **ingress** 快路径：已建立连接的家用转发走 `bpf_fib_lookup` 直接重定向；`downlink=1` 时 WAN→LAN 回程也加速 | 替换“每个包都走 netfilter 规则链”的路径；**不做 NAT**（NAT 唯一归属 einat），**不共享 einat 的 map/ABI** | `mode=stateful`（2026-10-27 起默认），有 uplink 才启用；无 WAN/无 einat 时自动降级 `observe` |
+| **honk** | `kwrum1/openwrt-honk`：固定上游 `Glassyiris/honk` commit，构建时打 **p1** 补丁（core-p1 release，x86_64/aarch64/armv7） | TCX 透明代理；p1 core 把 **direct** 判决交回 classic（`TC_ACT_UNSPEC` + `DIRECT_UNSPEC_MARK`） | 代理流 redirect 进 `dae0`，**不进 dpd**；直连流进 classic，由 dpd 继续加速；NAT 仍是 einat | 默认不启用；启用时需要 p1 core（`/usr/share/honk/direct-unspec`），否则门控保持 `observe` |
 | **router-acl** | 本仓库：`src/acl.bpf.c` + `aclctl` | WAN 侧 eBPF ACL/guard：丢弃无主入站；`bypass` 模式加 mark + notrack，把 NAT 流从 conntrack 摘出 | 叠加在 fw4 之上（fw4 仍是兜底）；比 stock 更严：真正挡住无主入站的是这里 | `enabled=1`，`mode=guard`，`import_firewall=1` |
 | **router-qos** | 本仓库（纯脚本包） | WAN 上一条 `root qdisc`，**无限速**（逐流公平 + AQM）：≤1 Gbit/s 用 `cake diffserv4 nat`，更快的链路自动用 `fq_codel` | 替换默认 qdisc；无速率参数、无 UI、默认开启（`cake` 在多 G 链路上代价太大，所以按链路速率自动选） | `enabled=1`，`wan` 可列多条（多 WAN 参与负载的链路自动纳入） |
 | **router-tuning** | 本仓库（纯脚本包） | 首启按 CPU/内存/网卡选档：BBR、`fq`、sysctl、ring/coalescing、XPS、governor | 不替换 qdisc（`router-qos` 仍接管 WAN）；只调内核/网卡参数 | `profile=auto` |
@@ -148,6 +149,39 @@ WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl 
 - IPQ / MTK 走 **NSS**（原版 ImmortalWrt 的硬件加速），与 einat 是两套互斥方案：同一台设备不会同时启用。
 - `einat-ebpf` 只支持 x86_64 / aarch64；IPQ60XX（armv7）根本装不上。
 - 所以这些目标的 `Config` 使用 `GENERAL-STOCK.txt`，`Packages.sh` 不拷贝 `mydist/`，`Handles.sh` 跳过全部魔改补丁。
+
+### 5.6 代理 + 加速共存（honk p1）
+
+**机制**：内核 `sch_handle_ingress()` 先跑 `tcx_run()` 再跑 `tc_run()`；honk 的 `lan_ingress_l2` 是 TCX，dpd 是 classic。TCX 只要返回非 `TC_ACT_UNSPEC`，整条 classic 链就被跳过。
+
+上游 honk 的 direct 出口返回 `TC_ACT_OK`，所以 honk 一开，直连也进不了 dpd（实测 `pkt_total` 不涨），只能 `observe`。honk 包 **p1** 的补丁（`ci/patches/honk-direct-unspec.py`，不改上游仓库）做了三件事：
+
+1. 4 个 direct 出口返回 `TC_ACT_UNSPEC`，并打上 `DIRECT_UNSPEC_MARK`（`0x2000_0000`）；
+2. bridge master/slave 二次遍历看到这个 mark 时，跳过 honk 的分类、仍然返回 `UNSPEC`；
+3. 代理/block 判决不变：proxy 仍然 redirect 到 `dae0`，block 仍然 `SHOT`，两者都不进 classic。
+
+dpd 通过 `/usr/share/honk/direct-unspec` 判断 core 是否带 p1；没有这个 marker（上游原版 core）就保持 `observe`，避免用不完整的流表去加速 WAN 回程（实测强制 stateful 会把 TCP 控制连接打断）。
+
+**分流结果**：
+
+| 流 | honk 判决 | dpd |
+|---|---|---|
+| direct（含 `direct(must)`、offload） | `UNSPEC` + `DIRECT_UNSPEC_MARK` | 进入 classic，正常加速；多 WAN 正常按权重选路 |
+| proxy | redirect 到 `dae0` | 不进 classic，不参与多 WAN（仍由 honk 的 `wan_interface` 单接口出去） |
+| block | `SHOT` | 不进 classic |
+
+**实测（2026-10-27，x86_64 实验台，honk p1 运行中）**：
+
+| 场景 | 结果 |
+|---|---|
+| 直连 4 流 | 3.77–4.18 Gbit/s，dpd `redirect_ok` +141,559 |
+| 直连 64 流 | eth2/eth3 = 1.85:1（自动权重 2:1） |
+| `ifdown wan` | 切到 eth3，模式仍 `stateful`，8 流 `redirect_ok` +123,643 |
+| 显式 `-> proxy` 目标 | sender 324 MB / receiver 0（无节点，按预期失败）；dpd observe 下只 +14 包 |
+| 显式 `-> block` 目标 | 连接被丢弃 |
+| 同目标直连端口 | 3.6 Gbit/s，正常加速 |
+
+**与上游 honk 的关系**：数据面共存不依赖修改 honk 源码——p1 是构建期补丁，产物是 `core-p1` release（三架构 + sha256）。用上游原版 core 仍可运行，但直连不会加速；要用“直连加速 + 代理”必须用 p1 core。RK（ROCKCHIP/aarch64）与 X86 走同一套配置和同一个 p1 core。
 
 ---
 
@@ -220,6 +254,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 - **`verify-packages.sh` 未接进流水线**：它断言 einat/dpd 等必备包，armv7 上必然失败，目前作为手动闸门。
 - **X86/RK 的源码基线固定**在上游 `5fda931`（验证过的提交），IPQ/MTK 跟随最新 `main`/`owrt`。
 - **luci-front 只有 x86_64 / aarch64** 两个预编译二进制；其它架构没有前端（这些目标本来也不启用 mydist）。
+- **honk 直连加速依赖 p1 core**：本 fork 的 `core-p1` 把 direct 判决交回 classic；用上游原版 core（direct 返回 `OK`）时 dpd 门控会自动 `observe`，直连不会加速。两个包必须一起升级（honk p1 + `dpd-fastpath` 的 marker 门控）。
 
 ---
 
@@ -228,7 +263,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 | 现象 | 原因 / 处理 |
 |---|---|
 | `package/honk: Cannot find appropriate hash command` | `generated-stage.mk` 没取到；看 `Custom Packages` 日志里的 `honk:` 行 |
-| honk 资产 404/403 | `PKG_SOURCE_URL` 指向了 `kenzok8`；脚本会改写成实际 release 目录并打印 `PKG_SOURCE_URL=` |
+| honk 资产 404/403 | 本 fork 的 `PKG_SOURCE_URL` 应指向 `kwrum1/openwrt-honk` 的 `core-p1`；确认 `honk/generated-stage.mk` 已提交且三架构 sha256 匹配 |
 | 改了源码但镜像没变 | 缓存 key 是 `CONFIG-OWNER-HASH`；确认分支 hash 变了，或删对应缓存 |
 | X86/RK 镜像里没有 `luci-front` | 检查是否用了 `GENERAL.txt`；RK 需要 aarch64 二进制 |
 | IPQ/MTK 里出现 einat | 检查 `Packages.sh` 的 `case` 与 `Handles.sh` 的门控是否被改动 |

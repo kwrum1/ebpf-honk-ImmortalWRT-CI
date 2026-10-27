@@ -30,6 +30,13 @@
 > 让位**。§2 的归属矩阵作废；细节、原始数字、能说/不能说的边界、以及两条可走的方案
 > （B 接受现状 / C 改到 WAN 入口做下载方向）见 **§8**。用户最初那句"加速就不能代理、
 > 代理就不能加速"**比本文原来的结论更接近事实**。**
+>
+> ### ✅ 2026-10-27 更新：已按“direct 交回 classic”实现（§9）
+>
+> 没有走 C（WAN 入口下载方向），而是给 honk 的 direct 判决加 p1 补丁：4 个 direct 出口返回
+> `TC_ACT_UNSPEC` + `DIRECT_UNSPEC_MARK`，代理/block 判决不变。dpd 用
+> `/usr/share/honk/direct-unspec` 识别；实验台实测直连 3.77–4.18 Gbit/s、64 流 1.85:1，
+> 代理流不进 classic。详见 **§9**。
 
 本文中每个论断都标了来源等级：
 
@@ -357,4 +364,88 @@ harness 自己的汇总：**PASS=12 FAIL=4**。
   2. 对照 `bpftool net show` + `honk /connections`（这次 API 登录没拿到 token，
      `login token: <none>`，需要先修 `system.dae` 的 `password_auth` 口径）；
   3. 只在 1 有正结果时，才谈 C 方案的实现。
+
+## 9. p1 实现：把 direct 判决交回 classic（2026-10-27）
+
+§8.3 给出 B（接受现状）/ C（WAN 入口下载方向）。最终没有走 C，而是走了更小的改动：
+**不改变 honk 的代理/block 判决，只把 direct 判决从“终止整条链”改成“交回 classic 链”**。
+
+### 9.1 具体改动（构建期补丁，不改上游仓库）
+
+位置：`kwrum1/openwrt-honk` 的 `ci/patches/honk-direct-unspec.py`，打在 pinned upstream commit 上。
+
+- `crates/honk-ebpf-common/src/lib.rs`：新增 `DIRECT_UNSPEC_MARK = 0x2000_0000`
+  （避开 TPROXY `0x0800_0000`、CLASSIFIED `0x4000_0000`、NFQUEUE `0x8000_0000`）。
+- `crates/honk-ebpf/src/ingress.rs`：
+  - 4 个 direct 出口（UDP 缓存直连、TCP 缓存直连、TCP conn-state 满、首包 direct/offload）：
+    `set_mark(mark | CLASSIFIED_MARK | DIRECT_UNSPEC_MARK)` + `return TC_ACT_UNSPEC`；
+  - bridge master/slave 第二次遍历：看到 `DIRECT_UNSPEC_MARK` 直接返回 `TC_ACT_UNSPEC`
+    （不重新分类，也不终止 classic）；
+  - `pass_through_classified`、proxy redirect、block shot 不动。
+- 构建：`ci/build-core.sh` 在 checkout 后调用脚本；资产名带 `-p1`；发布到 `core-p1`
+  （x86_64 / aarch64 / armv7 + sha256）。
+- 包：`honk/Makefile` 安装 `/usr/share/honk/direct-unspec` 作为能力 marker；
+  `system.dae` 默认 `nfqueue_enable: false`；`control.sh` 在 false 时不要求
+  `nft_queue`/`nfnetlink_queue` 模块。
+
+### 9.2 为什么这样能工作
+
+TCX 先于 classic，且“非 UNSPEC 终止整条链”。direct 返回 UNSPEC 后：
+
+```
+客户端 → br-lan/eth0 TCX(honk)
+          ├─ proxy  → redirect 到 dae0（用户态），永不进 classic
+          ├─ block  → SHOT
+          └─ direct → UNSPEC + DIRECT_UNSPEC_MARK
+                        ↓
+                     classic tc_run
+                        ├─ router-acl（WAN，pref 90）
+                        └─ dpd（pref 100）：学流、按 WAN 选路、重定向
+```
+
+- direct 包继续走 classic，dpd 在 pref 100 看到它，按 stateful 学流/重定向；
+- proxy 包仍在 TCX 里 redirect 到 `dae0`，**不会**落到 classic；
+- block 仍 `SHOT`；
+- 二次遍历用 marker 位避免重复分类，同时仍放行到 classic。
+
+NAT 不受影响：einat 的 TCX 在 WAN 上（`ingress_rev_snat`/`egress_snat`），dpd 只做转发重定向，
+不碰 NAT；代理流的出口仍由 honk 自己的 socket 走 einat。
+
+### 9.3 实测（2026-10-27，x86_64 实验台）
+
+| 项 | 结果 |
+|---|---|
+| 直连 4 流 | 3.77–4.18 Gbit/s，dpd `redirect_ok` +141,559 |
+| 直连 64 流 | eth2/eth3 = 1.85:1（自动权重 2:1） |
+| `ifdown wan` | 切到 eth3，模式仍 `stateful`，8 流 `redirect_ok` +123,643 |
+| 显式 `-> proxy` 目标 | sender 324 MB / receiver 0（无节点，按预期失败）；dpd observe 下只 +14 包 |
+| 显式 `-> block` 目标 | 连接被丢弃（iperf 控制连接失败） |
+| 同目标直连端口 | 3.6 Gbit/s，正常加速 |
+| NAT（honk 开） | 源地址/端口仍是 einat：`198.18.0.1:21772/25787/27041`、`198.19.0.1:35334/37939/39782` |
+
+对照：未打补丁时 honk 开、64 流全部走 eth2（`eth2 +885 MB / eth3 +238 B`）；
+打补丁后同一测试是 `eth2 +1.669 GB / eth3 +0.901 GB`（1.85:1）。
+
+### 9.4 边界与门禁
+
+- dpd 用 `/usr/share/honk/direct-unspec` 判断 p1；上游原版 core（direct 返回 `OK`）仍降 `observe`。
+  实测强行 stateful + 原版 core 会在第一个反向测试打断 TCP（`unable to receive parameters`），
+  所以这个 marker 不是装饰。
+- 代理流本身仍由 honk 的 `wan_interface` 单接口出口，不参与多 WAN；要代理也分流，
+  需要改 honk 自己的出口选择。
+- 首包仍走 honk 的策略（`direct(must)` 在内核；非 must 的 fallback direct 可能先经用户态嗅探一次），
+  之后 dpd 接管。
+- 没有真实节点/外网时只能验证“代理流不进 classic”（显式 proxy/block 规则 + dpd 计数器），
+  实际节点转发仍需真机。
+- RK 与 X86 同源：aarch64 core 在 `core-p1`，ROCKCHIP 的 `Config` 使用 `GENERAL.txt`
+  （dpd + honk + ACL + QoS），没有单独的 RK 变体。
+
+### 9.5 结论
+
+§8.3 的“整体让位”只在**上游原版 core** 成立。p1 之后：
+
+- **直连保持加速**（含 direct(must)/offload），多 WAN 对直连恢复；
+- **代理仍走 honk**（`dae0`），不经过 dpd；
+- **NAT 仍是 einat**；
+- 代价是 honk 必须用 p1 core（构建补丁，不是 fork），且首包仍过 honk 策略。
 
