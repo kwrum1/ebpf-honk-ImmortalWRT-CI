@@ -75,7 +75,7 @@ UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
 
 # Honk core + LuCI/Doona UI. One branch for every target: `main` carries the
-# mydist datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +
+# ebpf datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +
 # the direct-unspec marker), nfqueue disabled and the .lan/.local DNS rule.
 UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg"
 
@@ -151,7 +151,7 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # 找不到就**直接失败**。静默产出一个「没有数据面」的固件是最糟的结果：
 # 镜像照样能启动、能上网，只有透明代理的快路径悄悄没了。verify-packages.sh
 # 里也登记了 dpd-fastpath 作为第二道闸。
-# mydist 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
+# ebpf 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
 # 不拷贝、也不启用 einat/dpd/router-* 这一套；它们的 GENERAL 用的是原版清单。
 # mydist/ is the only carrier of the eBPF datapath (TC ingress fastpath +
 # full-cone NAT + router-* packages). It is installed for X86/ROCKCHIP only:

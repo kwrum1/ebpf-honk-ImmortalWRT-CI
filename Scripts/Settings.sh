@@ -65,7 +65,7 @@ function generate_config() {
   config_file=".config"
 
   # 配置来源按目标分开：
-  #   X86 / ROCKCHIP -> GENERAL.txt        （mydist 数据面 + 魔改 UI/DNS）
+  #   X86 / ROCKCHIP -> GENERAL.txt        （ebpf 数据面 + 魔改 UI/DNS）
   #   其它           -> GENERAL-STOCK.txt  （原版逻辑：NSS、原版 honk、原版包集）
   # TEST 只吃自己那份，不拼 GENERAL。
   if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then

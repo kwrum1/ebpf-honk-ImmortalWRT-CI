@@ -75,10 +75,10 @@ if [ -f "$RUST_FILE" ]; then
 fi
 
 #=============================================================================
-# 以下全部是 mydist 专属修改：只对 X86 / ROCKCHIP 生效
+# 以下全部是 ebpf 专属修改：只对 X86 / ROCKCHIP 生效
 #=============================================================================
 # IPQ / MTK 走原版逻辑（NSS + 原版 honk + 原版 config）：GPU 裁剪、flow offload、
-# nft-offload、odhcpd 接管、dnsmasq ignore、honk NFQUEUE 都是 mydist 数据面的配套，
+# nft-offload、odhcpd 接管、dnsmasq ignore、honk NFQUEUE 都是 ebpf 数据面的配套，
 # 不适用于它们。
 if [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
 
@@ -164,7 +164,7 @@ fi
 #   加速（offload 的快速路径会绕过 TC，正是我们的数据面所在）。
 #
 #   为什么改 patch 而不是改 /etc/config/firewall：
-#     红线是「mydist 不许动 /etc/config/{firewall,network,dhcp}」——指运行期
+#     红线是「ebpf 不许动 /etc/config/{firewall,network,dhcp}」——指运行期
 #     不许覆盖。这里改的是**构建期生成默认配置的补丁**，和 DRM 裁剪同一类做法。
 #   为什么不能只在 .config 里关：
 #     flow_offloading 是 uci 的**配置项**，不是包选择，.config 管不到。
