@@ -1,42 +1,49 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026 VIKINGYFY
+# Copyright (C) 2026 kwrum1
+#
+# OWRT-ALL: the only firmware pipeline in this repository.
+#
+# Targets: X86 and ROCKCHIP, both built from kwrum1/immortalwrt@mydist
+# (eBPF datapath + honk handover). Everything else (MTK/QCA/IPQ) was removed
+# with the upstream CI: this repo no longer tracks upstream's platform matrix
+# and no longer chains off upstream's nightly Auto-Clean run.
+#
+# Triggers are self-contained on purpose:
+#   * schedule  - one build a day, UTC 20:00 (04:00 CST)
+#   * dispatch  - manual, with optional extra packages
+# A new commit alone does NOT build: a build pins the source commit recorded in
+# its provenance file, so an accidental push cannot silently change the image.
 
-#CI项目
 name: OWRT-ALL
 
-#CI计划
 on:
-  #自动编译：当Auto-Clean运行完成后
-  workflow_run:
-    workflows: ["Auto-Clean"]
-    types:
-      - completed
-  #手动编译
+  schedule:
+    - cron: 0 20 * * *
   workflow_dispatch:
     inputs:
       PACKAGE:
-        description: '手动调整插件包，多个请用\n符号隔开。'
+        description: 'Extra package lines for .config (one per line)'
         required: false
         type: string
       TEST:
-        description: '仅输出配置文件，不编译固件。'
+        description: 'Config-only run (no image)'
         default: 'false'
         required: false
         type: boolean
 
-#CI权限
 permissions: write-all
 
-#CI任务
+concurrency:
+  group: owrt-all
+  cancel-in-progress: false
+
 jobs:
   config:
-    name: ${{matrix.CONFIG}}
+    name: ${{ matrix.CONFIG }}
     strategy:
       fail-fast: false
-      #max-parallel: 3
       matrix:
         include:
-          # X86 / ROCKCHIP: the mydist source fork (eBPF datapath + honk handover)
           - CONFIG: ROCKCHIP
             SOURCE: kwrum1/immortalwrt
             BRANCH: mydist
@@ -44,31 +51,17 @@ jobs:
             SOURCE: kwrum1/immortalwrt
             BRANCH: mydist
 
-
-    #调用公用编译核心WRT-CORE.yml
     uses: ./.github/workflows/WRT-CORE.yml
     with:
-      #编译配置
-      WRT_CONFIG: ${{matrix.CONFIG}}
-      #默认主题
+      WRT_CONFIG: ${{ matrix.CONFIG }}
       WRT_THEME: aurora
-      #默认主机名
       WRT_NAME: OWRT
-      #默认WIFI名称
       WRT_SSID: OWRT
-      #默认WIFI密码
       WRT_WORD: 12345678
-      #默认地址
       WRT_IP: 192.168.10.1
-      #默认密码，仅作提示，修改无用
       WRT_PW: 无
-      #源码链接
-      WRT_REPO: https://github.com/${{matrix.SOURCE}}.git
-      #源码分支
-      WRT_BRANCH: ${{matrix.BRANCH}}
-      #源码名称
-      WRT_SOURCE: ${{matrix.SOURCE}}
-      #插件调整
-      WRT_PACKAGE: ${{inputs.PACKAGE}}
-      #仅输出配置文件
-      WRT_TEST: ${{inputs.TEST}}
+      WRT_REPO: https://github.com/${{ matrix.SOURCE }}.git
+      WRT_BRANCH: ${{ matrix.BRANCH }}
+      WRT_SOURCE: ${{ matrix.SOURCE }}
+      WRT_PACKAGE: ${{ inputs.PACKAGE }}
+      WRT_TEST: ${{ inputs.TEST }}

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026 VIKINGYFY
+# Copyright (C) 2026 kwrum1
 #
 # =============================================================================
 #  第三方包引入 —— 单基线裁剪版
@@ -74,13 +74,10 @@ UPDATE_PACKAGE() {
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
 
-# Honk 核心 + LuCI/Doona 管理界面
-# honk: X86/ROCKCHIP use the mydist branch (DNS stays in dnsmasq -> SmartDNS,
-# honk resolves through 127.0.0.1:6053); IPQ and the rest keep mainline honk.
-case "$WRT_CONFIG" in
-	X86|ROCKCHIP) UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "mydist" "pkg" ;;
-	*)            UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg" ;;
-esac
+# Honk core + LuCI/Doona UI. One branch for every target: `main` carries the
+# mydist datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +
+# the direct-unspec marker), nfqueue disabled and the .lan/.local DNS rule.
+UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg"
 
 # honk/ 下三个 generated-* 文件都被 .gitignore 忽略，由 openwrt-honk 的 release.yml
 # 作为 asset 发布。缺任何一个都会在编译/打包阶段失败：
@@ -156,43 +153,39 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # 里也登记了 dpd-fastpath 作为第二道闸。
 # mydist 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
 # 不拷贝、也不启用 einat/dpd/router-* 这一套；它们的 GENERAL 用的是原版清单。
-case "$WRT_CONFIG" in
-X86|ROCKCHIP)
-MYDIST_ROOT=""
-for _c in "$GITHUB_WORKSPACE/wrt/mydist" \
-          "$GITHUB_WORKSPACE/mydist" \
-          "$GITHUB_WORKSPACE/wrt/package/mydist" \
-          "$(pwd)/mydist"; do
-	[ -d "$_c/router-dataplane" ] && { MYDIST_ROOT="$_c"; break; }
-done
+# mydist/ is the only carrier of the datapath (TC ingress eBPF fastpath +
+# eBPF full-cone NAT + the router-* packages). It must come from the firmware
+# tree that is being built -- $GITHUB_WORKSPACE/wrt/mydist -- and from nowhere
+# else: a second copy in this repository used to shadow it and shipped whatever
+# it happened to contain. If it is missing, fail loudly; a firmware without a
+# datapath must never be produced silently.
+MYDIST_ROOT="$GITHUB_WORKSPACE/wrt/mydist"
 
-if [ -n "$MYDIST_ROOT" ]; then
-	echo " "
-	# 第三个候选位置就是 ./mydist 本身（上一次构建留下的），此时不能先 rm
-	if [ "$(readlink -f "$MYDIST_ROOT" 2>/dev/null)" = "$(readlink -f ./mydist 2>/dev/null)" ]; then
-		echo "mydist already in place at $(pwd)/mydist"
-	else
-		rm -rf ./mydist
-		mkdir -p ./mydist
-		cp -rf "$MYDIST_ROOT"/. ./mydist/
-	fi
-	find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
-		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
-	echo "mydist installed into package/ (from $MYDIST_ROOT):"
-	ls ./mydist | sed 's/^/  /'
-else
+if [ ! -d "$MYDIST_ROOT/router-dataplane" ]; then
 	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	echo "!! FATAL: mydist/router-dataplane not found."
-	echo "!! 期望位置: \$GITHUB_WORKSPACE/mydist/router-dataplane"
-	echo "!! 没有它，固件里不会有 eBPF 数据面。中止构建。"
+	echo "!! FATAL: $MYDIST_ROOT/router-dataplane not found."
+	echo "!! The source tree ($WRT_SOURCE@$WRT_BRANCH) must carry mydist/."
+	echo "!! A firmware without the eBPF datapath is not a valid build."
 	echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 	exit 1
 fi
-	;;
-*)
-	echo "mydist: $WRT_CONFIG uses the original logic, datapath packages skipped"
-	;;
-esac
+
+echo " "
+rm -rf ./mydist
+mkdir -p ./mydist
+cp -rf "$MYDIST_ROOT"/. ./mydist/
+find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+	-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
+
+# Provenance: hash the exact source directory that is compiled, not the one we
+# intended to copy (see docs/BENCHMARK.md provenance section).
+DPD_SRC_SHA=$(find ./mydist -type f \( -name '*.c' -o -name '*.h' \) -print0 |
+	sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+echo "mydist installed into package/ (from $MYDIST_ROOT)"
+echo "mydist src sha256: $DPD_SRC_SHA"
+if [ -n "$GITHUB_ENV" ]; then
+	echo "DPD_SRC_SHA=$DPD_SRC_SHA" >> "$GITHUB_ENV"
+fi
 
 #更新软件包版本
 UPDATE_VERSION() {

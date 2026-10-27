@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# Weekly housekeeping for THIS repository only. It is not a build trigger:
+# builds run on their own schedule (OWRT-ALL). Keeping the two apart is what
+# makes the pipeline independent of upstream's nightly chain.
+#
+# Retention: the last 6 firmware releases and 14 days of run history are kept;
+# all build caches are dropped (they are keyed by source commit, so a new build
+# would otherwise restore a stale staging_dir/toolchain).
+
+name: Clean
+
+on:
+  schedule:
+    - cron: 0 19 * * 0      # Sundays 19:00 UTC = Monday 03:00 CST
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trim releases
+        uses: ophub/delete-releases-workflows@main
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_releases: true
+          releases_keep_latest: 6
+          delete_tags: true
+          delete_workflows: true
+          workflows_keep_day: 14
+
+  caches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Drop build caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh cache delete --all --repo "$GITHUB_REPOSITORY"
