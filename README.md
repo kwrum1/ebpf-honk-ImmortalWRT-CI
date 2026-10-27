@@ -1,4 +1,4 @@
-# OWRT-CI（mydist 版）
+# OWRT-CI（ebpf 版）
 
 本仓库是 [VIKINGYFY](https://github.com/VIKINGYFY) 的 OpenWRT 云编译 CI 的二次开发版：
 
@@ -144,11 +144,6 @@ WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl 
 - **`.lan` 名字**：`/var/etc/router-dns/hosts.lan`（本机名 + odhcpd 租约名），smartdns 用 `hosts-file` 读取。
 - **DHCP 自租约守卫**：`mydist-posture` 把本机各接口 MAC 注册成 `dhcp.mydist_self_<iface>`（`option ip 'ignore'`），odhcpd 不再给本机发租约；单网卡/同广播域拓扑下不会再出现“默认路由指向自己”。
 
-### 5.5 高通平台为什么不同
-
-- IPQ / MTK 走 **NSS**（原版 ImmortalWrt 的硬件加速），与 einat 是两套互斥方案：同一台设备不会同时启用。
-- `einat-ebpf` 只支持 x86_64 / aarch64；IPQ60XX（armv7）根本装不上。
-- 所以这些目标的 `Config` 使用 `GENERAL-STOCK.txt`，`Packages.sh` 不拷贝 `mydist/`，`Handles.sh` 跳过全部魔改补丁。
 
 ### 5.6 代理 + 加速共存（honk p1）
 
