@@ -130,11 +130,11 @@ WAN egress  :  honk TCX(wan_egress) → einat TCX(SNAT)          → router-acl 
 | **einat-ebpf** | `EHfive/einat-ebpf` v0.1.11，上游 release 的静态 musl 二进制（x86_64 / aarch64） | 在 TC 上实现 **Full Cone NAT44**（EIM + EIF），不依赖 conntrack | 替换 `fw4` 生成的 `MASQUERADE`（conntrack + 端口受限映射）；与普通 NAT 相比外网可主动回连 | `enabled=1`，端口段 `20000-29999`，hairpin 开 |
 | **dpd-fastpath** | 本仓库：`src/dpd_fastpath.bpf.c` + `dpdctl`，构建时用 host clang 编 BPF | TC **ingress** 快路径：已建立连接的家用转发走 `bpf_fib_lookup` 直接重定向 | 替换“每个包都走 netfilter 规则链”的路径；**不做 NAT**（NAT 唯一归属 einat），**不共享 einat 的 map/ABI** | `mode=stateless`，有 uplink 才启用；无 WAN/无 einat 时自动降级 `observe` |
 | **router-acl** | 本仓库：`src/acl.bpf.c` + `aclctl` | WAN 侧 eBPF ACL/guard：丢弃无主入站；`bypass` 模式加 mark + notrack，把 NAT 流从 conntrack 摘出 | 叠加在 fw4 之上（fw4 仍是兜底）；比 stock 更严：真正挡住无主入站的是这里 | `enabled=1`，`mode=guard`，`import_firewall=1` |
-| **router-qos** | 本仓库（纯脚本包） | WAN 上单条 `root cake`，按实际上行整形 | 替换默认 `fq_codel`；CAKE 默认 `triple-isolate` 逐主机公平、`diffserv4` 分档 | `enabled=1`，`upload=0` 时空转（构建镜像默认由 CI/首启设置） |
-| **router-tuning** | 本仓库（纯脚本包） | 首启按 CPU/内存/网卡选档：BBR、`fq`、sysctl、ring/coalescing、XPS、governor | 不替换 qdisc（CAKE 仍接管 WAN）；只调内核/网卡参数 | `profile=auto` |
+| **router-qos** | 本仓库（纯脚本包） | WAN 上一条 `root qdisc`，**无限速**（逐流公平 + AQM）：≤1 Gbit/s 用 `cake diffserv4 nat`，更快的链路自动用 `fq_codel` | 替换默认 qdisc；无速率参数、无 UI、默认开启（`cake` 在多 G 链路上代价太大，所以按链路速率自动选） | `enabled=1`，`wan` 可列多条（多 WAN 参与负载的链路自动纳入） |
+| **router-tuning** | 本仓库（纯脚本包） | 首启按 CPU/内存/网卡选档：BBR、`fq`、sysctl、ring/coalescing、XPS、governor | 不替换 qdisc（`router-qos` 仍接管 WAN）；只调内核/网卡参数 | `profile=auto` |
 | **router-dns** | 本仓库（纯脚本包） | **SmartDNS 独占 :53**；dnsmasq 端口 0、停用；`router-dns-sync` 从 DHCP 租约派生真实上游（过滤本机地址）并写 `hosts.lan`；`/tmp/resolv.conf` → `127.0.0.1`；honk 的 DNS 交接 | 替换 dnsmasq 的解析角色；dnsmasq 不再是解析器 | SmartDNS `:53`，dnsmasq `:0`，上游来自租约而不是写死 |
 | **luci-front** | 本仓库；Rust + pingora 0.9，静态 musl（x86_64 / aarch64 各一份预编译） | 接管 :80/:443：HTTP/2、TLS、HSTS/CSP 等安全头、静态文件 ETag/304；`/cgi-bin`、`/ubus` 反代到 uhttpd | 替换 uhttpd 的对外监听；uhttpd 退到 `127.0.0.1:8080`，只保留 Lua CGI 与 ubus 桥 | 两个架构自动选二进制 |
-| **luci-app-mydist** | 本仓库 | 菜单（DNS/代理/防火墙/QoS）、端口控制（五元组单行表格）、QoS 页、`mydist-posture` | 替换原版 firewall/smartdns/honk 菜单入口 | `rule 999` 默认开启且不在 UI 显示 |
+| **luci-app-mydist** | 本仓库 | 菜单（DNS/代理/防火墙/多 WAN 负载）、端口控制（五元组单行表格）、多 WAN 负载页、`mydist-posture` | 替换原版 firewall/smartdns/honk 菜单入口 | `rule 999` 默认开启且不在 UI 显示；QoS 没有页面（默认开启、无需配置） |
 
 ### 5.4 DNS 上游与自租约（round 10）
 
