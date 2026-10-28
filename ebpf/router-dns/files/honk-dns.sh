@@ -69,7 +69,10 @@ RULE='dport(53) -> direct(must)'
 # never came back; stopping honk restored 2.2 Gbit/s). Send all v6 direct, and
 # keep the line in our marked block so it is re-applied on every boot.
 MARK2='# ebpf: honk-v6'
-RULE2='ipversion(6) -> direct(must)'
+# `dip('::/0')` rather than `ipversion(6)`: dip is already used by the stock
+# config, so it is guaranteed to parse; a predicate the core does not know would
+# make it reject the whole file at startup.
+RULE2="dip('::/0') -> direct(must)"
 
 log() { logger -t router-dns "$*"; }
 
@@ -112,10 +115,10 @@ patch() {
 	# 2. the two `&& !dport(53)` clauses are contradicted by rule 1.
 	# 3. the :53 rule itself, right after the top-level `routing {`.
 	awk -v m="$MARK" -v r="$RULE" -v m2="$MARK2" -v r2="$RULE2" '
-		$0 ~ "^[[:space:]]*" r "[[:space:]]*$" { next }
-		$0 ~ "^[[:space:]]*" m "[[:space:]]*$" { next }
-		$0 ~ "^[[:space:]]*" r2 "[[:space:]]*$" { next }
-		$0 ~ "^[[:space:]]*" m2 "[[:space:]]*$" { next }
+		index($0, r) { next }
+		index($0, m) { next }
+		index($0, r2) { next }
+		index($0, m2) { next }
 		{ gsub(/ && !dport\(53\)/, ""); print }
 		!done && $0 ~ /^routing[[:space:]]*\{/ {
 			print "    " m
@@ -134,7 +137,7 @@ patch() {
 	# an operator's own upstream is left alone, and demanding ours would make the
 	# handover refuse to apply to exactly the file it must fix.
 	if grep -qE '^[[:space:]]*dport\(53\)' "$CONF.new" &&
-		grep -qE '^[[:space:]]*ipversion\(6\)[[:space:]]*->[[:space:]]*direct' "$CONF.new" &&
+		grep -qF "$RULE2" "$CONF.new" &&
 		grep -qF "$MARK" "$CONF.new" &&
 		! grep -qF '!dport(53)' "$CONF.new"; then
 		mv -f "$CONF.new" "$CONF"

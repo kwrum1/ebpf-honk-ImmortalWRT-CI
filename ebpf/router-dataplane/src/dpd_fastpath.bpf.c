@@ -364,6 +364,17 @@ static __always_inline int dpd_may_accelerate(const struct dpd_config *cfg,
 		DPD_INC(st, ST_BCAST_SKIP);
 		return 0;
 	}
+	if (k->family == AF_INET6) {
+		__u32 h = bpf_ntohl(k->daddr[0]);
+
+		/* fe80::/10 (link-local) and :: (unspecified) are never routed;
+		 * a fast path that tried would either loop or steal neighbour
+		 * discovery traffic. */
+		if (h == 0 || ((h >> 24) == 0xfe && ((h >> 16) & 0xc0) == 0x80)) {
+			DPD_INC(st, ST_V6_SKIP);
+			return 0;
+		}
+	}
 	return dpd_policy_ok(cfg, vlan_id, tagged, st);
 }
 
@@ -921,17 +932,25 @@ int dpd_fastpath(struct __sk_buff *skb)
 		 *   UDP: ihl + 8          + gso_size
 		 * If the L4 header is not parseable, fall back to ihl+payload.
 		 */
-		if (skb->gso_size && fkey.family == AF_INET) {
-			__u32 seg = ihl + skb->gso_size;
+		if (skb->gso_size) {
+			__u32 l4h = 0;
+			__u32 seg;
 
 			if (fkey.proto == IPPROTO_TCP) {
-				struct tcphdr *th = (void *)iph + ihl;
+				struct tcphdr *th = data + l3_off +
+					(fkey.family == AF_INET ? ihl :
+					 sizeof(struct ipv6hdr));
 
 				if ((void *)(th + 1) <= data_end)
-					seg += (__u32)th->doff * 4;
+					l4h = (__u32)th->doff * 4;
 			} else if (fkey.proto == IPPROTO_UDP) {
-				seg += 8;
+				l4h = 8;
 			}
+
+			/* One segment = L3 header + L4 header + gso_size. v4's L3
+			 * header is ihl, v6's is a fixed 40 bytes. */
+			seg = (fkey.family == AF_INET ? ihl : sizeof(struct ipv6hdr)) +
+			      l4h + skb->gso_size;
 			if (seg < fib.tot_len)
 				fib.tot_len = (__u16)seg;
 		}
