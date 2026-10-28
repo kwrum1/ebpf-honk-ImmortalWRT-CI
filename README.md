@@ -181,18 +181,45 @@ dpd 通过 `/usr/share/honk/direct-unspec` 判断 core 是否带 p1；没有就�
 ---
 
 
-### 5.6 einat 补丁（p1 / p2）
+### 5.6 einat 补丁（p1 / p2）与每包收益
 
 `einat-ebpf` 不再直接下载上游 release，而是由 `EINAT-BUILD` 从上游源码（pin 到 `ba647ce6`）打补丁后构建：
 
-| 补丁 | 内容 | 每包收益 |
+| 补丁 | 内容 | 收益 |
 |---|---|---|
-| `patches/einat-perf.py`（p1） | v4-only 构建里 `get_is_ipv4()` 仍解析一遍 L2/L3，`parse_packet()` 紧接着又解析同一份头 | 每包每方向少一次头部解析 |
-| `patches/einat-perf-p2.py`（p2） | ① `dest_config` 只有 WAN 地址一个条目时用 32 位比较代替 LPM 查表；② 已建立 TCP 连接的数据包在 1s 内跳过 CT 查表 + `bpf_timer_start()` | ① WAN 出向每包少一次 LPM 查表；② TCP 数据包少一次 hash 查表 + 一次带锁的定时器重排 |
+| `patches/einat-perf.py`（p1） | 构建用上游 `static` 预设（不带 `ipv6` feature）；并且 v4-only 构建里 `get_is_ipv4()` 仍解析一遍 L2/L3，`parse_packet()` 紧接着又解析同一份头 | BPF 程序里没有 NAT66/v6 解析分支；每包每方向少一次 L2/L3 头解析 |
+| `patches/einat-perf-p2.py`（p2）① | `dest_config` 只有 WAN 地址一个条目时，用 32 位目的地址比较代替 LPM 查表 | 出向每包少一次 LPM 查表 |
+| `patches/einat-perf-p2.py`（p2）② | 已建立 TCP 连接的数据包，1 秒内跳过 CT 查表 + `bpf_timer_start()` | TCP 数据包少一次 hash 查表 + 一次带锁的定时器重排 |
 
-语义边界：p2 只跳过「不可能命中」的查表（单个 dest 条目且等于默认外部地址、且为满前缀）和「只刷新定时器」的路径（`CT_ESTABLISHED` + TCP 数据包；SYN/FIN/RST、ICMP 错误、UDP/ICMP、非 ESTABLISHED 全部走慢路径）。定时器刷新被限流到 1s 一次，不是关闭。
+#### 每包 map 开销（v4，单个 einat 实例）
+
+| 路径 | 上游 | 现在 |
+|---|---|---|
+| WAN egress，普通流量 | LPM(dest) + LPM(src) + hash(binding) + hash(ct) = **4** | LPM(src) + hash(binding) + hash(ct) = **3** |
+| WAN egress，已建立 TCP 数据 | 同上 + 每包 `bpf_timer_start` | LPM(src) + hash(binding) = **2**，定时器刷新最多 1 次/秒/流 |
+| WAN ingress，普通流量 | LPM(dest) + hash(binding) + hash(ct) = **3** | **3**（不变） |
+| WAN ingress，已建立 TCP 数据 | 同上 + 每包 `bpf_timer_start` | LPM(dest) + hash(binding) = **2**，定时器刷新最多 1 次/秒/流 |
+| 每包固定开销 | `get_is_ipv4` + `parse_packet` 两次解析 | 一次解析 |
+
+LPM 是这三种 map 里最贵的一种（前缀树遍历），hash 命中要算 jhash + 桶，`bpf_timer_start` 要拿定时器锁并重排 hrtimer——所以 ② 省的不只是一次查表，主要是每包一次带锁的定时器操作。
+
+按 1 Mpps 粗算（只是算术，不是实测）：出向普通流量每秒少 100 万次 LPM 查表；已建立 TCP 每秒少 100 万次 hash 查表，定时器重排从"每包一次"降到"每流每秒最多一次"。
+
+#### 等价性边界
+
+* p2 ① 只在「dest_config 恰好一个条目、等于默认外部地址、且为满前缀」时启用比较：此时 LPM(daddr) 只可能在 `daddr == 外部地址` 时命中，比较结果与查表**完全等价**。其它情况（多地址、非满前缀、空表）分别落到 mode 2 / mode 0，其中 mode 2 就是上游行为；表更新期间先写 mode 2 兜底再写真实值。
+* p2 ② 只跳过「只会刷新定时器」的路径：`CT_ESTABLISHED` + TCP 数据包。SYN/FIN/RST、ICMP 错误、UDP/ICMP、任何非 ESTABLISHED 状态全部照旧走慢路径；`map_ct` 仍是状态/超时/refcount 的唯一来源，映射分配和全锥行为一行没动。实际差异只是 TCP 定时器刷新从每包一次变成最多每秒一次（7200 s 的超时最多提前 <1 s 到期）。
+* 两者都不改变 NAT 映射：外部端口分配、binding/ct 的 refcount 与 seq、hairpin/dest_config 语义都保持上游逻辑。
+
+#### 怎么自己量
+
+`bpftool prog profile id <egress_snat 的 prog id> duration 5` 看每包指令/cycles，或 `iperf3 -P 8` 对比两个镜像。本项目**不出 perf 数字**：实验机是共享 ESXi，抖动 ±40%，量出来的差值说明不了问题。
+
+#### 发布门禁
 
 `EINAT-BUILD` 的 `e2e (netns)` 作业在发布前跑 `patches/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
+
+
 ## 6. 配置分层
 
 | 文件 | 谁用 | 内容 |
