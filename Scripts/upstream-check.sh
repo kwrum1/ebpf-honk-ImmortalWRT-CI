@@ -81,6 +81,19 @@ have package/network/services/odhcpd/files/odhcpd.defaults 'dhcp\.odhcpd\.maindh
 	&& ok "odhcpd.defaults: maindhcp" \
 	|| bad "odhcpd.defaults: maindhcp"
 
+# hostapd support symbols: qualcommbe builds flip these to
+# "default y if TARGET_qualcommbe" (kmod-ath12k depends on all three and the
+# MU-EDCA patch needs CONFIG_IEEE80211AX). Upstream must still have them as
+# "default n", otherwise Handles.sh would be rewriting something that changed.
+for sym in DRIVER_11AC_SUPPORT DRIVER_11AX_SUPPORT DRIVER_11BE_SUPPORT; do
+	if have package/network/services/hostapd/Config.in "^config ${sym}$" &&
+		grep -A3 "^config ${sym}$" "$TREE/package/network/services/hostapd/Config.in" 2>/dev/null | grep -qE '^[[:space:]]*default n$'; then
+		ok "hostapd Config.in: $sym default n"
+	else
+		bad "hostapd Config.in: $sym default n"
+	fi
+done
+
 echo
 if [ "$fails" = 0 ]; then
 	echo "RESULT: upstream still matches every build-time anchor"

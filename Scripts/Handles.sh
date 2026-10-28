@@ -459,3 +459,38 @@ if [[ "${WRT_CONFIG}" != "X86" && "${WRT_CONFIG}" != "ROCKCHIP" ]]; then
 		echo "!! offload: firewall4 patch not found; cannot confirm offload defaults for $WRT_CONFIG" >&2
 	fi
 fi
+
+# --- qualcommbe: enable the hostapd 11ac/11ax/11be support symbols -----------
+#
+# qualcommbe is an 802.11be target, but the tree leaves DRIVER_11AC_SUPPORT /
+# DRIVER_11AX_SUPPORT / DRIVER_11BE_SUPPORT at "default n". They are hidden
+# bools (writing them into .config does nothing) and kmod-ath12k depends on all
+# three, so the image build stops with
+#
+#     ERROR: unable to select packages: kmod-ath12k (no such package)
+#
+# and hostapd's MU-EDCA patch has no 'he_mu_edca' member to compile against.
+# Turn them on for this target only, and fail loudly if the anchors move.
+if [ "${WRT_TARGET:-}" = "qualcommbe" ]; then
+	HOSTAPD_CFG_IN="$GITHUB_WORKSPACE/wrt/package/network/services/hostapd/Config.in"
+	if [ ! -f "$HOSTAPD_CFG_IN" ]; then
+		echo "!! qualcommbe: $HOSTAPD_CFG_IN not found" >&2
+		exit 1
+	fi
+	for SYM in DRIVER_11AC_SUPPORT DRIVER_11AX_SUPPORT DRIVER_11BE_SUPPORT; do
+		awk -v sym="$SYM" '
+			/^config / { inblk = ($2 == sym); print; next }
+			inblk && /^[ \t]*default n$/ {
+				print "\tdefault y if TARGET_qualcommbe"; inblk = 0; next
+			}
+			{ print }
+		' "$HOSTAPD_CFG_IN" > "$HOSTAPD_CFG_IN.tmp" && mv "$HOSTAPD_CFG_IN.tmp" "$HOSTAPD_CFG_IN"
+		if ! grep -A3 "^config ${SYM}$" "$HOSTAPD_CFG_IN" | grep -q 'default y if TARGET_qualcommbe'; then
+			echo "!! qualcommbe: could not enable ${SYM} in $HOSTAPD_CFG_IN (anchor drifted?)" >&2
+			exit 1
+		fi
+	done
+	echo "qualcommbe: hostapd DRIVER_11{AC,AX,BE}_SUPPORT enabled (kmod-ath12k)"
+else
+	echo "hostapd support symbols: left to the target ($WRT_TARGET)"
+fi
