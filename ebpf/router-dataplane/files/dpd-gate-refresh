@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# dpd-gate-refresh - re-evaluate the acceleration gates and publish the result.
+#
+# Who calls this:
+#   * einat's init, the moment einat's eBPF NAT attaches or stops. Acceleration
+#     is only allowed while einat is the NAT (an accelerated flow has no
+#     conntrack entry, so its reply is accepted purely because of the blanket
+#     WAN->LAN accept that einat injects into fw4). Waiting for the next boot, or
+#     polling, would both be worse than saying it now.
+#   * an operator, by hand, after changing uci:
+#         /usr/libexec/dpd-gate-refresh ; /etc/init.d/dpd-fastpath status
+#
+# It exists as a standalone script instead of an extra init command because the
+# rc.common dispatcher runs `$action "$@"`: a command named `gate-refresh` would
+# need a shell function literally named `gate-refresh`, which dash rejects
+# outright (busybox ash accepts it, dash does not), and a `gate_refresh`
+# function would never be reached under the dashed command name. A path has no
+# such ambiguity.
+#
+# Safe to run at any time: it only writes the BPF maps, and if the program is not
+# loaded, dpdctl fails silently and the next start republishes.
+. /lib/functions.sh
+. /usr/libexec/dpd-fastpath.sh
+
+emode="$(dpd_gate_refresh_uci)"
+dpd_log "gate-refresh: effective=$emode"
+printf '%s\n' "$emode"

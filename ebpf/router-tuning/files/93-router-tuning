@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Re-apply the per-interface half of router-tuning whenever an interface comes
+# up. The sysctl half is boot-only by design (it is applied by /etc/init.d/sysctl
+# before any device exists); the interface half has to run whenever a device
+# (re)appears, because a redial or a re-plug resets rings, coalescing and
+# txqueuelen with it.
+#
+# ACTION values are netifd's (see 90-dpd-fastpath for the list).
+
+[ -n "$ACTION" ] || exit 0
+
+. /lib/functions.sh
+. /usr/libexec/router-tuning.sh
+
+case "$ACTION" in
+ifup | ifupdate | add | update)
+	[ -n "$DEVICE" ] || exit 0
+	rt_config
+	[ "$RT_ENABLED" = 1 ] || exit 0
+	rt_iface_apply "$DEVICE"
+	;;
+esac
+
+exit 0

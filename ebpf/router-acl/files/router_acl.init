@@ -1,0 +1,143 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# mydist router-acl: WAN eBPF ACL (the conntrack escape)
+#
+# Defaults are what this baseline ships:
+#   enabled '1'   -> attached, guard mode. Unsolicited inbound on the WAN is
+#                    dropped at the TC hook, before fw4 or conntrack see it.
+#                    Additive: fw4 and conntrack keep working, all that goes
+#                    away is junk that should never have reached either.
+#   enabled '0'   -> nothing is attached and nothing changes.
+#   mode 'guard'  -> drop unsolicited inbound on the WAN.
+#   mode 'bypass' -> also mark and notrack, which is what actually takes
+#                    nf_conntrack out of the data path for NATed flows.
+#                    Refused unless einat is enabled -- fw4's masquerade is a
+#                    conntrack operation and cannot NAT a notracked packet.
+#
+# START is late: the attach needs an L3 device, and at boot the WAN usually has
+# none yet (pppoe-wan appears only after the dial). That failure is not fatal,
+# /etc/hotplug.d/iface/91-router-acl is what covers it.
+
+START=96
+STOP=04
+USE_PROCD=1
+
+. /usr/libexec/router-acl.sh
+
+acl_push_uci() {
+	local mode="$1" echo4="$2" echo6="$3" udp="$4" tcp="$5" icmp="$6" mark="$7"
+	local fullcone="$8" lan_prefixes="$9"
+
+	[ -x "$ACL_CTL" ] || return 0
+	"$ACL_CTL" set mode "$mode" 2>/dev/null
+	"$ACL_CTL" set echo "$echo4" 2>/dev/null
+	"$ACL_CTL" set v6echo "$echo6" 2>/dev/null
+	"$ACL_CTL" set timeouts "$((udp * 1000))" "$((tcp * 1000))" "$((icmp * 1000))" 2>/dev/null
+	"$ACL_CTL" set mark "0x$mark" 2>/dev/null
+	"$ACL_CTL" set fullcone "$fullcone" 2>/dev/null
+	# shellcheck disable=SC2086
+	"$ACL_CTL" set lan $lan_prefixes 2>/dev/null
+	return 0
+}
+
+start_service() {
+	local enabled mode wan lan echo4 echo6 udp tcp icmp mark mask
+	local forward_list input_list wan_dev lan_dev nok=0 fullcone
+
+	config_load router_acl
+	config_get_bool enabled global enabled 0
+	config_get mode global mode guard
+	config_get wan global wan wan
+	config_get lan global lan lan
+	config_get_bool echo4 global allow_echo 0
+	config_get_bool echo6 global allow_v6_echo 0
+	config_get udp global udp_timeout 120
+	config_get tcp global tcp_timeout 3600
+	config_get icmp global icmp_timeout 30
+	config_get mark global mark 01000000
+	config_get mask global mark_mask ff000000
+	config_get forward_list global forward
+	config_get input_list global input
+	config_get_bool fullcone global fullcone 0
+
+	if [ "$enabled" != "1" ]; then
+		acl_log "disabled; removing any fw4 includes and detaching"
+		acl_nft_apply off
+		acl_detach_if "$(acl_resolve_dev "$wan")"
+		return 0
+	fi
+
+	if [ "$mode" = "bypass" ] && ! acl_einat_enabled; then
+		acl_log "refusing mode=bypass: einat is not enabled. fw4's masquerade" \
+			"needs conntrack and cannot NAT a notracked flow; falling back to guard"
+		mode=guard
+	fi
+
+	wan_dev="$(acl_resolve_dev "$wan")"
+	lan_dev="$(acl_resolve_dev "$lan")"
+
+	# publish first: on restart the program may already be loaded, and the
+	# attach below does not change these values.
+	acl_push_uci "$mode" "$echo4" "$echo6" "$udp" "$tcp" "$icmp" "$mark" \
+		"$fullcone" "$(acl_lan_prefixes "$lan_dev")"
+
+	if [ -n "$wan_dev" ] && acl_attach_if "$wan_dev"; then
+		nok=1
+	elif [ -z "$wan_dev" ]; then
+		acl_log "WAN '$wan' has no device yet; hotplug will retry on ifup"
+	else
+		acl_log "attach on $wan_dev failed"
+	fi
+
+	# the maps exist as soon as one program is loaded
+	if [ "$nok" = 1 ]; then
+		acl_push_uci "$mode" "$echo4" "$echo6" "$udp" "$tcp" "$icmp" "$mark" \
+			"$fullcone" "$(acl_lan_prefixes "$lan_dev")"
+		acl_push_ports "$forward_list" "$input_list"
+		acl_import_firewall
+	fi
+
+	acl_nft_apply "$mode" "$lan_dev" "$mark" "$mask"
+
+	acl_log "started: enabled=$enabled mode=$mode wan='$wan'($wan_dev) lan='$lan'($lan_dev) attached=$nok fullcone=$fullcone"
+}
+
+stop_service() {
+	local wan dev
+
+	config_load router_acl
+	config_get wan global wan wan
+
+	acl_detach_if "$(acl_resolve_dev "$wan")"
+	# belt and braces: sweep anything left behind
+	for dev in /sys/class/net/*; do
+		dev="${dev##*/}"
+		acl_is_attached "$dev" && acl_detach_if "$dev"
+	done
+
+	# must happen unconditionally: a leftover `notrack` with nothing doing the
+	# NAT would break every LAN->WAN flow
+	acl_nft_apply off
+
+	acl_log "stopped"
+}
+
+reload_service() {
+	stop_service
+	start_service
+}
+
+# The port allow-list is imported from /etc/config/firewall at start. A firewall
+# change (uci apply from the port-control page, or a manual edit) must re-import
+# it, otherwise the guard keeps dropping traffic to the new forward until the
+# next reboot.
+service_triggers() {
+	procd_add_reload_trigger "firewall"
+}
+
+extra_command "status" "Show attach state, acl_cfg, allow list and counters" || true
+
+status() {
+	acl_status
+}

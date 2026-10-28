@@ -1,0 +1,118 @@
+#!/bin/sh
+# mydist router-dns: SmartDNS is the only resolver (port 53); dnsmasq keeps no
+# DNS role at all. Runs once, on the first boot after flashing.
+#
+# This is the same state mydist-posture enforces at every boot (S26): smartdns
+# 53, dnsmasq port 0. The uci-defaults just makes the first boot *before* S26
+# consistent, so a boot that never reaches S26 cannot leave dnsmasq holding :53.
+#
+# /etc/init.d/router-dns still patches /etc/dnsmasq.conf with a forward to
+# 127.0.0.1:6053; that file is simply unused while dnsmasq is off. Do not "fix"
+# it by moving smartdns back to 6053 -- port 53 is the shipped design.
+
+CONF=/etc/config/smartdns
+
+log() { logger -t router-dns "$@"; }
+
+if [ ! -f "$CONF" ]; then
+	log "$CONF is missing (smartdns not installed?); nothing done"
+	exit 0
+fi
+
+# smartdns reads one @smartdns[0] section. Make sure it exists before setting
+# options on it.
+if ! uci -q get smartdns.@smartdns[0].enabled >/dev/null 2>&1; then
+	uci -q add smartdns smartdns >/dev/null 2>&1
+fi
+
+uci -q set smartdns.@smartdns[0].enabled='1'
+# 53: smartdns is the only resolver. dnsmasq is not a DNS front end here --
+# odhcpd owns DHCP and the LAN names are not needed by the shipped UI.
+uci -q set smartdns.@smartdns[0].port='53'
+# Load-bearing. Left at its default of 1, smartdns's own init rewrites
+# /etc/config/dhcp. This distribution does not let a package rewrite the base
+# config, so smartdns stays off the dhcp config and we set dnsmasq ourselves.
+uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
+
+# dnsmasq keeps no DNS role: port 0 means "listen nowhere" even if procd
+# respawns it (mydist-posture also stops and disables it at S26).
+uci -q set dhcp.@dnsmasq[0].port='0'
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+
+# Lease events must reach SmartDNS. The stock trigger only SIGHUPs dnsmasq,
+# which is not the resolver here, so `<dhcp-client>.lan` answered NXDOMAIN even
+# though odhcpd had published the name in /tmp/hosts. Our trigger rebuilds
+# SmartDNS's hosts/address files (idempotent, writes only on change).
+uci -q set dhcp.odhcpd.leasetrigger='/usr/libexec/router-dns-lease'
+uci -q commit dhcp
+
+# Upstreams, only when none are configured yet. These are DNS-over-TLS, not
+# plain UDP, and that is not a preference -- it is the only transport measured to
+# work while the transparent proxy is running.
+#
+# Measured 2026-10-18 (QEMU x86_64, honk 995a80cd, policy `dport(53) ->
+# direct(must)`): with honk owning the TC hooks, a *local* (router-originated) UDP
+# flow is not completed. A LAN client's COLD lookup failed ("Could not resolve
+# host"), `nslookup <name> 223.5.5.5` timed out, and `nslookup <name> 127.0.0.1`
+# (dnsmasq -> smartdns) timed out -- while a local TCP connection to the same
+# address answered normally (`curl http://223.5.5.5/` -> 404) and the client's
+# proxied flows worked. Forwarded traffic is fine, honk's own path is fine, the
+# router's own UDP is not. Proxying that UDP instead of letting it go direct did
+# not help either (policy B measured the same timeouts).
+#
+# A UDP upstream therefore leaves the box resolving nothing from cold: dnsmasq
+# and smartdns keep answering from cache until a TTL runs out, which is exactly
+# how a broken DNS plane looks healthy in any test that reuses a name.
+#
+# With DoT the same cold names resolve with honk running (www.smzdm.com /
+# www.dianping.com / www.zol.com.cn -> 200 through a LAN client), and DoT works
+# with honk stopped as well, so there is one transport for both states.
+#
+# smartdns races the two servers. To change them:
+#   uci show smartdns | grep @server
+#   uci delete smartdns.<section>
+#   uci commit smartdns && /etc/init.d/smartdns restart
+add_dot_upstream() {
+	section=$(uci -q add smartdns server) || return 0
+	# No quotes inside these values on purpose: uci stores them literally, so
+	# `uci set ...='1'` saves the string '1' (with quotes) and smartdns's init
+	# then compares `'tls'` against `tls`, falls back to udp, and the box only
+	# resolves from cache. Measured 2026-10-18 on the first image that shipped
+	# this block: `uci show` read smartdns.@server[0].type=''\''tls'\''' and
+	# smartdns.conf had no server-tls line at all.
+	uci -q set "smartdns.$section.enabled=1"
+	uci -q set "smartdns.$section.ip=$1"
+	uci -q set "smartdns.$section.type=tls"
+	uci -q set "smartdns.$section.port=853"
+	uci -q set "smartdns.$section.host_name=$2"
+}
+if [ -z "$(uci -q get smartdns.@server[0].ip)" ]; then
+	add_dot_upstream 223.5.5.5    dns.alidns.com	# AliDNS
+	add_dot_upstream 119.29.29.29 dot.pub		# DNSPod
+	# No plain-UDP entry is seeded here on purpose: plaintext upstreams are now
+	# derived at every boot/ifup from the resolvers netifd actually learned
+	# (see /usr/libexec/router-dns-sync). A hardcoded 223.5.5.5:53 was wrong on
+	# every network that filters public DNS -- the lab here only allows its own
+	# resolvers -- and it also hid the case where no upstream worked at all,
+	# because smartdns kept answering from cache until a TTL ran out.
+fi
+
+# Retire the dnsmasq-front handover: a `/lan/` upstream on 127.0.0.1:6053 that
+# nothing listens on any more (dnsmasq has port 0). Kept out of every config
+# that still carries it, so `.lan` lookups stop waiting for a dead port.
+for s in $(uci -q get smartdns.@smartdns[0].server 2>/dev/null); do
+	case "$s" in
+	*/127.0.0.1:6053|127.0.0.1:6053) uci -q del_list "smartdns.@smartdns[0].server=$s" ;;
+	esac
+done
+
+uci -q commit smartdns
+
+# The package ships the init script but does not enable it.
+/etc/init.d/smartdns enable >/dev/null 2>&1
+# /etc/init.d/router-dns patches the dnsmasq forward at every boot (START=18).
+/etc/init.d/router-dns enable >/dev/null 2>&1
+
+log "smartdns enabled on 127.0.0.1:53; dnsmasq keeps no DNS role (port 0)"
+
+exit 0

@@ -1,0 +1,14 @@
+{
+	"admin/network/firewall": {
+		"title": "\u9632\u706b\u5899",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "mydist/firewall"
+		},
+		"depends": {
+			"acl": [ "luci-app-mydist" ],
+			"uci": { "firewall": true }
+		}
+	}
+}

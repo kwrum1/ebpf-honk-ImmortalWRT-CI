@@ -1,0 +1,21 @@
+{
+	"luci-app-mydist": {
+		"description": "ebpf pages: multi-WAN configuration, firewall port control and status",
+		"read": {
+			"ubus": {
+				"network.interface": [ "dump" ],
+				"network.device": [ "status" ],
+				"service": [ "list" ],
+				"file": [ "read" ]
+			},
+			"uci": [ "mydist_mwan", "network", "firewall" ],
+			"file": {
+				"/var/run/mydist-mwan/wans": [ "read" ],
+				"/tmp/run/mydist-mwan/wans": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "mydist_mwan", "firewall" ]
+		}
+	}
+}

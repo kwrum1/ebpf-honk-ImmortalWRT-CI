@@ -1,0 +1,168 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# mydist router-dataplane: TC ingress eBPF fastpath (dpd_fastpath)
+#
+# Defaults, and why (see src/dpd_common.h for the architecture):
+#   attach '1'   -> the program is loaded so its maps/stats exist and dpdctl
+#                   works out of the box
+#   enabled '1'  -> killer switch ON
+#   mode 'stateless'/interfaces 'lan'
+#                -> accelerate LAN->WAN IPv4 forwarding, and only that. The
+#                   proxy (honk) owns TCX, the kernel runs TCX before every
+#                   classic filter, so proxied flows are already taken before we
+#                   see them: what reaches us is provably unproxied traffic.
+#   policy 'allow_all'
+#                -> every LAN segment may be accelerated. 'vlans_only' restricts
+#                   it to the VLAN ids in the `vlans` list (fail-closed).
+#
+# The mode is only a *request*. Every gate in dpd_gate_mode()/dpd_chain_guard()
+# may lower it -- einat must be the attached NAT, nothing may sit after us in
+# the classic chain, and we never touch the uplink. Each downgrade is logged with
+# its reason, and einat's init runs /usr/libexec/dpd-gate-refresh when the NAT
+# comes or goes.
+# A transparent proxy is the other input: while honk runs, its TCX is ahead of
+# every classic filter, so the honest mode is observe. honk is not our service
+# and appears/vanishes from its own UI, so /usr/libexec/dpd-gate-watchdog (second
+# procd instance, 20s poll) re-evaluates the gate when that ownership changes.
+# An accelerator that silently eats return traffic is worse than none.
+#
+# START is late on purpose. The first bring-up showed that at START=45 netifd
+# had not created a single L3 device yet (eth0/eth1 were DOWN and
+# `ubus call network.interface.lan status` answered "Not found"), so the attach
+# could only ever fail. That failure is not fatal -- /etc/hotplug.d/iface/
+# 90-dpd-fastpath attaches on every ifup and is what covers pppoe-wan -- but
+# running after the network makes the common case work on the first attempt and
+# keeps the boot log honest. einat starts earlier still (START=60 vs our 95), so
+# the gate normally sees a live NAT on the first try.
+
+START=95
+STOP=05
+USE_PROCD=1
+
+. /usr/libexec/dpd-fastpath.sh
+
+start_service() {
+	local enabled attach mode emode policy vlans redirect ttl refresh ifaces i dev nok=0 pending=
+
+	config_load dpd_fastpath
+	config_get_bool enabled global enabled 1
+	config_get_bool attach global attach 1
+	config_get mode global mode off
+	config_get redirect global redirect auto
+	config_get ttl global flow_ttl_ms 5000
+	config_get refresh global flow_refresh_ms 250
+	config_get ifaces global interfaces 'lan'
+	config_get policy global policy 'allow_all'
+	config_get vlans global vlans ''
+
+	if [ "$attach" != "1" ]; then
+		logger -t dpd-fastpath "attach disabled, not loading the program"
+		return 0
+	fi
+
+	# What the datapath is allowed to do. Everything else below may lower this,
+	# never raise it.
+	emode="$(dpd_gate_mode "$mode")"
+
+	# An upgraded image may leave pins whose map value layout no longer matches
+	# the object (dpd_stats became a block in ABI 9). libbpf then refuses to
+	# reuse them and the attach fails with a pin error; drop them first.
+	dpd_pins_compat
+
+	# On restart/reload the program may already be loaded, so publish first;
+	# attaching below does not change these values.
+	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh"
+	dpd_push_vlans "$policy" "$vlans"
+
+	for i in $ifaces; do
+		dev="$i"
+		[ -e "/sys/class/net/$i" ] || dev="$(dpd_resolve_logical "$i")"
+		if [ -z "$dev" ]; then
+			pending="$pending $i"
+			continue
+		fi
+		# accel is LAN-side only: taking a packet over on the WAN would skip
+		# router-acl's nft guard and the input path for router-destined traffic
+		# `option downlink '1'` is the one exception, decided below
+		if dpd_mode_wants_accel "$emode" && dpd_is_wan_device "$dev"; then
+			dpd_log "note: '$i' ($dev) is the uplink; LAN hook attached below, uplink only if downlink=1"
+			continue
+		fi
+		if dpd_attach_if "$dev"; then
+			nok=$((nok + 1))
+			# and nothing foreign may sit after us on this hook
+			if dpd_mode_wants_accel "$emode" && ! dpd_chain_guard "$dev"; then
+				dpd_log "gate: downgrading to observe because of the filter chain on $dev"
+				emode=observe
+				dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh"
+			fi
+		else
+			pending="$pending $i"
+		fi
+	done
+
+	# at least one map may exist now
+	[ "$nok" -gt 0 ] && dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh"
+
+	# An image upgraded in place can carry a stale uplink attachment: the older
+	# 90-dpd-fastpath attached the uplink for telemetry while observing, and a
+	# filter that only counted then starts *accelerating* as soon as einat
+	# attaches and the gate moves to stateless. Drop it, and teach its L2 flags.
+	dpd_reconcile_uplink
+
+	# The gate is event-driven, but the proxy is not one of our services: honk
+	# can appear or vanish from its own UI at any moment. Supervise a small
+	# watchdog (second procd instance) that re-evaluates the gate when that
+	# ownership changes, so the published mode never claims a fastpath nobody
+	# can reach. Measured 2026-10-18: without it, dpd kept reporting stateless
+	# during the closure run after honk had started.
+	procd_open_instance gate-watch
+	procd_set_param command /usr/libexec/dpd-gate-watchdog
+	procd_set_param respawn 3600 5 0
+	# the loop sleeps between polls; without this procd logs "failed to remove
+	# busy cgroup of dpd-fastpath::gate-watch" on every stop/restart
+	procd_set_param term_timeout 3
+	procd_close_instance
+
+	logger -t dpd-fastpath \
+		"started: attach=$attach enabled=$enabled mode=$mode effective=$emode policy=$policy vlans='$vlans' redirect=$redirect ifaces='$ifaces' attached=$nok pending='$pending'"
+	logger -t dpd-fastpath "chain: $(dpd_chain_summary)"
+}
+
+stop_service() {
+	local ifaces i dev
+
+	config_load dpd_fastpath
+	config_get ifaces global interfaces 'lan'
+
+	for i in $ifaces; do
+		dev="$i"
+		[ -e "/sys/class/net/$i" ] || dev="$(dpd_resolve_logical "$i")"
+		[ -n "$dev" ] && dpd_detach_if "$dev"
+	done
+	# belt and braces: sweep anything left behind
+	for dev in /sys/class/net/*; do
+		dev="${dev##*/}"
+		dpd_is_attached "$dev" && dpd_detach_if "$dev"
+	done
+	logger -t dpd-fastpath "stopped"
+}
+
+reload_service() {
+	stop_service
+	start_service
+}
+
+extra_command "status" "Show attach state, dpd_cfg and counters" || true
+
+status() {
+	dpd_status
+}
+
+# Re-evaluating the gates on demand is /usr/libexec/dpd-gate-refresh, not an
+# extra init command: the rc.common dispatcher runs `$action "$@"`, so a
+# `gate-refresh` command would need a shell function literally named
+# `gate-refresh` (dash rejects that) while a `gate_refresh` function would never
+# be reached under the dashed name. einat calls the helper directly; the helper
+# shares dpd_gate_refresh_uci() with start_service() above.

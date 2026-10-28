@@ -1,0 +1,241 @@
+#!/bin/sh
+# mydist-mwan -- multi-WAN load balancing for the mydist eBPF datapath.
+#
+# Owns, for every configured uplink:
+#   * a routing table (100+i) with a default route via that uplink
+#   * an `ip rule fwmark 0x100+i lookup 100+i` at pref 40+i  (ahead of einat's
+#     own 4787 rules, which sit at 100)
+#   * one einat instance with its own NAT port range
+#   * one entry in the dpd_wans BPF table (ifindex, mark, weight, health, MACs)
+#
+# dpd picks an uplink per flow (weighted rendezvous over the healthy ones),
+# stamps the first packet with the fwmark and caches the egress; the userspace
+# rules only have to route that first packet.
+#
+# usage: mydist-mwan reconcile|health|cleanup
+
+. /lib/functions.sh
+
+CONF=mydist_mwan
+RUN=/var/run/mydist-mwan
+PIN_WAN=/sys/fs/bpf/tc/globals/dpd_wans
+BASE_TABLE=100
+BASE_MARK=0x101
+BASE_PREF=40
+MAX_WAN=8
+
+log() { logger -t mydist-mwan "$*"; }
+
+# ---------------------------------------------------------------- uci helpers
+uci_get() { uci -q get "$CONF.$1" 2>/dev/null; }
+
+wan_ifaces() {
+	uci show "$CONF" 2>/dev/null | sed -n "s/^$CONF\.\([^.=]*\)\.interface=.*/\1/p"
+}
+
+# ---------------------------------------------------------------- reconcile
+dev_info() {
+	# $1 = netifd interface -> "l3dev up" (empty when not up)
+	local js
+	js=$(ubus call "network.interface.$1" status 2>/dev/null)
+	[ -n "$js" ] || return 1
+	local dev up
+	dev=$(printf '%s' "$js" | jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "$dev" ] || dev=$(printf '%s' "$js" | jsonfilter -e '@.device' 2>/dev/null)
+	up=$(printf '%s' "$js" | jsonfilter -e '@.up' 2>/dev/null)
+	[ -n "$dev" ] && [ "$up" = "true" ] && echo "$dev"
+}
+
+wan_gw() {
+	local js
+	js=$(ubus call "network.interface.$1" status 2>/dev/null)
+	printf '%s' "$js" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null
+}
+
+mac_bytes() {
+	# "aa:bb:.." -> "0xaa 0xbb ..."
+	echo "$1" | tr ':' ' ' | sed 's/\([0-9a-fA-F][0-9a-fA-F]\)/0x\1/g'
+}
+
+le32() {
+	printf "0x%02x 0x%02x 0x%02x 0x%02x" \
+		$(( $1 & 255 )) $(( ($1 >> 8) & 255 )) \
+		$(( ($1 >> 16) & 255 )) $(( ($1 >> 24) & 255 ))
+}
+
+
+reconcile() {
+	mkdir -p "$RUN"
+	local i=0 entries="" count=0
+	local enabled
+	enabled=$(uci_get global.enabled)
+	[ "$enabled" = "1" ] || { log "disabled"; return 0; }
+
+	# tear down anything we set up before
+	cleanup_rules
+
+	# auto mode: the effective weight is the bandwidth ratio, normalised to the
+	# slowest uplink (1..8, matching the dpd_wans weight field). manual mode uses
+	# the configured weight unchanged.
+	local mode minbw=0 bw
+	mode=$(uci_get global.mode); mode=${mode:-auto}
+	if [ "$mode" = "auto" ]; then
+		for sid in $(wan_ifaces); do
+			[ "$(uci_get "$sid.enabled")" = "0" ] && continue
+			bw=$(uci_get "$sid.bandwidth"); bw=${bw:-0}
+			[ "$bw" -gt 0 ] 2>/dev/null || continue
+			if [ "$minbw" -eq 0 ] || [ "$bw" -lt "$minbw" ]; then
+				minbw=$bw
+			fi
+		done
+	fi
+
+	for sid in $(wan_ifaces); do
+		[ "$(uci_get "$sid.enabled")" = "0" ] && continue
+		local ifn weight health dev gw mac gwmac flags l3
+		ifn=$(uci_get "$sid.interface")
+		weight=$(uci_get "$sid.weight"); weight=${weight:-1}
+		if [ "$mode" = "auto" ] && [ "$minbw" -gt 0 ] 2>/dev/null; then
+			bw=$(uci_get "$sid.bandwidth"); bw=${bw:-$minbw}
+			weight=$(( (bw + minbw / 2) / minbw ))
+			[ "$weight" -lt 1 ] && weight=1
+			[ "$weight" -gt 8 ] && weight=8
+		fi
+		health=$(uci_get "$sid.health")
+		dev=$(dev_info "$ifn") || { log "$sid($ifn): down"; continue; }
+		gw=$(wan_gw "$ifn")
+		l3=0
+		case "$dev" in ppp*|tun*|wg*) l3=1 ;; esac
+
+		local table=$((BASE_TABLE + i)) mark=$((BASE_MARK + i)) pref=$((BASE_PREF + i))
+		if [ "$l3" = 1 ]; then
+			ip route replace default dev "$dev" table "$table"
+			gwmac=""
+			mac=""
+			flags=$((1 | 2))
+		else
+			[ -n "$gw" ] || { log "$sid($dev): no gateway yet"; continue; }
+			ip route replace default via "$gw" dev "$dev" table "$table"
+			mac=$(cat "/sys/class/net/$dev/address" 2>/dev/null)
+			gwmac=$(ip neigh show "$gw" dev "$dev" 2>/dev/null | awk '{print $3; exit}')
+			[ -n "$gwmac" ] || { ping -c1 -W2 -I "$dev" "$gw" >/dev/null 2>&1; \
+				gwmac=$(ip neigh show "$gw" dev "$dev" 2>/dev/null | awk '{print $3; exit}'); }
+			[ -n "$gwmac" ] || { log "$sid($dev): no neighbour for $gw"; continue; }
+			flags=1
+		fi
+
+		ip rule del fwmark "$mark" 2>/dev/null
+		ip rule add fwmark "$mark" lookup "$table" pref "$pref"
+		[ -n "$health" ] || health="${gw:-1.1.1.1}"
+		# eight fields: the LuCI page and the health loop read exactly these.
+		# einat owns the NAT port ranges (it shifts its own base per instance);
+		# duplicating them here only produced a second, wrong answer.
+		echo "$ifn $dev $mark $table $pref $weight $health $flags" >> "$RUN/wans"
+
+		entries="$entries $(le32 $(cat /sys/class/net/$dev/ifindex)) $(le32 $mark) $(le32 $weight) $(le32 $flags)"
+		if [ "$l3" = 1 ]; then
+			entries="$entries 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00"
+		else
+			entries="$entries $(mac_bytes "$gwmac") $(mac_bytes "$mac")"
+		fi
+		count=$((count + 1))
+		i=$((i + 1))
+		[ "$i" -ge "$MAX_WAN" ] && break
+	done
+
+	[ "$count" -gt 0 ] || { log "no usable uplink"; return 1; }
+
+	# pad to DPD_WAN_MAX entries so a leftover entry cannot stay eligible
+	local zero="" k=0
+	while [ $k -lt 28 ]; do zero="$zero 0x00"; k=$((k + 1)); done
+	while [ "$i" -lt "$MAX_WAN" ]; do entries="$entries $zero"; i=$((i + 1)); done
+
+	local val="$(le32 $count) $(le32 0)$entries"
+	if [ -e "$PIN_WAN" ]; then
+		bpftool map update pinned "$PIN_WAN" key 0 0 0 0 value $val >/dev/null 2>&1 \
+			&& log "dpd_wans: $count uplink(s)" || log "dpd_wans update failed"
+		# Every cached flow was pinned to an uplink and a pair of MACs from the
+		# old table. Bump the generation so the next packet of each flow is
+		# re-learned against the new one (and re-marked into the new table).
+		/usr/sbin/dpdctl bump >/dev/null 2>&1
+	else
+		log "dpd_wans map not pinned (is dpd attached?)"
+	fi
+
+	# Put the uplink (downlink) hooks back. einat's restart deletes the classic
+	# filters on its netdev and nothing re-adds them until the next ifup, so a
+	# reconcile has to do it: that is the documented contract ("restart einat,
+	# then reconcile mwan"). Guarded by the pinned config map because at boot
+	# this runs (S61) before dpd loads (S95) -- there is nothing to refresh yet
+	# and dpd's own start attaches every uplink afterwards.
+	if [ -e /sys/fs/bpf/tc/globals/dpd_cfg ] && [ -x /usr/libexec/dpd-gate-refresh ]; then
+		/usr/libexec/dpd-gate-refresh >/dev/null 2>&1
+	fi
+}
+
+cleanup_rules() {
+	local i=0
+	while [ $i -lt "$MAX_WAN" ]; do
+		ip rule del fwmark $((BASE_MARK + i)) 2>/dev/null
+		ip route flush table $((BASE_TABLE + i)) 2>/dev/null
+		i=$((i + 1))
+	done
+	: > "$RUN/wans"
+}
+
+# ---------------------------------------------------------------- health loop
+health() {
+	mkdir -p "$RUN"
+	local interval
+	interval=$(uci_get global.health_interval); interval=${interval:-5}
+	health_once
+	while sleep "$interval"; do
+		health_once
+	done
+}
+
+health_once() {
+	[ -f "$RUN/wans" ] || return 0
+	local changed=0
+	local tmp="$RUN/wans.new"
+	: > "$tmp"
+	while read -r ifn dev mark table pref weight target flags; do
+		local up=1
+		ping -c1 -W2 -I "$dev" "$target" >/dev/null 2>&1 || up=0
+		if [ "$up" = 1 ]; then
+			[ $((flags & 1)) -eq 1 ] || changed=1
+			flags=$((flags | 1))
+		else
+			[ $((flags & 1)) -eq 1 ] && changed=1
+			flags=$((flags & ~1))
+		fi
+		echo "$ifn $dev $mark $table $pref $weight $target $flags" >> "$tmp"
+	done < "$RUN/wans"
+	mv "$tmp" "$RUN/wans"
+	if [ "$changed" = 1 ]; then
+		log "health changed, rewriting dpd table"
+		reconcile
+	fi
+}
+
+# ---------------------------------------------------------------- entry point
+cleanup() {
+	pkill -f "mydist-mwan health" 2>/dev/null
+	cleanup_rules
+	if [ -e "$PIN_WAN" ]; then
+		local zero="" k=0
+		while [ $k -lt 28 ]; do zero="$zero 0x00"; k=$((k + 1)); done
+		local val="$(le32 0) $(le32 0)"
+		local i=0
+		while [ $i -lt "$MAX_WAN" ]; do val="$val $zero"; i=$((i + 1)); done
+		bpftool map update pinned "$PIN_WAN" key 0 0 0 0 value $val >/dev/null 2>&1
+	fi
+	log "stopped"
+}
+
+case "$1" in
+	reconcile) reconcile ;;
+	health)    health ;;
+	cleanup)   cleanup ;;
+	*) echo "usage: $0 reconcile|health|cleanup" >&2; exit 1 ;;
+esac

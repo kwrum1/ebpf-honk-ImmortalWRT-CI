@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# 89-router-dns-sync -- re-derive SmartDNS's upstreams after every interface
+# event.
+#
+# Why: the resolver's upstream list comes from the WAN lease, so it does not
+# exist when /etc/init.d/router-dns runs at S18, and it changes when the WAN
+# comes back with a different server set. netifd also rewrites its resolv.conf
+# on every ifup, which is the moment to make sure the router still resolves
+# through this box (127.0.0.1) instead of through whatever the lease said.
+#
+# The sync itself is idempotent and only restarts smartdns when something
+# changed, so this is safe to run for every event.
+
+[ -x /usr/libexec/router-dns-sync ] || exit 0
+
+# ifdown is deliberately NOT handled: netifd empties its resolver list when the
+# WAN goes away, and re-deriving from that would drop every plaintext upstream
+# and restart smartdns -- turning a 3-second carrier flap into a DNS outage for
+# as long as the link is down (measured 2026-10-20 on the lab VM: two flaps at
+# boot, each logging `upstreams: ;` followed by a smartdns restart). Keeping the
+# last known resolvers is strictly better: if the uplink is really gone they time
+# out, which is what would happen anyway.
+case "$ACTION" in
+ifup|ifupdate) exec /usr/libexec/router-dns-sync ;;
+esac
+exit 0

@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Re-apply the CAKE qdisc whenever the WAN comes up or changes. This is what
+# makes pppoe-wan work: the device does not exist at boot and is destroyed and
+# recreated on every redial, taking its root qdisc with it. It is also what
+# covers a second uplink whose device appears later than S97.
+#
+# ACTION values are netifd's (see 90-dpd-fastpath for the list).
+
+. /lib/functions.sh
+. /usr/libexec/router-qos.sh
+
+[ -n "$ACTION" ] || exit 0
+
+rq_uci() {
+	local extra
+
+	config_load router_qos
+	config_get_bool RQ_ENABLED global enabled 1
+	config_get RQ_WAN global wan wan
+	config_get RQ_PROFILE global profile auto
+
+	extra="$(rq_mwan_devs)"
+	[ -n "$extra" ] && RQ_WAN="$RQ_WAN $extra"
+	RQ_WAN="$(printf '%s\n' $RQ_WAN | awk '!seen[$0]++' | tr '\n' ' ')"
+}
+
+# RQ_WAN is a space separated list of logical names; one of them matching this
+# event is enough to apply. wan6/wan_6 ride along with wan (same device).
+rq_selected() {
+	local i
+
+	[ -n "$INTERFACE" ] || return 1
+	for i in $RQ_WAN; do
+		[ "$i" = "$INTERFACE" ] && return 0
+		[ -n "$DEVICE" ] && [ "$i" = "$DEVICE" ] && return 0
+	done
+	case "$INTERFACE" in
+	wan|wan6|wan_6) return 0 ;;
+	esac
+	return 1
+}
+
+case "$ACTION" in
+ifup|ifupdate|add|update)
+	rq_uci
+	[ "$RQ_ENABLED" = "1" ] || exit 0
+	[ -n "$DEVICE" ] || exit 0
+	rq_selected || exit 0
+
+	rq_apply "$DEVICE"
+	rq_log "hotplug $ACTION $INTERFACE -> $DEVICE applied"
+	;;
+ifdown|remove)
+	[ -n "$DEVICE" ] || exit 0
+	rq_uci
+	rq_selected || exit 0
+	rq_clear "$DEVICE"
+	rq_log "hotplug $ACTION $INTERFACE -> $DEVICE cleared"
+	;;
+esac
+
+exit 0

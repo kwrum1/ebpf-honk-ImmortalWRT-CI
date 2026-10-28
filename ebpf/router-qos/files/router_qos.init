@@ -1,0 +1,87 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# mydist router-qos: CAKE on the WAN, upload direction.
+#
+#   tc qdisc replace dev <wan> root cake diffserv4 nat
+#
+# One qdisc, no classes, no classifier cascade -- CAKE does the per-flow
+# fairness and the DSCP->tin mapping itself. There is no rate argument: the
+# qdisc runs unlimited, so there is nothing for the operator to tune and
+# nothing to get wrong. The download direction is not shaped here; the reasons,
+# with the measurement that settled it, are at the top of
+# /usr/libexec/router-qos.sh.
+#
+# Enabled by default. The only uci entries are `enabled` and `wan` (a list of
+# logical interfaces, so multi-WAN can name several). If cake is not available
+# in the kernel, the same script installs fq_codel instead.
+#
+# START is late, after network (and after router-acl, which owns the clsact
+# qdisc), so that the WAN device exists by the time we replace its root qdisc.
+
+START=97
+STOP=03
+USE_PROCD=1
+
+. /usr/libexec/router-qos.sh
+
+rq_load() {
+	local extra
+
+	config_load router_qos
+	config_get_bool RQ_ENABLED global enabled 1
+	config_get RQ_WAN global wan wan
+	config_get RQ_PROFILE global profile auto
+
+	# Multi-WAN uplinks ride along automatically, so load balancing never
+	# leaves one link unqueued.
+	extra="$(rq_mwan_devs)"
+	[ -n "$extra" ] && RQ_WAN="$RQ_WAN $extra"
+	RQ_WAN="$(printf '%s\n' $RQ_WAN | awk '!seen[$0]++' | tr '\n' ' ')"
+}
+
+start_service() {
+	local dev found=0
+
+	rq_load
+
+	if [ "$RQ_ENABLED" != "1" ]; then
+		rq_log "disabled; clearing any qdisc we may have left behind"
+		for dev in $(rq_all_devs); do
+			rq_clear "$dev"
+		done
+		return 0
+	fi
+
+	for dev in $(rq_all_devs); do
+		found=1
+		rq_apply "$dev"
+	done
+	[ "$found" = "1" ] || rq_log "WAN '$RQ_WAN' has no device yet; hotplug will retry on ifup"
+}
+
+stop_service() {
+	local dev
+
+	rq_load
+	for dev in $(rq_all_devs); do
+		rq_clear "$dev"
+	done
+	rq_log "stopped"
+}
+
+reload_service() {
+	stop_service
+	start_service
+}
+
+extra_command "qdisc" "Show the WAN qdisc and the filter chains sharing the device" || true
+
+qdisc() {
+	local dev
+
+	rq_load
+	for dev in $(rq_all_devs); do
+		rq_status "$dev"
+	done
+}

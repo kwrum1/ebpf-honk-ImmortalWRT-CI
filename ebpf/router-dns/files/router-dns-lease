@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# router-dns-lease -- odhcpd lease trigger for the SmartDNS setup.
+#
+# odhcpd calls `dhcp.odhcpd.leasetrigger` every time a DHCPv4/v6 lease commits
+# or expires. The stock trigger (/usr/sbin/odhcpd-update) just SIGHUPs dnsmasq,
+# which is not the resolver here -- it is stopped, with port 0. The names odhcpd
+# publishes under /tmp/hosts (hostsdir) therefore never reached SmartDNS, and
+# `<dhcp-client>.lan` answered NXDOMAIN while the lease was right there.
+#
+# So: rebuild the hosts/address files (and restart smartdns only when they
+# actually changed), then keep the stock trigger's behaviour for any box where
+# dnsmasq does run. router-dns-sync is idempotent and already throttles itself
+# to "write only on change", so running it per lease event is cheap.
+#
+# $1 (the lease file odhcpd passes) is deliberately ignored; the sync reads the
+# state it needs from netifd and /tmp/hosts/odhcpd.hosts.lan.
+
+[ -x /usr/libexec/router-dns-sync ] && /usr/libexec/router-dns-sync >/dev/null 2>&1
+
+if pgrep -f /usr/sbin/dnsmasq >/dev/null 2>&1 && [ -x /usr/sbin/odhcpd-update ]; then
+	/usr/sbin/odhcpd-update >/dev/null 2>&1
+fi
+
+exit 0
