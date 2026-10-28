@@ -90,7 +90,7 @@ Scripts/
   verify-packages.sh  固件包清单闸门（手动运行）
 ```
 
-> 本仓库**没有** `mydist/`，也**没有**任何 `kwrum1/immortalwrt` 分支被流水线引用。
+> 数据面只在本仓库的 `ebpf/`；固件源码只来自上游 `VIKINGYFY/immortalwrt`，流水线不引用任何本仓库的源码分支。
 
 ---
 
