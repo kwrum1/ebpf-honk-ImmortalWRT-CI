@@ -28,6 +28,11 @@
 # assets: re-running EINAT-BUILD on a newer upstream commit means updating the
 # version, the four hash lines and PKG_RELEASE.
 #
+# PKG_VERSION stays 0.1.11: the apk package format rejects a version string
+# containing a dash (`0.1.11-p2-r1` -> "info field 'version' has invalid
+# value"), so the patch level is carried by the asset name (`einat-p2-...`),
+# PKG_RELEASE and the image's provenance file instead.
+#
 # Why not build it from source: upstream's own OpenWrt packaging
 # (muink/openwrt-einat-ebpf) declares
 #
@@ -48,8 +53,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=einat-ebpf
-PKG_VERSION:=0.1.11-p2
-PKG_RELEASE:=1
+PKG_VERSION:=0.1.11
+PKG_RELEASE:=3
 
 PKG_LICENSE:=GPL-2.0-only GPL-2.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -89,6 +94,8 @@ define Package/einat-ebpf/description
   NAT implemented from scratch on the TC ingress/egress hooks, replacing
   netfilter conntrack masquerading. Installed from upstream's prebuilt static
   binary (aya loader, no runtime library dependencies).
+
+  This build ships the einat-p2 asset from the EINAT-BUILD workflow.
 endef
 
 define Package/einat-ebpf/conffiles
