@@ -5,7 +5,8 @@
 
 - **X86 / ROCKCHIP**：上游 `@owrt` + 本仓库 `ebpf/` 数据面（einat + dpd + ACL + QoS + DNS + luci-front + LuCI 页）。
 - **IPQ60XX / IPQ807X**：同一批设备出两版 —— `QCA-PPE`（`@owrt`，内核 flowtable/PPE）和 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）。
-- **IPQ53XX / IPQ95XX**：只有 `QCA-NSS`（`@main`；`owrt` 的 `target/linux/qualcommbe` 没有 `image/`，出不了 PPE 版）。
+- **IPQ53XX**：走 `QCA-PPE`（`@owrt`）。`target/linux/qualcommbe` 的 `SUBTARGETS:=ipq53xx ipq95xx` 只在 `owrt` 上存在，`main` 只有 `ipq95xx`（以前把 IPQ53XX 放到 `QCA-NSS`/`main` 会静默解析成 `ipq95xx`，白跑一次构建）。
+- **IPQ95XX**：走 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）——`main` 上的 `qualcommbe` 只有这一个子目标。
 - **MEDIATEK**：上游 `@owrt`，原版包集。
 
 ### 我该刷哪个？
@@ -16,7 +17,7 @@
 | RK3399 / RK3568 等 ARM64 | `EBPF-WRT-ALL` → `ROCKCHIP` | 同上，aarch64 |
 | IPQ60xx / IPQ807x（要 PPE） | `QCA-PPE` | 内核 flowtable，兼容性最好 |
 | IPQ60xx / IPQ807x（要 NSS 固件） | `QCA-NSS` | 同型号，`@main`，NSS 驱动栈 |
-| IPQ53xx / IPQ95xx | `QCA-NSS` | 只有 NSS 版 |
+| IPQ53xx / IPQ95xx | `QCA-PPE`（IPQ53xx）/ `QCA-NSS`（IPQ95xx） | IPQ53xx 在 `owrt`，IPQ95xx 在 `main`；两边的 `qualcommbe` 子目标不同 |
 | MediaTek | `MTK-ALL` | 原版 |
 
 ---
@@ -26,8 +27,8 @@
 | 工作流 | 配置 | 源码 | 分支 | 数据面 |
 |---|---|---|---|---|
 | `EBPF-WRT-ALL` | `X86`, `ROCKCHIP` | `VIKINGYFY/immortalwrt` | `owrt` | 本仓库 `ebpf/`（eBPF） |
-| `QCA-PPE` | `IPQ60XX-WIFI-YES/NO`, `IPQ807X-WIFI-YES/NO` | `VIKINGYFY/immortalwrt` | `owrt` | 内核 flowtable / PPE |
-| `QCA-NSS` | 同上四个 + `IPQ53XX`, `IPQ95XX` | `VIKINGYFY/immortalwrt` | `main` | `qca-nss-drv` / ECM |
+| `QCA-PPE` | `IPQ60XX-WIFI-YES/NO`, `IPQ807X-WIFI-YES/NO`, `IPQ53XX` | `VIKINGYFY/immortalwrt` | `owrt` | 内核 flowtable / PPE |
+| `QCA-NSS` | 同前四个 + `IPQ95XX` | `VIKINGYFY/immortalwrt` | `main` | `qca-nss-drv` / ECM |
 | `MTK-ALL` | `MEDIATEK-WIFI-YES/NO` | `VIKINGYFY/immortalwrt` | `owrt` | 原版 |
 | `WRT-TEST` | 任选一个 | 任选 | `owrt` / `main` | 按配置 |
 

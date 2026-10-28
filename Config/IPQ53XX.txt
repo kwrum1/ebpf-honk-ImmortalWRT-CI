@@ -7,6 +7,3 @@ CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_jdcloud_re-cs-08=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_xiaomi_be3600-pro-wired-p5=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_xiaomi_be3600-pro-wired-p8=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_xiaomi_be6500=y
-# qualcommbe 目标默认不带 11AX 支持；hostapd 的 wpad-openssl(full) 变体
-# 里有 CONFIG_IEEE80211AX 保护的代码，缺这个符号会直接编译失败。
-CONFIG_DRIVER_11AX_SUPPORT=y

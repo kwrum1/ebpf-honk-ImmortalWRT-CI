@@ -8,6 +8,3 @@ CONFIG_TARGET_DEVICE_qualcommbe_ipq95xx_DEVICE_xiaomi_be7000=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq95xx_DEVICE_xiaomi_be7000-pro=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq95xx_DEVICE_xiaomi_be10000=y
 CONFIG_TARGET_DEVICE_qualcommbe_ipq95xx_DEVICE_xiaomi_be10000-pro=y
-# qualcommbe 目标默认不带 11AX 支持；hostapd 的 wpad-openssl(full) 变体
-# 里有 CONFIG_IEEE80211AX 保护的代码，缺这个符号会直接编译失败。
-CONFIG_DRIVER_11AX_SUPPORT=y

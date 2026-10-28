@@ -205,6 +205,18 @@ jobs:
           echo "== resolved config =="
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=|^CONFIG_DRIVER_11(AX|BE)_SUPPORT|^CONFIG_PACKAGE_wpad[-a-z0-9]*=y|^CONFIG_DEFAULT_wpad' .config || true
 
+          # ViKingYFY's hostapd patch 900-hostapd-update-muedca-params.patch uses
+          # struct hostapd_config.he_mu_edca, a member that only exists with
+          # CONFIG_IEEE80211AX (hostapd Makefile: CONFIG_DRIVER_11AX_SUPPORT).
+          # The qualcommbe targets do not get that support symbol, so the patch
+          # cannot compile there ("has no member named 'he_mu_edca'") and the
+          # image dies 90 minutes later inside hostapd. Without AX the patch is a
+          # no-op anyway, so drop it for this build instead.
+          if ! grep -q '^CONFIG_DRIVER_11AX_SUPPORT=y' .config; then
+            echo "11AX support is off -> dropping hostapd MU-EDCA patch (needs CONFIG_IEEE80211AX)"
+            rm -f package/network/services/hostapd/patches/900-hostapd-update-muedca-params.patch
+          fi
+
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
