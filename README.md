@@ -243,7 +243,7 @@ sh Scripts/upstream-check.sh <fresh clone of VIKINGYFY/immortalwrt>
 ## 9. 已知限制
 
 - **eBPF 只覆盖 X86/ROCKCHIP**；IPQ/MTK 走各自的原厂加速。
-- **IPv6 尚未默认加速**：dpd 的 v6 路径已实现（ABI 10，`option ipv6 '1'`），但实验台上加速后一条 v6 TCP 会话会断；且当前 honk 运行时 v6 转发本身不通（停 honk 即恢复）。默认保持关闭，等 honk 的 v6 直连规则 + dpd 的 v6 出口一起修完再开。
+- **IPv6 加速（`option ipv6 '1'`，默认开）**：出站发起的 v6 TCP/UDP 流，上下行都进快路径；回程条目在学习上行流时用该帧的 L2 预置（不依赖 WAN 侧 FIB/邻居），反向首包仍过栈让 conntrack 先看到。入站主动发起的 v6 连接、带 802.1Q 标签的帧、扩展头/分片/组播/link-local/`::`/53/DHCPv6/hop_limit≤1 不加速。v6 一律直连——honk 补丁块加了 `dip('::/0') -> direct(must)`，因为 honk 处理 v6 会打断连接（实测）。异常 v6 环境用 `option ipv6 '0'` 关掉。
 - **honk 直连加速依赖 p1 core**：用上游原版 core 时 dpd 会保持 `observe`。
 - **PPPoE**：`bpf_fib_lookup` 首次 `NO_NEIGH` 会重试一次（`fib_retry`），出口用 `bpf_redirect`；没有真实 PPPoE 线路的实验室只验证到这条路径能发出去。
 - **性能数字**：`docs/BENCHMARK.md` 里的吞吐/pps 是 2026-10-27 在共享 ESXi 上测的（ABI 8 对象）；ABI 9 的收益体现为每包工作量减少，共享环境下的 A/B 差异落在噪声里，不作为结论。
