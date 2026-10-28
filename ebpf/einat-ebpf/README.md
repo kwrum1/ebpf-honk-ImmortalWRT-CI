@@ -1,70 +1,71 @@
-# einat-ebpf —— eBPF Full Cone NAT（NAT44 的替代品）
+# einat-ebpf —— eBPF Full Cone NAT（NAT44 加速方案）
 
-## 这个包解决什么
+## 这个包做什么
 
-基线里 NAT 一直由 **netfilter conntrack + masquerade**（fw4 生成 nft 规则）承担。
-那套东西的问题不是「能不能用」，而是：
+普通 NAT 一直由 **netfilter conntrack + masquerade**（fw4 的 nft 规则）承担。
+本阶段发现的问题不是「能不能用」，而是：
 
-* 它把 NAT 状态放在 conntrack 里，**和 eBPF 数据面互相看不见**；
-* 它的映射行为是 **Address-and-Port-Dependent**，不是 full cone；
-* 每个包都要过 nft 规则链，延迟和规则复杂度都随规则数增长。
+* 所有 NAT 状态都在 conntrack 里，**对 eBPF 加速层不可见**；
+* 端口映射行为是 **Address-and-Port-Dependent**，不是 full cone；
+* 每个包都要走 nft 规则链，映射延迟和规则复杂度都叠在软中断里。
 
-`einat` 用 eBPF 在 TC hook 上**从零实现** Endpoint-Independent Mapping +
-Endpoint-Independent Filtering，也就是 full cone NAT，不碰 conntrack。
+`einat` 在 eBPF 的 TC hook 上**独立实现** Endpoint-Independent Mapping +
+Endpoint-Independent Filtering（也就是 full cone NAT），不依赖 conntrack。
 
-## 关键设计约束（来自 einat 官方文档 + 本项目的红线）
+## 关键约束（来自 einat 官方文档 + 本项目的红线）
 
-| 约束 | 出处 | 本项目的处理 |
+| 约束 | 来源 | 本项目处理 |
 | --- | --- | --- |
-| 必须先关掉一切硬件/软件 offload | einat README 的 IMPORTANT | `kmod-nft-offload` 砍不掉（firewall4 写死 DEPENDS），但默认 `/etc/config/firewall` 里没有 `flow_offloading` 行 → offload 默认关闭。彻底去掉挂账到 einat 启用那一步 |
-| 必须关掉 nftables/iptables masquerade | einat README | init 用 **procd data** 往 fw4 注入一条 `type nat target ACCEPT` 规则，**不改** `/etc/config/firewall` |
-| 必须允许 WAN→LAN 转发 einat 的端口段 | einat README | 同上，procd data 注入一条 `type rule target ACCEPT` |
-| PPPoE / 隧道接口需要 TCP MSS clamping | einat README（issue #19） | fw4 的 `option mtu_fix` 必须保留 —— 工作计划.md §8 的 H2 |
+| 必须关掉一切硬件/软件 offload | einat README 的 IMPORTANT | `kmod-nft-offload` 不装；firewall4 写入 DEPENDS；并且默认 `/etc/config/firewall` 里没有 `flow_offloading` —— offload 默认关闭。这和去掉别的 eBPF 加速层是同一件事 |
+| 必须关掉 nftables/iptables masquerade | einat README | init 在 **procd data** 里给 fw4 注入一条 `type nat target ACCEPT` 规则，**不改** `/etc/config/firewall` |
+| 必须让出 WAN→LAN 转发给 einat 的端口段 | einat README | 同上，procd data 注入一条 `type rule target ACCEPT` |
+| PPPoE / 大包接口需要 TCP MSS clamping | einat README、issue #19 | fw4 的 `option mtu_fix` 必须保留（见 `docs/proxy-accel-coexistence.md` 第 8 节 H2） |
 | 内核需要 BPF + BTF + BPF-to-BPF calls | einat docs/guide/openwrt.md | x86_64 / aarch64 都满足；`DEBUG_INFO_BTF=y`、`BPF_SYSCALL=y`、`BPF_JIT=y`、`NET_ACT_BPF=m`、`NET_SCH_INGRESS=m` |
-| 需要 `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` | einat README | 以 root 运行（`files/capabilities.json` 也装上了，将来要降权直接启用那一行） |
+| 需要 `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` | einat README | 按 root 运行；`files/capabilities.json` 也装好了（不需要授权直接运行那一行） |
 
-## 为什么是「预编译二进制包」而不是从源码编译
+## 二进制来源：本仓库自己构建（p1 / p2 补丁）
 
-上游自己的 OpenWrt 打包（`muink/openwrt-einat-ebpf`）是源码编译：
+以前这里直接下载上游 release 的 `einat-static-*`。现在改成**本仓库构建**：
+
+* 工作流 `EINAT-BUILD`，上游源码 pin 到 `ba647ce6`（不 fork 仓库）；
+* 应用 `patches/einat-perf.py`（p1）与 `patches/einat-perf-p2.py`（p2），
+  两者都按锚点打，上游漂移会直接报错，不会静默跳过；
+* Nix 用上游的 `static` 预设（不带 `ipv6` feature，程序里没有 NAT66 代码），
+  `build.rs` 原本就是 `-O2 -mcpu=v3`；
+* 产物是静态 musl 二进制 + `aya` loader，运行时不需要 libbpf/elf/zlib；
+* 发布在固定 tag `einat-p2`，sha256 写在 `Makefile` 的 `EINAT_HASH`。
+
+| 补丁 | 内容 | 每包收益 |
+| --- | --- | --- |
+| p1 | v4-only 构建里 `get_is_ipv4()` 仍解析一遍 L2/L3，`parse_packet()` 紧接着又解析同一份头 | 每包每方向少一次头部解析 |
+| p2 ① | `dest_config` 只有 WAN 地址一个条目时，用 32 位比较代替每次出向的 LPM 查表 | WAN 出向每包少一次 LPM 查表 |
+| p2 ② | 已建立 TCP 连接的数据包在 1s 内跳过 CT 查表 + `bpf_timer_start()` | TCP 数据包少一次 hash 查表 + 一次带锁的定时器重排 |
+
+p2 的语义边界：只跳过「不可能命中」的查表（单个 dest 条目、等于默认外部地址、
+且为满前缀）和「只刷新定时器」的路径（`CT_ESTABLISHED` + TCP 数据包）。
+SYN/FIN/RST、ICMP 错误、UDP/ICMP、以及任何非 ESTABLISHED 状态都照旧走慢路径；
+定时器刷新是**限流到 1s 一次**，不是关闭。
+
+发布前 `EINAT-BUILD` 的 `e2e (netns)` 作业会跑 `patches/einat-e2e-nat.sh`：
+EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF/full cone（没通信过的 peer
+仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
+
+为什么不把 einat 编进固件：上游 OpenWrt 打包（`muink/openwrt-einat-ebpf`）声明
 
 ```make
 PKG_BUILD_DEPENDS:=rust/host libbpf HAS_BPF_TOOLCHAIN:bpf-headers
 ```
 
-这三样在我们的环境里都是纯成本：
-
-* `rust/host` —— 要在构建主机上 bootstrap 一整套 Rust 工具链；
-* `HAS_BPF_TOOLCHAIN` —— 会去下 `llvm-bpf` 工具链；
-* `bpf-headers` —— 它**钉死 linux-6.12**，而 `linux-6.12.tar.xz` 不在 dl 缓存里。
-
-而 einat 上游的 release 里已经有**完全静态**的二进制，而且用的是 `aya` loader，
-**运行时不需要 libbpf/elf/zlib 任何一个**。所以直接装二进制：
-
-* 体积 ~2.4 MB；
-* 构建依赖为零；
-* 不需要 rust/host。
-
-代价：架构必须逐个列（见 Makefile 里的 `ifeq ($(ARCH),...)`），
-`PKG_HASH` 必须钉死（两个哈希都是实测出来的，见 §「哈希来源」）。
-
-## 哈希来源
-
-```sh
-curl -sLO https://github.com/EHfive/einat-ebpf/releases/download/v0.1.11/einat-static-x86_64-unknown-linux-musl
-sha256sum einat-static-x86_64-unknown-linux-musl
-#   d3c33347ba958f35d9ea6c81ec01b035cc2a41ac5cda074ae4589282d23981be   (2471584 B, static-pie)
-curl -sLO https://github.com/EHfive/einat-ebpf/releases/download/v0.1.11/einat-static-aarch64-unknown-linux-musl
-sha256sum einat-static-aarch64-unknown-linux-musl
-#   93df51fd9d02c8ba651daa359a5bf05d6728650806df67ea9a35fdd43b422f76   (2102376 B, static)
-```
+意味着还要在构建机 bootstrap 一套 host Rust、下载 `llvm-bpf` 工具链，并且
+`bpf-headers` 会拉 linux-6.12（不在我们的 download 缓存里）。用预编译产物换来
+约 2.4 MB 的包体积和零构建依赖。
 
 ## 为什么 `--bpf-log` / `--bpf-loader` 不写进 init
 
-* `--bpf-log`：**解析器接受，但 `--help` 的用法文本里没有它**。
-  上游 muink 的 init 无条件传 `--bpf-log "$bpf_log_level"`，那是按更新的
-  einat 写的。v0.1.11 传未知选项会让服务直接起不来，所以这里不传，
-  日志级别保持默认（关）。
-* `--bpf-loader`：本包装的是 `aya` 那个构建产物，传 `libbpf` 会在加载阶段失败。
+* `--bpf-log`：**上游没有这个选项**（`--help` 里没有，代码里也没有），
+  einat 的日志级别只能从配置文件/环境读取。照抄旧 init 的 `--bpf-log "$level"`
+  会让进程在启动阶段因为未知选项退出。
+* `--bpf-loader`：我们装的是 `aya` 版本，`libbpf` 后端在加载阶段会失败。
 
 ## 与 router-dataplane 的 hook 顺序
 
@@ -73,32 +74,37 @@ WAN ingress:  einat (pref 1)  ->  dpd_fastpath (pref 100)
 LAN ingress:                      dpd_fastpath (pref 100)
 ```
 
-einat 固定占用 **pref 1 / handle 1**，并且**永远不会返回 `TC_ACT_OK`**
-（没接管的包返回 `TC_ACT_UNSPEC`），所以它之后的程序（我们，pref 100）
-一定会看到包。这个顺序是靠 pref 决定的，不是靠插入顺序。
+einat 固定占用 **pref 1 / handle 1**，并且**永远不返回 `TC_ACT_OK`**
+（没接管的包返回 `TC_ACT_UNSPEC`），所以它后面的程序仍然会被调用；pref 100 的
+dpd 一定看得到流量。顺序是 pref 决定的，不是代码顺序。
 
-## 启用步骤
+## 配置步骤
 
-默认 `enabled='0'`（和 honk、router-dataplane 一致：先把已知good的
-fw4 masquerade 留着，等 einat 单独验证过再切）。
+默认 `enabled='0'`（和 honk、router-dataplane 一致：先让已知 good 的
+fw4 masquerade 顶着，等 einat 侧验证完再开）：
 
 ```sh
 uci set einat.config.enabled='1'
 uci commit einat
 /etc/init.d/einat restart
-/etc/init.d/firewall reload      # 让 fw4 收下 procd 注入的两条规则
+/etc/init.d/firewall reload      # 让 fw4 重新读 procd 注入的规则
 ```
 
-验证 full cone（在内网机器上，不是路由器上）：
+验证 full cone（两个方向都要看，不要只看路由表）：
 
-* `stunclient`（stuntman）
-* `NatTypeTester`（Windows）
+* `stunclient`（stuntman）；
+* `NatTypeTester`（Windows）；
 * `go-stun`
 
-注意：只有当外网本身是 full cone 或你有公网 IP 时，才能测出 full cone。
+注意：只有当 WAN 拿到的是公网 IPv4 时，才能测出 full cone。
 
 ## 已验证 / 未验证
 
-* 已：上游 release 资产存在、大小与 SHA256 实测、二进制是静态的（`readelf -d` 无 NEEDED）、
-  `--help` 的选项集合与源码 `lexopt` 解析分支逐条核对过。
-* 未：在真机/固件里跑起来（要等这一轮镜像出来之后单独验证）。
+* **CI（每次补丁变更）**：`EINAT-BUILD` 的 `e2e (netns)` 在 network namespace 里
+  跑 EIM/EIF/ICMP/20MB TCP，通过后才发布二进制。
+* **实验机（x86_64，p2 二进制）**：TCX 双向挂载正常；`.data` 的
+  `g_ipv4_dest_config_mode = 1`（单个 WAN 地址，走 32 位比较快路径）；已建立
+  TCP 流的 binding 里 `ct_state_cached = 2`（ESTABLISHED，快路径生效）；
+  ping、iperf3 TCP 上行/下行、UDP 均正常。
+* **未验证**：aarch64 真机、PPPoE 拨号场景、真实 hairpin（需要端口转发 + 实网
+  客户端）、以及高 PPS 下的性能数字（ESXi 方差太大，本项目不出 perf 数据）。
