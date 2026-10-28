@@ -1011,14 +1011,10 @@ int dpd_fastpath(struct __sk_buff *skb)
 			__u16 cls;
 
 			/*
-			 * IPv6 is forward-only. With no NAT66, a v6 reply is a plain
-			 * routed packet whose state lives in conntrack; accelerating it
-			 * on the WAN ingress adds a second, independently learned
-			 * reverse entry (and one real bug: the reverse FIB has to be
-			 * taken from the WAN side, which is exactly where a stale
-			 * entry sends the frame out the wrong port). Letting v6
-			 * replies walk the stack keeps the feature small and keeps
-			 * conntrack authoritative for the return direction.
+			 * IPv6: never learn from the uplink. Inbound-initiated v6
+			 * connections stay on the stack (same as v4, where einat drops
+			 * the unsolicited SYN before netfilter). Outbound flows seed
+			 * their own reverse entry below.
 			 */
 			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
 				return TC_ACT_UNSPEC;
@@ -1070,6 +1066,68 @@ int dpd_fastpath(struct __sk_buff *skb)
 			}
 
 			bpf_map_update_elem(&dpd_flows, &fkey, &nv, BPF_ANY);
+
+			/*
+			 * IPv6: seed the reverse entry from the frame we are holding.
+			 *
+			 * v4 does not need this: einat rewrites the reply's L2/L3 on
+			 * its own TCX hooks, so the reverse flow is learned from the
+			 * (already translated) WAN packet. v6 has no NAT, so the reply
+			 * is an ordinary routed packet and its L2 header is exactly the
+			 * one that belongs on the LAN: the pair we already see in this
+			 * frame -- dmac = destination we sent to (the router's LAN
+			 * MAC), smac = the client's LAN MAC -- swapped.
+			 *
+			 * Doing it here instead of letting the WAN ingress learn its
+			 * own entry is what makes both directions cheap and, more
+			 * importantly, correct: the reverse entry never depends on a
+			 * WAN-side FIB/neighbour lookup that can be in flight (the
+			 * earlier attempt learned `ingress=wan egress=wan` entries and
+			 * black-holed the session).
+			 *
+			 * Guards: untagged frame (a VLAN tag would have to be pushed
+			 * again), forward emit is the L2 class (we have both MACs), and
+			 * the egress really differs from the ingress. The reverse entry
+			 * starts with prime=0, so its first packet still walks the
+			 * stack -- conntrack sees the reply before we take over.
+			 */
+			if (fkey.family == AF_INET6 && !tagged &&
+			    (nv.flags & DPD_FLOW_F_L2) &&
+			    nv.egress_ifindex != skb->ifindex) {
+				struct dpd_flow_key rk = fkey;
+				struct dpd_flow_val rv = {};
+				struct ethhdr *eh = data;
+
+				if ((void *)(eh + 1) <= data_end) {
+					__be32 t;
+					__u16 p;
+					int i;
+
+					for (i = 0; i < 4; i++) {
+						t = rk.saddr[i];
+						rk.saddr[i] = rk.daddr[i];
+						rk.daddr[i] = t;
+					}
+					p = rk.sport;
+					rk.sport = rk.dport;
+					rk.dport = p;
+					rk.ifindex = nv.egress_ifindex;
+
+					rv.egress_ifindex = skb->ifindex;
+					rv.last_seen_ms = nv.last_seen_ms;
+					rv.flags = DPD_FLOW_F_L2;
+					rv.wan = nv.wan & DPD_FLOW_EPOCH_MASK;
+					__builtin_memcpy(rv.dmac, eh->h_source, ETH_ALEN);
+					__builtin_memcpy(rv.smac, eh->h_dest, ETH_ALEN);
+
+					/* both must be real unicast MACs */
+					if (dpd_mac_ok(rv.dmac) && dpd_mac_ok(rv.smac) &&
+					    !(rv.dmac[0] & 1) && !(rv.smac[0] & 1))
+						bpf_map_update_elem(&dpd_flows, &rk, &rv,
+								    BPF_ANY);
+				}
+			}
+
 			/* the map write may have invalidated the cached stats
 			 * pointer; re-fetch before counting */
 			st = dpd_stat();

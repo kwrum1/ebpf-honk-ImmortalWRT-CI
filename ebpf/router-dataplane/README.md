@@ -380,25 +380,46 @@ ABI 的一部分，改大小会让升级后的 `tc filter add` 直接失败。AB
   速率选 cake/fq_codel；`latency` 固定 cake 并用 `rtt 10ms` 缩短 AQM 目标，
   `throughput` 固定 fq_codel。默认路径没变。
 
-#### 2.6.9 IPv6（ABI 10，默认开启，仅上行方向）
+#### 2.6.9 IPv6（ABI 10，默认开启，上下行都加速）
 
 `option ipv6 '0'` 可关闭（6rd/6to4、v6 隧道、首包后改策略路由的环境）。
 
-* 只接管 **TCP/UDP**；扩展头（hop-by-hop/routing/dest-opts/fragment）、分片、
-  组播（ff00::/8）、link-local（fe80::/10）、未指定地址、端口 53、
-  DHCPv6（546/547）、hop_limit<=1 一律拒绝。
-* **只加速 LAN→WAN 方向**：回程不进快路径，由栈 + conntrack 处理（没有 NAT66
-  可用来重建回程；把回程也接管会引入一份独立的反向流表项和它的失效问题）。
-* 没有 NAT66：回程靠 conntrack + 状态化 priming（首包走栈），不依赖 einat。
-* 多 WAN 选路只对 IPv4 生效；v6 走 FIB 选出的那条路由。
-* 新增计数 `ST_V6_OK`（`dpdctl stats | grep v6_ok`）。
+**范围**：只接管 **TCP/UDP**；扩展头（hop-by-hop/routing/dest-opts/fragment）、
+分片、组播 `ff00::/8`、link-local `fe80::/10`、未指定地址、端口 53、
+DHCPv6（546/547）、hop_limit<=1 一律拒绝。只加速**出站发起**的流：从 WAN 侧
+主动进来的 v6 连接留在栈上（与 v4 一致——v4 的入站 SYN 在 einat 那层就被丢了）。
+
+**为什么上下行都能加速，而且不靠 WAN 侧 FIB**：
+
+v4 的回程靠 einat：它在自己的 TCX 钩子上把回包的 L3/L2 改写好了，dpd 在 WAN
+入口学到的就是"已经翻译过"的流，所以下行条目自然正确。
+
+v6 没有 NAT66，回包是普通路由包。如果让 WAN 入口自己去 FIB 学这条回程，就依赖
+那一刻的邻居/路由状态（早期实测就学到过 `ingress=wan egress=wan` 的坏条目，把
+会话打死）。所以改成**在学上行流的那一瞬间，用手里这一帧的 L2 直接种下反向条目**：
+
+```
+上行帧（LAN→WAN）：dmac = 路由器 LAN MAC，smac = 客户端 MAC
+反向条目：        ingress = 上行出口（WAN 设备）
+                  egress  = 上行入口（LAN 设备，即 skb->ifindex）
+                  dmac    = 上行帧的 smac（客户端）
+                  smac    = 上行帧的 dmac（路由器 LAN MAC）
+```
+
+两个方向都是普通以太网、MAC 就在帧里，不需要邻居表、不需要第二次 FIB，也不存在
+"反向条目指向错的设备"这一整类问题。反向条目从 `prime=0` 开始，所以回程的前 1 个
+包仍然过栈——conntrack 先看到回包，之后才由快路径接手。
+
+**不做的情况**：带 802.1Q 标签的帧（需要重新压标签，交给栈）、入站主动发起的
+连接、非 TCP/UDP、以及上面列的所有拒绝项。多 WAN 选路只对 v4 生效，v6 跟随 FIB
+选出的路由（`mydist-mwan` 的 fwmark 表是 v4 的）。
 
 **2026-10-28 的两条实测结论，以及对应改动**：
 
 | 现象 | 改动 |
 |---|---|
-| honk 运行时 v6 TCP **完全不通**（停 honk 恢复 2.2 Gbit/s） | `router-dns` 的 honk 补丁块新增 `ipversion(6) -> direct(must)`：v6 一律直连，不进代理 |
-| dpd 接管回程后出现 `ingress=eth2 egress=eth2` 的坏流表项，会话中断 | v6 改为**只加速上行**；下行回程始终走栈，conntrack 继续是回程的唯一权威 |
+| honk 运行时 v6 TCP **完全不通**（停 honk 恢复 2.2 Gbit/s） | `router-dns` 的 honk 补丁块新增 `dip('::/0') -> direct(must)`：v6 一律直连，不进代理 |
+| 让 WAN 入口自己学回程，出现 `ingress=eth2 egress=eth2` 的坏条目，会话中断 | 回程改为"学上行时用帧内 MAC 预置"，WAN 入口不再学 v6 流 |
 
 ## 3. 文件
 
