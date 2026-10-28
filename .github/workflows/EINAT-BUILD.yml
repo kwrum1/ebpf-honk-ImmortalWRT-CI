@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# EINAT-BUILD: build the einat-ebpf binaries we ship, from upstream source,
+# with our perf patch applied, and publish them as a release.
+#
+# Why this exists: ebpf/einat-ebpf used to download upstream's prebuilt
+# binaries. That is fine functionally, but it means the NAT hot path cannot be
+# touched at all. This job pins an upstream commit, applies
+# patches/einat-perf.py (see the file header for what it does and what it
+# deliberately does not), and builds with upstream's own Nix presets so the
+# result is a static musl binary with the same loader (`aya`) as before.
+#
+# Preset: `static` = without the `ipv6` cargo feature, i.e. no NAT66 code in
+# the BPF program. This firmware never NATs v6 (v6 is routed/accelerated by
+# dpd + direct rules), so the v4-only build is the correct one and is smaller.
+#
+# Not a firmware build: it runs in ~10 minutes and only produces two binaries.
+
+name: EINAT-BUILD
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'patches/einat-perf.py'
+      - '.github/workflows/EINAT-BUILD.yml'
+
+permissions: write-all
+
+env:
+  EINAT_REPO: https://github.com/EHfive/einat-ebpf.git
+  # p1 asset names stay distinct from upstream's, so a cached download can never
+  # be mistaken for a patched binary.
+  ASSET_PREFIX: einat-p1
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@main
+
+      - name: Clone einat (pinned)
+        run: |
+          git clone --depth=1 $EINAT_REPO einat
+          git -C einat log -1 --pretty='%H %cI %s'
+
+      - name: Apply perf patch
+        run: |
+          python3 patches/einat-perf.py einat
+
+      - name: Show the patched hot path
+        run: |
+          grep -n "get_is_ipv4(skb" -B3 -A6 einat/src/bpf/einat.bpf.c | head -40
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            sandbox = false
+
+      - name: Build (upstream preset: static, no NAT66)
+        run: |
+          cd einat
+          nix build .#static-${{ matrix.arch }}-unknown-linux-musl
+          cp ./result/bin/einat ../${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
+          file ../${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
+          ls -l ../${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
+
+      - name: Smoke test the binary
+        if: matrix.arch == 'x86_64'
+        run: |
+          chmod +x ${{ env.ASSET_PREFIX }}-x86_64-unknown-linux-musl
+          ./${{ env.ASSET_PREFIX }}-x86_64-unknown-linux-musl --help | head -5
+
+      - name: Upload
+        uses: actions/upload-artifact@main
+        with:
+          name: einat-${{ matrix.arch }}
+          path: ${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@main
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Hashes
+        run: |
+          cd out
+          sha256sum * | tee SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: einat-p1-${{ github.run_id }}
+          files: out/*
+          body: |
+            einat-ebpf built from upstream source with `patches/einat-perf.py`
+            applied (v4-only preset + no redundant ethertype parse).
+
+            Source: https://github.com/EHfive/einat-ebpf
+            Patch:  patches/einat-perf.py in this repository
