@@ -223,6 +223,14 @@ jobs:
             rm -f package/network/services/hostapd/patches/900-hostapd-update-muedca-params.patch
           fi
 
+          # qualcommbe: show why kmod-ath12k is (or is not) selectable, so a
+          # missing dependency is visible here instead of at image assembly.
+          if grep -q '^CONFIG_TARGET_BOARD="qualcommbe"' .config 2>/dev/null; then
+            echo "== kmod-ath12k =="
+            awk '/^config PACKAGE_kmod-ath12k$/{f=1} f{print} f&&/^$/{exit}' tmp/.config-package.in 2>/dev/null | head -20
+            grep -E '^CONFIG_PACKAGE_kmod-(ath12k|ath|mac80211|qrtr|qcom)' .config || echo "  (no ath/qrtr kmod selected)"
+          fi
+
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
