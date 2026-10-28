@@ -2,6 +2,20 @@
 #
 # ebpf: einat-ebpf as a PREBUILT-BINARY package.
 #
+# The binary is built by this repository's EINAT-BUILD workflow from upstream
+# source (pinned commit) with patches/einat-perf.py applied, and published at
+# the fixed release tag `einat-p1`:
+#
+#   * upstream `static` preset: v4-only, no NAT66 code in the BPF program
+#     (this firmware never NATs v6; v6 is routed and accelerated by dpd);
+#   * one less full L2/L3 parse per packet per direction: the v4-only build
+#     still called get_is_ipv4() at the top of both TC programs even though
+#     parse_packet() immediately parses the same header again.
+#
+# Hashes below are the sha256 of the published assets. Re-running EINAT-BUILD
+# on a newer upstream commit means updating the version, the four hash lines and
+# PKG_RELEASE.
+#
 # Why not build it from source: upstream's own OpenWrt packaging
 # (muink/openwrt-einat-ebpf) declares
 #
@@ -22,8 +36,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=einat-ebpf
-PKG_VERSION:=0.1.11
-PKG_RELEASE:=1
+PKG_VERSION:=0.1.11-p1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=GPL-2.0-only GPL-2.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -32,18 +46,18 @@ PKG_LICENSE_FILES:=LICENSE
 # listed: it needs BPF-to-BPF calls, which the kernel only has for actively
 # maintained archs (x86-64, aarch64). The DEPENDS line rejects everything else.
 ifeq ($(ARCH),x86_64)
-  EINAT_ASSET:=einat-static-x86_64-unknown-linux-musl
-  EINAT_HASH:=d3c33347ba958f35d9ea6c81ec01b035cc2a41ac5cda074ae4589282d23981be
+  EINAT_ASSET:=einat-p1-x86_64-unknown-linux-musl
+  EINAT_HASH:=200acccaefbe68dc5e77e0250eafe6782bfd7b881d87d97106007a393104a0b3
 else ifeq ($(ARCH),aarch64)
-  EINAT_ASSET:=einat-static-aarch64-unknown-linux-musl
-  EINAT_HASH:=93df51fd9d02c8ba651daa359a5bf05d6728650806df67ea9a35fdd43b422f76
+  EINAT_ASSET:=einat-p1-aarch64-unknown-linux-musl
+  EINAT_HASH:=067e2b889e64d4d5c11ff2f0a36bceb9394edf7dd702e2f5c7048a69faeb344f
 else
-  EINAT_ASSET:=einat-static-$(ARCH)-unknown-linux-musl
+  EINAT_ASSET:=einat-p1-$(ARCH)-unknown-linux-musl
   EINAT_HASH:=skip
 endif
 
 PKG_SOURCE:=$(EINAT_ASSET)
-PKG_SOURCE_URL:=https://github.com/EHfive/einat-ebpf/releases/download/v$(PKG_VERSION)
+PKG_SOURCE_URL:=https://github.com/kwrum1/ebpf-honk-ImmortalWRT-CI/releases/download/einat-p1
 PKG_HASH:=$(EINAT_HASH)
 
 include $(INCLUDE_DIR)/package.mk
