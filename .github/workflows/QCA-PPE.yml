@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026 VIKINGYFY
+# Copyright (C) 2026 kwrum1
 #
-# QCA-ALL: the PPE variant of the Qualcommax (IPQ60xx / IPQ807x) images.
+# QCA-PPE: Qualcommax IPQ60xx / IPQ807x on the mainline PPE path.
 #
-# Source: VIKINGYFY/immortalwrt@owrt (mainline PPE + kernel flowtable).
-# The NSS-firmware variant of the same boards is QCB-ALL, built from the
-# `main` branch. The eBPF datapath (this repo's ebpf/) is X86/ROCKCHIP only.
+# Source: VIKINGYFY/immortalwrt@owrt -- the same branch and the same Config/*.txt
+# files upstream uses in its own QCA-ALL workflow, so a device list change there
+# is picked up here by copying the config.
+#
+# The NSS-firmware counterpart is QCA-NSS (IPQ53xx / IPQ95xx, branch main).
+# The eBPF datapath (this repo's ebpf/) is X86/ROCKCHIP only and is never
+# installed on these targets; their acceleration is kernel flow offloading.
 
-name: QCA-ALL
+name: QCA-PPE
 
 on:
   schedule:

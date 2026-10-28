@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 kwrum1
 #
-# QCB-ALL: the IPQ60xx / IPQ807x images built from the NSS-firmware branch.
+# QCA-NSS: the Qualcomm NSS-firmware platforms (IPQ53xx / IPQ95xx).
 #
-# "QCB" = the Qualcomm NSS firmware variant, as opposed to QCA-ALL (the PPE
-# variant built from owrt). Same configs, different source branch:
+# Source: VIKINGYFY/immortalwrt@main. That is the branch where target/linux/
+# qualcommbe is complete (image/, ipq95xx/, ...) and where the NSS firmware
+# driver stack lives; on `owrt` the same directory only carries Makefile/config/
+# dts. Configs are upstream's own Config/IPQ53XX.txt and Config/IPQ95XX.txt.
 #
-#   QCA-ALL  (PPE)    VIKINGYFY/immortalwrt@owrt   mainline PPE + flowtable
-#   QCB-ALL  (NSSFW)  VIKINGYFY/immortalwrt@main   qca-nss-drv firmware offload
-#
-# The two are separate releases on purpose: the package sets and the offload
-# engine differ, and mixing them makes "which image am I running" unanswerable.
+# The PPE counterpart for IPQ60xx / IPQ807x is QCA-PPE (branch owrt).
 
-name: QCB-ALL
+name: QCA-NSS
 
 on:
   schedule:
@@ -33,11 +31,11 @@ permissions: write-all
 
 jobs:
   config:
-    name: ${{ matrix.CONFIG }}-NSSFW
+    name: ${{ matrix.CONFIG }}
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO]
+        CONFIG: [IPQ53XX, IPQ95XX]
         SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [main]
 

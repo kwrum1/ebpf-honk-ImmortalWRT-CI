@@ -5,9 +5,9 @@
 # reproduce a single platform without waiting for the nightly matrices.
 #
 # Source: VIKINGYFY/immortalwrt.
-#   X86 / ROCKCHIP        -> owrt  (the eBPF datapath comes from this repo's ebpf/)
-#   IPQ / MEDIATEK / TEST -> owrt  (PPE / MediaTek)
-#   same IPQ configs      -> main  (NSS-firmware variant, see QCB-ALL)
+#   X86 / ROCKCHIP            -> owrt  (eBPF datapath comes from this repo's ebpf/)
+#   IPQ60xx / IPQ807x / MTK  -> owrt  (PPE, see QCA-PPE)
+#   IPQ53xx / IPQ95xx        -> main  (NSS firmware, see QCA-NSS)
 
 name: WRT-TEST
 
@@ -19,6 +19,8 @@ on:
         required: true
         type: choice
         options:
+          - IPQ53XX
+          - IPQ95XX
           - IPQ60XX-WIFI-YES
           - IPQ60XX-WIFI-NO
           - IPQ807X-WIFI-YES

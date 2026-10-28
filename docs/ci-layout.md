@@ -19,16 +19,16 @@ at the end of a 90-minute image build.
 
 | Branch | Meaning | Built by |
 |---|---|---|
-| `owrt` | mainline tree, **PPE** flow offload (kernel flowtable) | EBPF-WRT-ALL, MTK-ALL, QCA-ALL |
-| `main` | Qualcomm **NSS firmware** variant (`qca-nss-drv`) | QCB-ALL |
+| `owrt` | mainline tree, **PPE** flow offload (kernel flowtable) | EBPF-WRT-ALL, MTK-ALL, QCA-PPE |
+| `main` | Qualcomm **NSS firmware** variant (`qca-nss-drv`) | QCA-NSS |
 
 ## Workflows
 
 | Workflow | Configs | Source | Purpose |
 |---|---|---|---|
 | `EBPF-WRT-ALL` | X86, ROCKCHIP | `@owrt` | the eBPF images (datapath from `ebpf/`) |
-| `QCA-ALL` | IPQ60XX / IPQ807X (wifi yes/no) | `@owrt` | **PPE** variant |
-| `QCB-ALL` | IPQ60XX / IPQ807X (wifi yes/no) | `@main` | **NSSFW** variant |
+| `QCA-PPE` | IPQ60XX / IPQ807X (wifi yes/no) | `@owrt` | **PPE** variant |
+| `QCA-NSS` | IPQ53XX / IPQ95XX | `@main` | **NSS firmware** variant |
 | `MTK-ALL` | MEDIATEK-WIFI-YES/NO | `@owrt` | MediaTek |
 | `WRT-TEST` | one config, by hand | `owrt` or `main` | reproduce a single build |
 | `BPF-CHECK` | — | `ebpf/` | compile the datapath + dpdctl in ~1 min |
