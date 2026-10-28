@@ -209,7 +209,7 @@ jobs:
           # tell from the log which hostapd/wpad variant a target ended up with
           # (a missing CONFIG_DRIVER_11AX_SUPPORT breaks the full-openssl build).
           echo "== resolved config =="
-          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=|^CONFIG_DRIVER_11(AX|BE)_SUPPORT|^CONFIG_PACKAGE_wpad[-a-z0-9]*=y|^CONFIG_DEFAULT_wpad' .config || true
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=|^CONFIG_DRIVER_11(AX|BE)_SUPPORT|^CONFIG_PACKAGE_wpad[-a-z0-9]*=y|^CONFIG_PACKAGE_kmod-ath12k=y|^CONFIG_DEFAULT_wpad' .config || true
 
           # ViKingYFY's hostapd patch 900-hostapd-update-muedca-params.patch uses
           # struct hostapd_config.he_mu_edca, a member that only exists with

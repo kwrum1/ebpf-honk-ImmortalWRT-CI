@@ -93,11 +93,21 @@ fetch_honk_stage() {
 	[ -n "$core" ] || return 0
 	rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
-	pick() {
-		printf '%s' "$rel_json" | jq -r --arg c "$core" --arg n "$1" \
-			'[.[] | select(.assets != null) | select([.assets[].name] | index("honk-core-" + $c + "-x86_64.tar.gz"))][0].assets[]? | select(.name == $n) | .browser_download_url' 2>/dev/null | head -1
+	# $1 = an asset name that identifies the release, $2 = the asset to fetch.
+	# The p1 release (core-p1) is the core built from ci/patches/
+	# honk-direct-unspec.py: direct flows come back as TC_ACT_UNSPEC so whatever
+	# runs behind honk (dpd on x86/rockchip, the kernel flowtable on IPQ) still
+	# sees them. The plain cores predate that handover -- do not pick them
+	# unless a p1 release does not exist for this CORE_COMMIT.
+	pick_from() {
+		printf '%s' "$rel_json" | jq -r --arg a "$1" --arg n "$2" \
+			'[.[] | select(.assets != null) | select([.assets[].name] | index($a))][0].assets[]? | select(.name == $n) | .browser_download_url' 2>/dev/null | head -1
 	}
-	stage=$(pick generated-stage.mk)
+	stage=$(pick_from "honk-core-${core}-p1-x86_64.tar.gz" generated-stage.mk)
+	if [ -z "$stage" ] || [ "$stage" = "null" ]; then
+		echo "honk: no p1 core for CORE_COMMIT=$core, using the plain core" >&2
+		stage=$(pick_from "honk-core-${core}-x86_64.tar.gz" generated-stage.mk)
+	fi
 	if [ -z "$stage" ] || [ "$stage" = "null" ]; then
 		echo "!! honk: no generated-stage.mk for CORE_COMMIT=$core; honk will fail at download" >&2
 		return 0
@@ -109,15 +119,17 @@ fetch_honk_stage() {
 	fi
 	sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./honk/generated-stage.mk
 
-	prov=$(pick generated-provenance.json)
+	prov=$(pick_from generated-provenance.json generated-provenance.json)
 	if [ -n "$prov" ] && [ "$prov" != "null" ]; then
 		curl -fsSL -o ./honk/generated-provenance.json "$prov" || true
 	fi
 
-	doona=$(pick generated-doona-stage.mk)
+	doona=$(pick_from generated-doona-stage.mk generated-doona-stage.mk)
 	if [ -n "$doona" ] && [ "$doona" != "null" ] && [ -d ./luci-app-honk ]; then
 		if curl -fsSL -o ./luci-app-honk/generated-doona-stage.mk "$doona"; then
-			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./luci-app-honk/generated-doona-stage.mk
+			# doona lives in the release that carries it (source-*), not in
+			# core-p1, so rewrite to *its* directory, not the core's.
+			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${doona%/*}/|" ./luci-app-honk/generated-doona-stage.mk
 		fi
 	fi
 
