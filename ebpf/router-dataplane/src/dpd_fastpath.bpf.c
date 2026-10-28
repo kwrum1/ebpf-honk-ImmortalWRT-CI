@@ -332,15 +332,20 @@ static __always_inline int dpd_policy_ok(const struct dpd_config *cfg,
 /*
  * Cheap gates, evaluated BEFORE bpf_fib_lookup(). None of them needs a route:
  * they read only the flow key, the VLAN id and the config. Running them first
- * means IPv6, DNS, DHCP and non-unicast traffic never pay for a FIB lookup they
- * could only ever fail -- IPv4 is the only family this program accelerates.
+ * means DNS, DHCP, non-unicast and (unless enabled) IPv6 traffic never pay for
+ * a route lookup they could only ever fail.
+ *
+ * IPv6 is opt-in (`cfg->ipv6`). The caller only produces a v6 flow key for
+ * plain TCP/UDP, unicast, non-fragment packets with no extension headers, so
+ * this function only has to apply the same port gates as v4 plus the DHCPv6
+ * pair (546/547), which is the v6 service that must stay local.
  */
 static __always_inline int dpd_may_accelerate(const struct dpd_config *cfg,
 					      __u16 vlan_id, __u8 tagged,
 					      const struct dpd_flow_key *k,
 					      struct dpd_stat_val *st)
 {
-	if (k->family != AF_INET) {
+	if (k->family == AF_INET6 && !cfg->ipv6) {
 		DPD_INC(st, ST_V6_SKIP);
 		return 0;
 	}
@@ -348,7 +353,10 @@ static __always_inline int dpd_may_accelerate(const struct dpd_config *cfg,
 		DPD_INC(st, ST_DNS_SKIP);
 		return 0;
 	}
-	if (dpd_is_dhcp(k->proto, k->sport, k->dport)) {
+	if (dpd_is_dhcp(k->proto, k->sport, k->dport) ||
+	    (k->family == AF_INET6 &&
+	     (bpf_ntohs(k->sport) == 546 || bpf_ntohs(k->sport) == 547 ||
+	      bpf_ntohs(k->dport) == 546 || bpf_ntohs(k->dport) == 547))) {
 		DPD_INC(st, ST_DHCP_SKIP);
 		return 0;
 	}
@@ -719,16 +727,54 @@ int dpd_fastpath(struct __sk_buff *skb)
 			}
 		}
 	} else if (h_proto == ETH_P_IPV6) {
-		/*
-		 * Never accelerated (no NAT66 in this baseline, so the reply of a
-		 * taken-over v6 flow would arrive untracked and fw4's forward
-		 * chain would reject it) -- and therefore never worth a FIB
-		 * lookup either. ABI 9 moved the rejection in front of the
-		 * lookup; before that every v6 packet paid for a route lookup it
-		 * could only ever fail.
-		 */
-		DPD_INC(st, ST_V6_SKIP);
-		return TC_ACT_UNSPEC;
+		struct ipv6hdr *ip6h = data + l3_off;
+		__u32 l4_off;
+		__u8 nxt;
+
+		if ((void *)(ip6h + 1) > data_end)
+			goto non_ip;
+		if (!cfg->ipv6) {
+			DPD_INC(st, ST_V6_SKIP);
+			return TC_ACT_UNSPEC;
+		}
+		nxt = ip6h->nexthdr;
+		/* Extension headers and fragments: the L4 header is not where a
+		 * 5-tuple assumes it is. Refuse instead of guessing (44 =
+		 * fragment, 0/43/60 = hop-by-hop/routing/dest-opts). */
+		if (nxt == IPPROTO_FRAGMENT || nxt == 0 || nxt == 43 || nxt == 60) {
+			DPD_INC(st, ST_V6_SKIP);
+			return TC_ACT_UNSPEC;
+		}
+		if (nxt != IPPROTO_TCP && nxt != IPPROTO_UDP) {
+			DPD_INC(st, ST_V6_SKIP);
+			return TC_ACT_UNSPEC;
+		}
+		l4_off = l3_off + sizeof(*ip6h);
+		if (nxt == IPPROTO_TCP) {
+			struct tcphdr *th = data + l4_off;
+
+			if ((void *)(th + 1) > data_end) {
+				DPD_INC(st, ST_NON_IP);
+				return TC_ACT_UNSPEC;
+			}
+			fkey.sport = th->source;
+			fkey.dport = th->dest;
+		} else {
+			struct udphdr *uh = data + l4_off;
+
+			if ((void *)(uh + 1) > data_end) {
+				DPD_INC(st, ST_NON_IP);
+				return TC_ACT_UNSPEC;
+			}
+			fkey.sport = uh->source;
+			fkey.dport = uh->dest;
+		}
+		fkey.family = AF_INET6;
+		fkey.proto = nxt;
+		__builtin_memcpy(fkey.saddr, ip6h->saddr.in6_u.u6_addr32,
+				 sizeof(fkey.saddr));
+		__builtin_memcpy(fkey.daddr, ip6h->daddr.in6_u.u6_addr32,
+				 sizeof(fkey.daddr));
 	} else {
 		goto non_ip;
 	}
@@ -795,13 +841,21 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
-			ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
+			if (fkey.family == AF_INET)
+				ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
+			else
+				ret = dpd_dec_hop_v6(data, data_end, l3_off);
 			if (ret > 0) {
 				DPD_INC(st, ST_TTL_DROP);
 				return TC_ACT_SHOT;
 			}
 			if (ret < 0)
 				return TC_ACT_UNSPEC;
+
+			/* count v6 takeovers separately, so "is IPv6 actually
+			 * accelerated here" is answerable from dpdctl */
+			if (fkey.family == AF_INET6)
+				DPD_INC(st, ST_V6_OK);
 
 			return dpd_emit_cached(skb, fval->egress_ifindex,
 					       fval->flags, fval->dmac,
@@ -829,13 +883,24 @@ int dpd_fastpath(struct __sk_buff *skb)
 		ihl = (__u32)iph->ihl * 4;
 
 		fib.ifindex = skb->ifindex;
-		fib.family = AF_INET;
+		fib.family = fkey.family;
 		fib.l4_protocol = fkey.proto;
-		fib.tot_len = bpf_ntohs(iph->tot_len);
-		fib.ipv4_src = fkey.saddr[3];
-		fib.ipv4_dst = fkey.daddr[3];
 		fib.sport = fkey.sport;
 		fib.dport = fkey.dport;
+		if (fkey.family == AF_INET) {
+			fib.tot_len = bpf_ntohs(iph->tot_len);
+			fib.ipv4_src = fkey.saddr[3];
+			fib.ipv4_dst = fkey.daddr[3];
+		} else {
+			struct ipv6hdr *ip6h = data + l3_off;
+
+			fib.tot_len = bpf_ntohs(ip6h->payload_len) +
+				      sizeof(*ip6h);
+			__builtin_memcpy(fib.ipv6_src, fkey.saddr,
+					 sizeof(fib.ipv6_src));
+			__builtin_memcpy(fib.ipv6_dst, fkey.daddr,
+					 sizeof(fib.ipv6_dst));
+		}
 
 		/*
 		 * GRO/GSO: the header carries the *aggregate* length (up to 64
@@ -856,7 +921,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 		 *   UDP: ihl + 8          + gso_size
 		 * If the L4 header is not parseable, fall back to ihl+payload.
 		 */
-		if (skb->gso_size) {
+		if (skb->gso_size && fkey.family == AF_INET) {
 			__u32 seg = ihl + skb->gso_size;
 
 			if (fkey.proto == IPPROTO_TCP) {
@@ -906,7 +971,10 @@ int dpd_fastpath(struct __sk_buff *skb)
 			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh,
 						   !tagged);
 
-			ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
+			if (fkey.family == AF_INET)
+				ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
+			else
+				ret = dpd_dec_hop_v6(data, data_end, l3_off);
 			if (ret > 0) {
 				DPD_INC(st, ST_TTL_DROP);
 				return TC_ACT_SHOT;
@@ -943,7 +1011,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 			 * forwardable at all" (local/unreachable packets return
 			 * early), it just no longer decides *which* uplink.
 			 */
-			if (!dpd_is_uplink(skb->ifindex)) {
+			if (fkey.family == AF_INET && !dpd_is_uplink(skb->ifindex)) {
 				int wi = dpd_pick_wan(&fkey);
 
 				if (wi >= 0 && wi < DPD_WAN_MAX) {

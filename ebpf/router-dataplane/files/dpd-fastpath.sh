@@ -177,13 +177,14 @@ dpd_attach_logical() {
 # program is loaded yet: dpdctl then just fails and we retry after attaching.
 dpd_push_uci() {
 	local enabled="$1" mode="$2" redirect="$3" ttl="$4" policy="$5"
-	local refresh="$6"
+	local refresh="$6" ipv6="$7"
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
 	"$DPD_CTL" set redirect "$redirect" 2>/dev/null
 	"$DPD_CTL" set ttl "$ttl" 2>/dev/null
 	[ -n "$refresh" ] && "$DPD_CTL" set refresh "$refresh" 2>/dev/null
+	[ -n "$ipv6" ] && "$DPD_CTL" set ipv6 "$ipv6" 2>/dev/null
 	[ -n "$policy" ] && "$DPD_CTL" set policy "$policy" 2>/dev/null
 	"$DPD_CTL" set enable "$enabled" 2>/dev/null
 	return 0
@@ -324,7 +325,7 @@ dpd_has_uplink() {
 # einat invokes when the NAT comes or goes, and which an operator can run by
 # hand). Echoes the effective mode.
 dpd_gate_refresh_uci() {
-	local enabled mode redirect ttl policy vlans refresh emode
+	local enabled mode redirect ttl policy vlans refresh ipv6 emode
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -332,11 +333,12 @@ dpd_gate_refresh_uci() {
 	config_get redirect global redirect auto
 	config_get ttl global flow_ttl_ms 5000
 	config_get refresh global flow_refresh_ms 250
+	config_get ipv6 global ipv6 0
 	config_get policy global policy 'allow_all'
 	config_get vlans global vlans ''
 
 	emode="$(dpd_gate_mode "$mode")"
-	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh"
+	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6"
 	dpd_push_vlans "$policy" "$vlans"
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,

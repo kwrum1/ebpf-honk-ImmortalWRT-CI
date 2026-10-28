@@ -106,8 +106,18 @@
  *        (iph->ihl*4 + L4 header + gso_size), not from gso_size alone.
  *      - IPv6, :53, DHCP and non-unicast packets are rejected *before* the
  *        FIB lookup: they can never be accelerated, so they no longer pay for
- *        a route lookup. */
-#define DPD_ABI_VERSION		9
+ *        a route lookup.
+ *
+ * 10: optional IPv6 acceleration (`option ipv6`, default 0).
+ *      IPv6 has no NAT here, so an accelerated flow's return path must be
+ *      carried by conntrack, not by einat: the stateful priming (ABI 7) makes
+ *      conntrack see the handshake first, after which fw4's
+ *      `ct state established,related accept` covers the primed packets and the
+ *      rest is redirected on the WAN ingress hook.
+ *      Only TCP/UDP without extension headers, non-fragment, unicast, non-53,
+ *      non-DHCPv6(546/547) v6 packets are eligible. `ST_V6_OK` counts the ones
+ *      that took the fast path; ST_V6_SKIP keeps counting refusals. */
+#define DPD_ABI_VERSION		10
 
 /* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */
 #define DPD_BPF_SECTION		"classifier"
@@ -173,6 +183,11 @@ struct dpd_config {
 	 * keeps an idle entry alive for up to this much longer than
 	 * flow_ttl_ms, which is the safe direction. */
 	__u32	flow_refresh_ms;
+	/* 1 = accelerate IPv6 as well (TCP/UDP, no extension headers, unicast,
+	 * not :53, not DHCPv6). 0 = IPv4 only, which is the shipped default:
+	 * the v6 path is newer and needs `ct state established` to carry the
+	 * return direction (there is no NAT66 to do it). */
+	__u32	ipv6;
 };
 
 enum dpd_stat_idx {
@@ -213,6 +228,7 @@ enum dpd_stat_idx {
 	ST_BCAST_SKIP,		/* non-unicast destination (limited broadcast,
 				 * 224/4, ff00::/8): has to be delivered
 				 * locally / flooded, not routed.		*/
+	ST_V6_OK,		/* IPv6 packet the fast path took over	*/
 	ST__MAX,
 };
 

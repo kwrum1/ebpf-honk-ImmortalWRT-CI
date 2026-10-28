@@ -153,7 +153,7 @@ static const char *stat_name(int i)
 		"redirect_ok", "neigh_ok", "neigh_fail", "flow_hit",
 		"flow_miss", "flow_write", "ttl_drop", "local",
 		"v6_skip", "vlan_skip", "frag_skip", "dns_skip", "fib_retry",
-		"dhcp_skip", "bcast_skip",
+		"dhcp_skip", "bcast_skip", "v6_ok",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -203,6 +203,8 @@ static int cmd_set(int argc, char **argv)
 		cfg.flow_refresh_ms = strtoul(argv[1], NULL, 0);
 	} else if (!strcmp(argv[0], "epoch")) {
 		cfg.epoch = strtoul(argv[1], NULL, 0) & 0xff;
+	} else if (!strcmp(argv[0], "ipv6")) {
+		cfg.ipv6 = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -246,6 +248,8 @@ static int cmd_show(void)
 	printf("epoch        %u\n", cfg.epoch);
 	printf("flow_refresh %u ms%s\n", cfg.flow_refresh_ms,
 	       cfg.flow_refresh_ms ? "" : " (every packet)");
+	printf("ipv6         %u%s\n", cfg.ipv6,
+	       cfg.ipv6 ? "" : " (IPv4 only)");
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -580,6 +584,7 @@ static void usage(const char *argv0)
 		"  set redirect <auto|neigh|dev>\n"
 		"  set ttl <ms>\n"
 		"  set refresh <ms>        0 = touch the flow timestamp on every packet\n"
+		"  set ipv6 <0|1>          accelerate IPv6 TCP/UDP too (default 0)\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"

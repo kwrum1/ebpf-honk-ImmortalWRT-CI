@@ -30,6 +30,7 @@ dpd_uci() {
 	config_get DPD_REDIRECT global redirect auto
 	config_get DPD_TTL global flow_ttl_ms 5000
 	config_get DPD_REFRESH global flow_refresh_ms 250
+	config_get DPD_IPV6 global ipv6 0
 	config_get DPD_IFACES global interfaces 'lan'
 	config_get DPD_POLICY global policy 'allow_all'
 	config_get DPD_VLANS global vlans ''
@@ -59,6 +60,7 @@ dpd_push_config() {
 	"$DPD_CTL" set redirect "$DPD_REDIRECT" 2>/dev/null
 	"$DPD_CTL" set ttl "$DPD_TTL" 2>/dev/null
 	"$DPD_CTL" set refresh "$DPD_REFRESH" 2>/dev/null
+	"$DPD_CTL" set ipv6 "$DPD_IPV6" 2>/dev/null
 	"$DPD_CTL" set policy "$DPD_POLICY" 2>/dev/null
 	"$DPD_CTL" set enable "$DPD_ENABLED" 2>/dev/null
 	# also re-publish the vlan allow-list, so a hotplug that lands before the
