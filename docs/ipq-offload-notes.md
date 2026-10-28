@@ -4,7 +4,7 @@ Status: **analysis only** (2026-10-28). No IPQ/MTK hardware in the lab, so
 nothing below is applied blindly. Each item lists how to prove it on a device.
 
 Scope: the `owrt` branch (kwrum1/immortalwrt), which is what MTK-ALL / QCA-ALL /
-QCA-PPE / WRT-TEST build. The X86/ROCKCHIP eBPF work in `mydist/` is never
+QCA-PPE / WRT-TEST build. The X86/ROCKCHIP eBPF work in `ebpf/` is never
 installed on these targets.
 
 ## 1. The acceleration path is the kernel flowtable, not a QCA driver

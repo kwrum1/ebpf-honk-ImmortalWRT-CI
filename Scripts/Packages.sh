@@ -162,11 +162,11 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # repository used to shadow it and shipped whatever it happened to contain.
 case "$WRT_CONFIG" in
 X86|ROCKCHIP)
-	MYDIST_ROOT="$GITHUB_WORKSPACE/ebpf"
+	EBPF_ROOT="$GITHUB_WORKSPACE/ebpf"
 
-	if [ ! -d "$MYDIST_ROOT/router-dataplane" ]; then
+	if [ ! -d "$EBPF_ROOT/router-dataplane" ]; then
 		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-		echo "!! FATAL: $MYDIST_ROOT/router-dataplane not found."
+		echo "!! FATAL: $EBPF_ROOT/router-dataplane not found."
 		echo "!! This repository must carry ebpf/router-dataplane (it is the"
 		echo "!! datapath source; the firmware tree is upstream VIKINGYFY/immortalwrt)."
 		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -176,7 +176,7 @@ X86|ROCKCHIP)
 	echo " "
 	rm -rf ./ebpf
 	mkdir -p ./ebpf
-	cp -rf "$MYDIST_ROOT"/. ./ebpf/
+	cp -rf "$EBPF_ROOT"/. ./ebpf/
 	find ./ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
 		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
 
@@ -184,7 +184,7 @@ X86|ROCKCHIP)
 	# one we intended to copy.
 	DPD_SRC_SHA=$(find ./ebpf -type f \( -name '*.c' -o -name '*.h' \) -print0 |
 		sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
-	echo "ebpf datapath installed into package/ (from $MYDIST_ROOT)"
+	echo "ebpf datapath installed into package/ (from $EBPF_ROOT)"
 	echo "ebpf datapath src sha256: $DPD_SRC_SHA"
 	if [ -n "$GITHUB_ENV" ]; then
 		echo "DPD_SRC_SHA=$DPD_SRC_SHA" >> "$GITHUB_ENV"
