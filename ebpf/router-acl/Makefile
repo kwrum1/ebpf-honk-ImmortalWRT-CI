@@ -116,6 +116,13 @@ define Package/router-acl/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/acl_egress.bpf.o $(1)/lib/bpf/
 
 	$(INSTALL_BIN) ./files/router_acl.init $(1)/etc/init.d/router-acl
+
+	# Ship the rc.d symlinks instead of relying on a first-boot `enable`:
+	# the uci-defaults run at S10, i.e. after the boot scan of /etc/rc.d has
+	# already decided what to start, so a service enabled there would not run
+	# until the *second* boot. A flashed router must accelerate on the first.
+	$(INSTALL_DIR) $(1)/etc/rc.d
+	ln -sf ../init.d/router-acl $(1)/etc/rc.d/S96router-acl
 	$(INSTALL_DATA) ./files/router-acl.sh $(1)/usr/libexec/router-acl.sh
 	$(INSTALL_DATA) ./files/router_acl.config $(1)/etc/config/router_acl
 	$(INSTALL_DATA) ./files/91-router-acl $(1)/etc/hotplug.d/iface/91-router-acl

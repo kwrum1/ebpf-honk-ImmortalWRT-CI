@@ -112,6 +112,14 @@ define Package/dpd-fastpath/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/abi $(1)/usr/lib/dpd/abi
 
 	$(INSTALL_BIN) ./files/dpd_fastpath.init $(1)/etc/init.d/dpd-fastpath
+
+	# Ship the rc.d symlinks instead of relying on a first-boot `enable`:
+	# the uci-defaults run at S10, i.e. after the boot scan of /etc/rc.d has
+	# already decided what to start, so a service enabled there would not run
+	# until the *second* boot. A flashed router must accelerate on the first.
+	$(INSTALL_DIR) $(1)/etc/rc.d
+	ln -sf ../init.d/dpd-fastpath $(1)/etc/rc.d/S95dpd-fastpath
+	ln -sf ../init.d/ebpf-mwan $(1)/etc/rc.d/S61ebpf-mwan
 	$(INSTALL_BIN) ./files/ebpf-mwan $(1)/usr/libexec/ebpf-mwan
 	$(INSTALL_BIN) ./files/ebpf-mwan.init $(1)/etc/init.d/ebpf-mwan
 	$(INSTALL_DATA) ./files/ebpf_mwan.config $(1)/etc/config/ebpf_mwan

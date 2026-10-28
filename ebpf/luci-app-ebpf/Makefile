@@ -46,6 +46,13 @@ define Package/luci-app-ebpf/install
 	$(INSTALL_BIN) ./files/99-luci-ebpf-trim $(1)/etc/uci-defaults/99-luci-ebpf-trim
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/posture.init $(1)/etc/init.d/ebpf-posture
+
+	# Ship the rc.d symlinks instead of relying on a first-boot `enable`:
+	# the uci-defaults run at S10, i.e. after the boot scan of /etc/rc.d has
+	# already decided what to start, so a service enabled there would not run
+	# until the *second* boot. A flashed router must accelerate on the first.
+	$(INSTALL_DIR) $(1)/etc/rc.d
+	ln -sf ../init.d/ebpf-posture $(1)/etc/rc.d/S26ebpf-posture
 endef
 
 $(eval $(call BuildPackage,luci-app-ebpf))
