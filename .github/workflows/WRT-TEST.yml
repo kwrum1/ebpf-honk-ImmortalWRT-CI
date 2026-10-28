@@ -6,8 +6,9 @@
 #
 # Source: VIKINGYFY/immortalwrt.
 #   X86 / ROCKCHIP            -> owrt  (eBPF datapath comes from this repo's ebpf/)
-#   IPQ60xx / IPQ807x / MTK  -> owrt  (PPE, see QCA-PPE)
-#   IPQ53xx / IPQ95xx        -> main  (NSS firmware, see QCA-NSS)
+#   IPQ60xx / IPQ807x        -> owrt (PPE) or main (NSS): both are supported
+#   IPQ53xx / IPQ95xx        -> main only (NSS; qualcommbe has no image/ on owrt)
+#   MTK                      -> owrt
 
 name: WRT-TEST
 

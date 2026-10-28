@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 kwrum1
 #
-# QCA-NSS: the Qualcomm NSS-firmware platforms (IPQ53xx / IPQ95xx).
+# QCA-NSS: the NSS-firmware build of every supported Qualcomm target.
 #
-# Source: VIKINGYFY/immortalwrt@main. That is the branch where target/linux/
-# qualcommbe is complete (image/, ipq95xx/, ...) and where the NSS firmware
-# driver stack lives; on `owrt` the same directory only carries Makefile/config/
-# dts. Configs are upstream's own Config/IPQ53XX.txt and Config/IPQ95XX.txt.
+# Source: VIKINGYFY/immortalwrt@main (NSS firmware branch).
 #
-# The PPE counterpart for IPQ60xx / IPQ807x is QCA-PPE (branch owrt).
+# This is the *same device list as QCA-PPE* plus the two platforms that only
+# exist here:
+#
+#   IPQ60XX / IPQ807x   both flavours: owrt (PPE, QCA-PPE) and main (NSS, here)
+#   IPQ53XX / IPQ95XX   NSS only: target/linux/qualcommbe has no image/ on
+#                       owrt (just Makefile/config-6.18/dts), so a PPE build
+#                       of these boards cannot be produced from that branch.
+#
+# Configs are upstream's own Config/*.txt files.
 
 name: QCA-NSS
 
@@ -35,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [IPQ53XX, IPQ95XX]
+        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO, IPQ53XX, IPQ95XX]
         SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [main]
 
