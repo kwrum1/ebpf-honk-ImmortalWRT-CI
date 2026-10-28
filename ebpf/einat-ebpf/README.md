@@ -28,27 +28,31 @@ Endpoint-Independent Filtering（也就是 full cone NAT），不依赖 conntrac
 以前这里直接下载上游 release 的 `einat-static-*`。现在改成**本仓库构建**：
 
 * 工作流 `EINAT-BUILD`，上游源码 pin 到 `ba647ce6`（不 fork 仓库）；
-* 应用 `patches/einat-perf.py`（p1）与 `patches/einat-perf-p2.py`（p2），
-  两者都按锚点打，上游漂移会直接报错，不会静默跳过；
-* Nix 用上游的 `static` 预设（不带 `ipv6` feature，程序里没有 NAT66 代码），
-  `build.rs` 原本就是 `-O2 -mcpu=v3`；
+* 应用 `patches/einat-perf.py`（p1）与 `patches/einat-perf-p2.py`（p2），两者都按锚点打，上游漂移会直接报错；
+* Nix 用上游的 `static` 预设（不带 `ipv6` feature，程序里没有 NAT66 代码），`build.rs` 原本就是 `-O2 -mcpu=v3`；
 * 产物是静态 musl 二进制 + `aya` loader，运行时不需要 libbpf/elf/zlib；
 * 发布在固定 tag `einat-p2`，sha256 写在 `Makefile` 的 `EINAT_HASH`。
 
-| 补丁 | 内容 | 每包收益 |
+### 每包收益
+
+| 方向 | 上游 | 现在 |
 | --- | --- | --- |
-| p1 | v4-only 构建里 `get_is_ipv4()` 仍解析一遍 L2/L3，`parse_packet()` 紧接着又解析同一份头 | 每包每方向少一次头部解析 |
-| p2 ① | `dest_config` 只有 WAN 地址一个条目时，用 32 位比较代替每次出向的 LPM 查表 | WAN 出向每包少一次 LPM 查表 |
-| p2 ② | 已建立 TCP 连接的数据包在 1s 内跳过 CT 查表 + `bpf_timer_start()` | TCP 数据包少一次 hash 查表 + 一次带锁的定时器重排 |
+| WAN egress，普通流量 | LPM(dest) + LPM(src) + hash(binding) + hash(ct) = **4** | LPM(src) + hash(binding) + hash(ct) = **3**（少一次 LPM） |
+| WAN egress，已建立 TCP 数据 | 同上 + 每包 `bpf_timer_start` | **2**，定时器刷新最多 1 次/秒/流 |
+| WAN ingress，普通流量 | LPM(src) + hash(binding) + hash(ct) = **3** | **3**（不变） |
+| WAN ingress，已建立 TCP 数据 | 同上 + 每包 `bpf_timer_start` | **2**，定时器刷新最多 1 次/秒/流 |
+| 每包固定开销 | `get_is_ipv4` + `parse_packet` 两次解析 | 一次解析 |
 
-p2 的语义边界：只跳过「不可能命中」的查表（单个 dest 条目、等于默认外部地址、
-且为满前缀）和「只刷新定时器」的路径（`CT_ESTABLISHED` + TCP 数据包）。
-SYN/FIN/RST、ICMP 错误、UDP/ICMP、以及任何非 ESTABLISHED 状态都照旧走慢路径；
-定时器刷新是**限流到 1s 一次**，不是关闭。
+三种 map 里 LPM 最贵（前缀树遍历），hash 命中要算 jhash + 桶，`bpf_timer_start` 要拿定时器锁并重排 hrtimer，所以 ② 省的不只是一次查表。
 
-发布前 `EINAT-BUILD` 的 `e2e (netns)` 作业会跑 `patches/einat-e2e-nat.sh`：
-EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF/full cone（没通信过的 peer
-仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
+### 等价性
+
+* **dest_config 快路径**：只在「dest_config 恰好一个条目、等于默认外部地址、且为满前缀」时启用 32 位比较——此时 LPM(`daddr`) 只可能在 `daddr == 外部地址` 时命中，与查表完全等价。多条目、非满前缀、空表分别落到 mode 2（= 上游行为）和 mode 0；表更新期间先写 mode 2 兜底，改完再写真实值。
+* **CT 快路径**：只跳过 `CT_ESTABLISHED` + TCP 数据包——上游在这条路径上也只做 `RESET_TIMER`。SYN/FIN/RST、ICMP 错误、UDP/ICMP、以及任何非 ESTABLISHED 状态全部照旧走慢路径；`map_ct` 仍是状态/超时/refcount 的唯一来源，外部端口分配、binding/ct 的 refcount 与 seq 一行没动。
+
+按 1 Mpps 粗算（只是算术）：出向普通流量每秒少 100 万次 LPM 查表；已建立 TCP 每秒少 100 万次 hash 查表，定时器重排从「每包一次」降到「每流每秒最多一次」。
+
+发布前 `EINAT-BUILD` 的 `e2e (netns)` 作业会跑 `patches/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF/full cone（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
 
 为什么不把 einat 编进固件：上游 OpenWrt 打包（`muink/openwrt-einat-ebpf`）声明
 
