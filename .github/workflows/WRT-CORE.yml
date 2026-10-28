@@ -100,6 +100,7 @@ jobs:
           echo "WRT_KVER=none" >> $GITHUB_ENV
           echo "WRT_LIST=none" >> $GITHUB_ENV
           echo "WRT_PROV=none" >> $GITHUB_ENV
+          echo "WRT_PROV_LINE=数据面：未生成（config-only 运行）" >> $GITHUB_ENV
 
       - name: Clone Code
         run: |
@@ -270,6 +271,14 @@ jobs:
           } | tee ./upload/provenance-"$WRT_CONFIG".txt
 
           echo "WRT_PROV=abi=$ABI object=${OBJ_SHA:0:16} src=$WRT_HASH" >> $GITHUB_ENV
+          # One line for the release body. The eBPF layer only exists on
+          # X86/ROCKCHIP; the other targets accelerate in the vendor/kernel
+          # path and must not advertise a datapath they do not ship.
+          if [ "$OBJ_SHA" != "none" ]; then
+            echo "WRT_PROV_LINE=eBPF 数据面：abi=$ABI object=${OBJ_SHA:0:16} src=$WRT_HASH" >> $GITHUB_ENV
+          else
+            echo "WRT_PROV_LINE=数据面：平台原厂（PPE/NSS），本镜像不含 ebpf/ 层" >> $GITHUB_ENV
+          fi
 
       - name: Upload Provenance
         if: env.WRT_TEST != 'true'
@@ -294,7 +303,7 @@ jobs:
             配置：${{env.WRT_CONFIG}}
             平台：${{env.WRT_TARGET}}
 
-            eBPF 数据面：${{env.WRT_PROV}}
+            ${{env.WRT_PROV_LINE}}
 
             登录地址：${{env.WRT_IP}}
             登录密码：${{env.WRT_PW}}
@@ -305,5 +314,6 @@ jobs:
             内核版本：${{env.WRT_KVER}}
             插件列表：${{env.WRT_LIST}}
 
-            每个 release 都带 provenance-<CONFIG>.txt：固件源提交、eBPF ABI、
-            BPF 对象哈希与体积、ebpf/ 源码树哈希、clang/libbpf 版本。
+            每个 release 都带 provenance-<CONFIG>.txt：固件源提交、配置、内核、
+            clang/libbpf 版本；X86/ROCKCHIP 另含 eBPF ABI、BPF 对象哈希与体积、
+            ebpf/ 源码树哈希。
