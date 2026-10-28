@@ -334,8 +334,8 @@ patch(
     }
 """,
     """        pub g_deleting_map_entries: u8,
-        /// 0 = dest_config is empty, 1 = only the default external address,
-        /// 2 = arbitrary entries. See lookup_dest_config_fast().
+        // 0 = dest_config is empty, 1 = only the default external address,
+        // 2 = arbitrary entries. See lookup_dest_config_fast().
         pub g_ipv4_dest_config_mode: u8,
         #[cfg(feature = "ipv6")]
         pub g_ipv6_dest_config_mode: u8,
