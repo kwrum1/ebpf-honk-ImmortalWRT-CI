@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# UPSTREAM-CHECK: do the build-time edits still match upstream?
+#
+# The firmware is built from VIKINGYFY/immortalwrt without a fork. What this
+# repo adds is (a) packages under ebpf/ and (b) scripted edits to a handful of
+# upstream files, applied in Scripts/Handles.sh. The edits are anchored on lines
+# we expect to find; if upstream renames one, the sed stops matching *silently*
+# and the image quietly ships the upstream default.
+#
+# This job clones upstream fresh (both branches we build) and checks every
+# anchor. It is cheap on purpose: run it after bumping upstream, or daily.
+
+name: UPSTREAM-CHECK
+
+on:
+  schedule:
+    - cron: 15 18 * * *
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  anchors:
+    name: ${{ matrix.BRANCH }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        BRANCH: [owrt, main]
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@main
+
+      - name: Clone upstream
+        run: |
+          git clone --depth=1 --single-branch --branch ${{ matrix.BRANCH }} \
+            https://github.com/VIKINGYFY/immortalwrt.git upstream
+          git -C upstream log -1 --pretty='%h %cI %s'
+
+      - name: Check anchors
+        run: |
+          sh Scripts/upstream-check.sh upstream
