@@ -1,20 +1,20 @@
 # Honk 透明代理核心 + LuCI/Doona
 CONFIG_PACKAGE_honk=y
 CONFIG_PACKAGE_luci-app-honk=y
-# --- mydist 数据面（#18）：TC ingress eBPF 快路径 ---
-# 包不在任何 feed 里。**唯一**的归属地是本仓库的 mydist/router-dataplane/，
-# 由 Scripts/Packages.sh 在构建前拷进构建树的 package/mydist/（和第三方仓库
+# --- ebpf 数据面（#18）：TC ingress eBPF 快路径 ---
+# 包不在任何 feed 里。**唯一**的归属地是本仓库的 ebpf/router-dataplane/，
+# 由 Scripts/Packages.sh 在构建前拷进构建树的 package/ebpf/（和第三方仓库
 # 的落地方式一致，只是走本地拷贝而不是 git clone）。找不到就 fail hard。
 CONFIG_PACKAGE_dpd-fastpath=y
-# --- mydist 数据面（#24）：WAN eBPF ACL / conntrack 逃逸 ---
-# 同样住在 mydist/router-acl/，由 Scripts/Packages.sh 一起拷进 package/mydist/。
+# --- ebpf 数据面（#24）：WAN eBPF ACL / conntrack 逃逸 ---
+# 同样住在 ebpf/router-acl/，由 Scripts/Packages.sh 一起拷进 package/ebpf/。
 # 默认 enabled='1' + mode='guard'：只丢 WAN 上无主的入站（叠加式，fw4/conntrack
 # 照旧）。注意这比 stock OpenWrt 基线**更严**——einat 开着时 fw4 渲染出来的是
 # 一条 WAN→LAN 全放行，真正把无主入站挡在外面的是这里。
 # bypass = 再加 mark + notrack，把 NAT 流从 conntrack 里彻底拿掉（要求 einat 开着）。
 CONFIG_PACKAGE_router-acl=y
-# --- mydist 数据面（#22）：单条 qdisc + CAKE ---
-# 住在 mydist/router-qos/，同样是纯脚本包（不编译任何东西），由 Packages.sh 拷贝。
+# --- ebpf 数据面（#22）：单条 qdisc + CAKE ---
+# 住在 ebpf/router-qos/，同样是纯脚本包（不编译任何东西），由 Packages.sh 拷贝。
 # 默认 enabled='1'，但 upload='0' 时它是空转的（init 只记日志、不装 qdisc）——
 # CAKE 是按你给的速率整形的，编一个速率比不整还糟。真正开起来要设：
 #   uci set router_qos.global.upload='<你的真实上行 kbit，略减一点>'
@@ -24,8 +24,8 @@ CONFIG_PACKAGE_router-acl=y
 # 下载方向故意不做：需要 IFB，而 mirror 根本不延迟真实包、redirect 又会
 # 掐断 ACL/dpd 或改掉 fw4 匹配 zone 用的 iifname（实测见 router-qos.sh 头注释）。
 CONFIG_PACKAGE_router-qos=y
-# --- mydist 性能档位：首启按 CPU/内存/网卡自动定档 ---
-# 住在 mydist/router-tuning/，纯脚本包，由 Packages.sh 一起拷进 package/mydist/。
+# --- ebpf 性能档位：首启按 CPU/内存/网卡自动定档 ---
+# 住在 ebpf/router-tuning/，纯脚本包，由 Packages.sh 一起拷进 package/ebpf/。
 # 它把「只能靠包选择做」的两条一起带上（Makefile 的 DEPENDS）：
 #   kmod-tcp-bbr -> BBRv1 本身（还自带 /etc/sysctl.d/12-tcp-bbr.conf）
 #   kmod-sched   -> 其 KCONFIG 含 CONFIG_NET_SCH_FQ，BBR 的首选 pacing qdisc
@@ -35,12 +35,12 @@ CONFIG_PACKAGE_router-qos=y
 # **不**写 /etc/config/{network,dhcp,firewall}。证据与取舍见
 # docs/kernel-and-tuning-research.md（含「为什么不换 XanMod 内核」）。
 CONFIG_PACKAGE_router-tuning=y
-# --- mydist DNS：smartdns 做解析，dnsmasq 留作前端 ---
-# 住在 mydist/router-dns/，纯脚本包。它只装两样东西：
+# --- ebpf DNS：smartdns 做解析，dnsmasq 留作前端 ---
+# 住在 ebpf/router-dns/，纯脚本包。它只装两样东西：
 #   1. /etc/dnsmasq.conf —— dnsmasq 无条件读它（dnsmasq.init:948 的
 #      `[ -f "$dnsmasqconffile" ] && xappend "--conf-file=..."`），
 #      内容是 no-resolv + server=127.0.0.1#6053。**不写 /etc/config/dhcp。**
-#   2. /etc/uci-defaults/97-mydist-dns —— 把 smartdns 开到 6053 并
+#   2. /etc/uci-defaults/97-ebpf-dns —— 把 smartdns 开到 6053 并
 #      auto_set_dnsmasq=0。
 #
 # 为什么不让 smartdns 直接占 :53（它的另一种官方模式 port 53 +
@@ -198,7 +198,7 @@ CONFIG_PACKAGE_usbutils=y
 CONFIG_PACKAGE_xz-utils=y
 
 # =====================================================================
-# 基线瘦身（mydist）—— 2026-10-17
+# 基线瘦身（ebpf）—— 2026-10-17
 #
 # 依据：已构建 x86 树的**真实根文件系统实测**（379 MB 未压缩）。
 # 结论：Docker 栈一项 = 243.7 MB = 64%，是唯一值得砍的大头；
@@ -339,7 +339,7 @@ CONFIG_PACKAGE_kmod-nf-ipt=n
 CONFIG_PACKAGE_kmod-nf-ipt6=n
 
 # =====================================================================
-# 功能补全（mydist）—— 2026-10-17，由动态验证的 manifest 实测发现
+# 功能补全（ebpf）—— 2026-10-17，由动态验证的 manifest 实测发现
 #
 # 依据：x86（391 包）与 ROCKCHIP（360 包）两版镜像的 manifest 逐条核对，
 #       并在构建树里确认了包定义确实存在（不是第三方 feed）。
@@ -364,7 +364,7 @@ CONFIG_PACKAGE_luci-proto-wireguard=y
 CONFIG_PACKAGE_kmod-sched-cake=y
 
 # --- einat-ebpf：锁定的 NAT 实现（全锥形必需）---
-#     包定义在 mydist/einat-ebpf（预编译二进制包，理由见 §13.14），
+#     包定义在 ebpf/einat-ebpf（预编译二进制包，理由见 §13.14），
 #     DEPENDS 里的 @(x86_64||aarch64) 正好覆盖 x86 与 RK/IPQ60xx。
 #     本行把它装进镜像；服务**默认开启**（/etc/config/einat enabled='1'）。
 #     开启后它会给 fw4 发 procd data 把 masquerade 关掉，所以配套加了自证：
@@ -391,15 +391,15 @@ CONFIG_PACKAGE_einat-ebpf=y
 #     is not set）；verify-packages.sh 里它在禁用清单。
 #     （旧注释里说的「这里不写」已经过时了 —— 现在两处来源都摘了，写得进去。）
 
-# ---- LuCI: the mydist console, and the stock pages that no longer apply -----
+# ---- LuCI: the ebpf console, and the stock pages that no longer apply -----
 # firewall4/nft is not the datapath (einat + router-acl are), dnsmasq does not
 # resolve (SmartDNS does), smartdns's own UI edits a config we generate, and
 # fullconenat-sonic is a conntrack NAT that einat replaces.
-CONFIG_PACKAGE_luci-app-mydist=y
+CONFIG_PACKAGE_luci-app-ebpf=y
 # CONFIG_PACKAGE_luci-app-smartdns is not set
 # CONFIG_PACKAGE_luci-app-fullconenat-sonic is not set
 # CONFIG_PACKAGE_luci-app-firewall is not set
 
 # luci-front: the public HTTP(S) side of LuCI (built on pingora). uhttpd keeps the
-# Lua CGI and the ubus bridge, on loopback only. See mydist/luci-front/.
+# Lua CGI and the ubus bridge, on loopback only. See ebpf/luci-front/.
 CONFIG_PACKAGE_luci-front=y
