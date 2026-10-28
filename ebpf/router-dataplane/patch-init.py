@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\files\dpd_fastpath.init"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\files\dpd_fastpath.init"
 s = io.open(p, encoding="utf-8").read()
 
 old = '''\tlocal enabled attach mode emode policy vlans redirect ttl ifaces i dev nok=0 pending=

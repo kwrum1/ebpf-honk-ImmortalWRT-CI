@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist router-tuning: apply the performance profile at boot and on reload.
+# ebpf router-tuning: apply the performance profile at boot and on reload.
 #
 # START=26 is deliberate: after network (20) so the devices exist, after the
 # upstream packet_steering (25) so rps_cpus has already been written if it is
@@ -9,7 +9,7 @@
 # nothing we do races with the datapath owners.
 #
 # The sysctl half does not depend on this service for its *first* application:
-# /etc/uci-defaults/98-mydist-tuning generates /etc/sysctl.d/29-router-tuning.conf
+# /etc/uci-defaults/98-ebpf-tuning generates /etc/sysctl.d/29-router-tuning.conf
 # during /etc/init.d/boot (S10), and /etc/init.d/sysctl (S11) then applies it -
 # still before network creates a single device, which is what makes
 # default_qdisc=fq meaningful.

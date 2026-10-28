@@ -21,7 +21,7 @@ PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -47,7 +47,7 @@ define Package/router-qos/description
   module. Both give per-flow fairness and AQM; only cake has DSCP tins.
 
   Enabled by default; the only uci entries are `enabled` and `wan` (a list, so
-  multi-WAN uplinks are covered, automatically including the ones mydist_mwan
+  multi-WAN uplinks are covered, automatically including the ones ebpf_mwan
   load balances over).
 
   A root qdisc and the clsact qdisc that router-acl creates are independent

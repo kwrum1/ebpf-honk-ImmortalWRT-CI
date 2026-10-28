@@ -13,7 +13,7 @@ PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 PKG_BUILD_DEPENDS:=libbpf
 
@@ -29,7 +29,7 @@ define Package/router-acl
 endef
 
 define Package/router-acl/description
-  router-acl is the WAN filter of the mydist datapath.
+  router-acl is the WAN filter of the ebpf datapath.
 
   It is deliberately narrow: no NAT, no einat map access, no redirection. It
   learns what the LAN sent out by watching the WAN egress direction and then

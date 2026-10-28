@@ -14,7 +14,7 @@ PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 PKG_BUILD_DEPENDS:=libbpf
 
@@ -30,7 +30,7 @@ define Package/dpd-fastpath
 endef
 
 define Package/dpd-fastpath/description
-  dpd_fastpath is a TC *ingress* eBPF fastpath for the mydist datapath.
+  dpd_fastpath is a TC *ingress* eBPF fastpath for the ebpf datapath.
 
   It is deliberately narrow: ingress-only, no NAT, no conntrack, and it never
   reads einat's maps. NAT keeps exactly one owner (einat-ebpf).
@@ -112,9 +112,9 @@ define Package/dpd-fastpath/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/abi $(1)/usr/lib/dpd/abi
 
 	$(INSTALL_BIN) ./files/dpd_fastpath.init $(1)/etc/init.d/dpd-fastpath
-	$(INSTALL_BIN) ./files/mydist-mwan $(1)/usr/libexec/mydist-mwan
-	$(INSTALL_BIN) ./files/mydist-mwan.init $(1)/etc/init.d/mydist-mwan
-	$(INSTALL_DATA) ./files/mydist_mwan.config $(1)/etc/config/mydist_mwan
+	$(INSTALL_BIN) ./files/ebpf-mwan $(1)/usr/libexec/ebpf-mwan
+	$(INSTALL_BIN) ./files/ebpf-mwan.init $(1)/etc/init.d/ebpf-mwan
+	$(INSTALL_DATA) ./files/ebpf_mwan.config $(1)/etc/config/ebpf_mwan
 	$(INSTALL_DATA) ./files/dpd-fastpath.sh $(1)/usr/libexec/dpd-fastpath.sh
 	$(INSTALL_BIN) ./files/dpd-gate-refresh $(1)/usr/libexec/dpd-gate-refresh
 	$(INSTALL_BIN) ./files/dpd-gate-watchdog $(1)/usr/libexec/dpd-gate-watchdog

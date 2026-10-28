@@ -1,7 +1,7 @@
 # router-dns
 
 smartdns is the only resolver and owns `:53`. dnsmasq has no DNS role at all
-(`port 0`) and is stopped by `mydist-posture`; odhcpd is the DHCP authority.
+(`port 0`) and is stopped by `ebpf-posture`; odhcpd is the DHCP authority.
 
 > **Round 10 (2026-10-20) changed the upstream model.** Everything below
 > "Round 10" describes the earlier dnsmasq-on-:53 front design and is kept for
@@ -57,14 +57,14 @@ seeded on first boot and kept.
 | `/etc/init.d/router-dns` | START=18; runs the sync, patches `no-resolv` + `server=127.0.0.1#6053` into `/etc/dnsmasq.conf` (unused while dnsmasq has port 0), applies the DNS egress policy, patches honk's DNS policy |
 | `/usr/libexec/router-dns-sync` | upstreams / `resolv.conf` / local names, idempotent |
 | `/etc/hotplug.d/iface/89-router-dns-sync` | the same sync on `ifup`/`ifupdate`/`ifdown` |
-| `/etc/uci-defaults/97-mydist-dns` | turns smartdns on, `port=53`, `auto_set_dnsmasq=0`, DoT upstream seeds, **and enables router-dns** |
+| `/etc/uci-defaults/97-ebpf-dns` | turns smartdns on, `port=53`, `auto_set_dnsmasq=0`, DoT upstream seeds, **and enables router-dns** |
 | `/usr/libexec/router-honk-dns` | keeps honk's own DNS upstream on `udp://127.0.0.1:53` |
 
 Nothing compiles, and nothing outside our own files is written at build time.
 
 ### The two lines that decide whether any of this works
 
-`/etc/uci-defaults/97-mydist-dns` ends with
+`/etc/uci-defaults/97-ebpf-dns` ends with
 
 ```sh
 /etc/init.d/smartdns enable >/dev/null 2>&1

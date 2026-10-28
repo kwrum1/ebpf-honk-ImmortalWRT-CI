@@ -1,13 +1,13 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist / luci-front -- the public HTTP(S) side of LuCI.
+# ebpf / luci-front -- the public HTTP(S) side of LuCI.
 #
 # START is late on purpose: uhttpd (the backend that runs the Lua CGI and the
 # ubus bridge) must be listening on 127.0.0.1:8080 before the front end starts,
 # otherwise the first clicks after a reboot are 502s.
 #
-# uhttpd's own configuration is moved to loopback by /etc/uci-defaults/96-mydist-front
+# uhttpd's own configuration is moved to loopback by /etc/uci-defaults/96-ebpf-front
 # on first boot. Nothing here edits /etc/config/firewall or /etc/config/dhcp: the
 # front end binds the same ports uhttpd used, so the zone policy is unchanged.
 START=96
@@ -44,7 +44,7 @@ EOC
 
 # The front end owns :443 now, so it also owns the certificate's life cycle.
 # uhttpd only gets a certificate generated when *its* HTTPS listener is enabled
-# (luci-ssl's uci-default does that), and 96-mydist-front deliberately turns
+# (luci-ssl's uci-default does that), and 96-ebpf-front deliberately turns
 # that listener off -- which on a fresh image leaves no certificate at all and
 # would make this service refuse to start. Generate one instead: a router that
 # advertises the front end as its only HTTPS side must be able to serve it.
@@ -60,7 +60,7 @@ front_make_cert() {
 	mkdir -p "${crt%/*}" "${key%/*}"
 	umask 077
 	if /usr/bin/openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 7300 \
-		-subj "/C=CN/O=mydist/CN=${cn}" \
+		-subj "/C=CN/O=ebpf/CN=${cn}" \
 		-keyout "$key" -out "$crt" >/dev/null 2>&1; then
 		chmod 600 "$key"
 		logger -t luci-front "generated a self-signed certificate for ${cn}"

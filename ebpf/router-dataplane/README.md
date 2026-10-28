@@ -314,7 +314,7 @@ UDP 没有握手，`nf_conntrack_udp_timeout_stream`（180 秒）在加速流上
 | 事件 | 调用点 |
 |---|---|
 | 接口 up/down/地址变化（含 PPPoE 重拨） | `/etc/hotplug.d/iface/90-dpd-fastpath` |
-| 多 WAN 表被重写（增删 WAN、权重/健康变化） | `mydist-mwan` 写完 `dpd_wans` 之后 |
+| 多 WAN 表被重写（增删 WAN、权重/健康变化） | `ebpf-mwan` 写完 `dpd_wans` 之后 |
 | 运维手动 | `dpdctl bump` |
 
 代价是「一次全家失效」：代际号一变，所有流各多走 1–2 个慢包。相比逐包重校验
@@ -357,7 +357,7 @@ UDP: iph->ihl*4 + 8          + gso_size
 
 * 流键包含 `ingress ifindex + family + proto + saddr + daddr + sport + dport`，即
   "同一源/目的" 在内核里必然命中同一条 `ip rule`，所以缓存出口与首包一致。
-* 我们只写 `fwmark` 规则和每 WAN 的路由表（`mydist-mwan`），不改别的策略。
+* 我们只写 `fwmark` 规则和每 WAN 的路由表（`ebpf-mwan`），不改别的策略。
   如果运维另加了基于源地址/接口的 `ip rule`，而那条规则在第一包之后才变化，
   缓存会短暂落后——`ifupdate`/`ifdown` 都会 bump 代际号，把这类情况收敛到
   "最多错一个事件周期"。

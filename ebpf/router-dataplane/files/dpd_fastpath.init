@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist router-dataplane: TC ingress eBPF fastpath (dpd_fastpath)
+# ebpf router-dataplane: TC ingress eBPF fastpath (dpd_fastpath)
 #
 # Defaults, and why (see src/dpd_common.h for the architecture):
 #   attach '1'   -> the program is loaded so its maps/stats exist and dpdctl

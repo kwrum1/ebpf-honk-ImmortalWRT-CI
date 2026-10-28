@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\Makefile"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\Makefile"
 s = io.open(p, encoding="utf-8").read()
 
 old = '''\t$(CLANG) $(DPD_BPF_FLAGS) $(DPD_BPF_INCLUDES) \\

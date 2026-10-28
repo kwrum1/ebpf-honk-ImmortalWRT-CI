@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist: einat (eBPF endpoint-independent / full-cone NAT) as a service.
+# ebpf: einat (eBPF endpoint-independent / full-cone NAT) as a service.
 #
 # Three things about this script are deliberate:
 #

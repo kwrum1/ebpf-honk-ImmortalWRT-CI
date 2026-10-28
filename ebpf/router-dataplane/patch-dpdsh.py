@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\files\dpd-fastpath.sh"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\files\dpd-fastpath.sh"
 s = io.open(p, encoding="utf-8").read()
 
 old = '''dpd_push_uci() {

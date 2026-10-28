@@ -13,13 +13,13 @@
 | `files/router_tuning.init` | procd 服务，`START=26`（network 20、packet_steering 25 之后，einat 60/dpd 95/router-qos 97 之前） |
 | `files/router_tuning.config` | `/etc/config/router_tuning`，每个开关都能单独关 |
 | `files/93-router-tuning` | iface hotplug：设备重现时重做 ring/coalescing/txqueuelen/XPS |
-| `files/98-mydist-tuning` | uci-defaults：首启在 **S11 sysctl 之前**生成 `/etc/sysctl.d/29-router-tuning.conf`，并 enable 服务 |
+| `files/98-ebpf-tuning` | uci-defaults：首启在 **S11 sysctl 之前**生成 `/etc/sysctl.d/29-router-tuning.conf`，并 enable 服务 |
 
 ## 为什么 sysctl 必须走 `/etc/sysctl.d/`
 
 镜像里的 `/etc/init.d/sysctl` 是 **START=11**，而 `network` 是 **S20**。`default_qdisc`
 只对**它设置之后创建**的设备生效，所以它必须在任何网卡存在之前落地。uci-defaults 由
-`/etc/init.d/boot`（S10）执行，正好在 S11 之前 —— 这就是 `98-mydist-tuning` 存在的全部理由。
+`/etc/init.d/boot`（S10）执行，正好在 S11 之前 —— 这就是 `98-ebpf-tuning` 存在的全部理由。
 
 ## 它**不**做什么（都是刻意的）
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# luci-front-report -- what the front end is doing, for the mydist LuCI page and
+# luci-front-report -- what the front end is doing, for the ebpf LuCI page and
 # for a shell. Reads only.
 echo "--- process ---"
 if pgrep -f /usr/sbin/luci-front >/dev/null 2>&1; then

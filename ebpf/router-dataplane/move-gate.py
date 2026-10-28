@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\src\dpd_fastpath.bpf.c"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\src\dpd_fastpath.bpf.c"
 s = io.open(p, encoding="utf-8").read()
 
 gate = '''	/* Every gate below needs no route: family, :53, DHCP, non-unicast and

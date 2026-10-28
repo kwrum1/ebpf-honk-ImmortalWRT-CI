@@ -25,7 +25,7 @@ PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -86,7 +86,7 @@ define Package/router-tuning/install
 	$(INSTALL_DATA) ./files/router-tuning.sh $(1)/usr/libexec/router-tuning.sh
 	$(INSTALL_DATA) ./files/router_tuning.config $(1)/etc/config/router_tuning
 	$(INSTALL_BIN) ./files/93-router-tuning $(1)/etc/hotplug.d/iface/93-router-tuning
-	$(INSTALL_BIN) ./files/98-mydist-tuning $(1)/etc/uci-defaults/98-mydist-tuning
+	$(INSTALL_BIN) ./files/98-ebpf-tuning $(1)/etc/uci-defaults/98-ebpf-tuning
 endef
 
 $(eval $(call BuildPackage,router-tuning))

@@ -1,6 +1,6 @@
 import io
 
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\src\dpd_fastpath.bpf.c"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\src\dpd_fastpath.bpf.c"
 s = io.open(p, encoding="utf-8").read()
 
 start = s.index('SEC(DPD_SEC_NAME)\nint dpd_fastpath(struct __sk_buff *skb)')

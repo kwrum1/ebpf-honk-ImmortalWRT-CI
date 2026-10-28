@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\files\90-dpd-fastpath"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\files\90-dpd-fastpath"
 s = io.open(p, encoding="utf-8").read()
 
 old = '''\tconfig_get DPD_TTL global flow_ttl_ms 5000

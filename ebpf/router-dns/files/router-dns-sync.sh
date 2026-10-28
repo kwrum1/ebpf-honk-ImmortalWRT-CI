@@ -252,14 +252,14 @@ fi
 # still written and pointed at so that a smartdns which does honour it inherits
 # a clean list instead of the loop that started all this.
 #
-# Sections are *named* (mydist_up_<ip with dots as underscores>) because
+# Sections are *named* (ebpf_up_<ip with dots as underscores>) because
 # `@server[N]` renumbers on every delete, and the name doubles as documentation
 # in `uci show smartdns`.
 have=$(uci -q show smartdns 2>/dev/null |
-	sed -n 's/^smartdns\.\(mydist_up_[0-9_]*\)=server$/\1/p' | sort | tr '\n' ' ')
+	sed -n 's/^smartdns\.\(ebpf_up_[0-9_]*\)=server$/\1/p' | sort | tr '\n' ' ')
 wantsec=""
 for ip in $want; do
-	wantsec="$wantsec mydist_up_$(echo "$ip" | tr . _)"
+	wantsec="$wantsec ebpf_up_$(echo "$ip" | tr . _)"
 done
 wantsec=$(printf '%s\n' $wantsec | sed '/^$/d' | sort | tr '\n' ' ')
 
@@ -268,7 +268,7 @@ if [ "$have" != "$wantsec" ]; then
 		uci -q delete "smartdns.$s"
 	done
 	for ip in $want; do
-		sec="mydist_up_$(echo "$ip" | tr . _)"
+		sec="ebpf_up_$(echo "$ip" | tr . _)"
 		uci -q set "smartdns.$sec=server"
 		uci -q set "smartdns.$sec.enabled=1"
 		uci -q set "smartdns.$sec.ip=$ip"

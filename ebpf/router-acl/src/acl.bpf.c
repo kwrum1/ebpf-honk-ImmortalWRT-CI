@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * acl.bpf.c - mydist TC eBPF ACL (router-acl).
+ * acl.bpf.c - ebpf TC eBPF ACL (router-acl).
  *
  * See src/acl_common.h for the redlines, the hook layout and why the IPv4
  * table is keyed by the *remote endpoint*. Short version:

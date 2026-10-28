@@ -27,7 +27,7 @@
 #      as this package did in round 4. Patching at boot is also self-healing
 #      across a dnsmasq package upgrade that restores the stock file.
 #
-#   2. /etc/uci-defaults/97-mydist-dns -- turns smartdns on, moves it to 6053,
+#   2. /etc/uci-defaults/97-ebpf-dns -- turns smartdns on, moves it to 6053,
 #      sets auto_set_dnsmasq=0 and configures DNS-over-TLS upstreams. DoT is not
 #      decoration: while honk runs, the router's own UDP never completes (a local
 #      TCP connection to the same address does), so a UDP upstream resolves
@@ -48,7 +48,7 @@
 #      Called from the init script below, so it runs before honk's own S95.
 #      Handing :53 back is necessary but NOT sufficient: the resolver then has to
 #      reach an upstream, and with honk running the router's own UDP does not
-#      complete. That is why 97-mydist-dns configures DoT (TCP) upstreams; the
+#      complete. That is why 97-ebpf-dns configures DoT (TCP) upstreams; the
 #      two halves were measured together, and each alone leaves a box that only
 #      answers from cache.
 #
@@ -89,7 +89,7 @@ PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -121,7 +121,7 @@ define Package/router-dns/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/router-dns.init $(1)/etc/init.d/router-dns
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./files/97-mydist-dns $(1)/etc/uci-defaults/97-mydist-dns
+	$(INSTALL_BIN) ./files/97-ebpf-dns $(1)/etc/uci-defaults/97-ebpf-dns
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./files/honk-dns.sh $(1)/usr/libexec/router-honk-dns
 	$(INSTALL_BIN) ./files/router-dns-sync.sh $(1)/usr/libexec/router-dns-sync

@@ -177,7 +177,7 @@ rq_pick_qdisc() {
 rq_mwan_devs() {
 	local on
 
-	config_load mydist_mwan 2>/dev/null || return 0
+	config_load ebpf_mwan 2>/dev/null || return 0
 	config_get on global enabled 0
 	[ "$on" = "1" ] || return 0
 	config_foreach rq_mwan_one wan

@@ -60,7 +60,7 @@
 # `honk-dns.sh` (patch) and `honk-dns.sh status` are safe to run by hand.
 
 CONF="${HONK_CONF:-/etc/honk/config.dae}"
-MARK="# mydist: honk-dns"
+MARK="# ebpf: honk-dns"
 SMARTDNS='udp://127.0.0.1:53'
 STOCK_DNS="default: *'https://223\\.5\\.5\\.5/dns-query"
 RULE='dport(53) -> direct(must)'
@@ -91,12 +91,12 @@ patch() {
 	# The UI can rewrite config.dae (it is the user's file). If our rule is gone
 	# and we kept the stock copy from the first boot, start from that copy again --
 	# the handover is the firmware's DNS plane, not a one-shot suggestion.
-	if [ -f "$CONF" ] && ! grep -qF "$RULE" "$CONF" 2>/dev/null && [ -f "$CONF.mydist.bak" ]; then
-		cp -f "$CONF.mydist.bak" "$CONF" 2>/dev/null &&
+	if [ -f "$CONF" ] && ! grep -qF "$RULE" "$CONF" 2>/dev/null && [ -f "$CONF.ebpf.bak" ]; then
+		cp -f "$CONF.ebpf.bak" "$CONF" 2>/dev/null &&
 			log "config.dae had been rewritten without the DNS handover; restored the backup and re-applying"
 	fi
 	usable || return 0
-	cp -p "$CONF" "$CONF.mydist.bak" 2>/dev/null
+	cp -p "$CONF" "$CONF.ebpf.bak" 2>/dev/null
 
 	# 1. our own lines are removed first: that is what makes the handover
 	#    idempotent even after the UI rewrote the file, and it also means a :53
@@ -147,7 +147,7 @@ status() {
 		return 0
 	fi
 	if grep -qF "$MARK" "$CONF"; then
-		echo "honk DNS policy: patched by mydist"
+		echo "honk DNS policy: patched by ebpf"
 	else
 		echo "honk DNS policy: NOT patched (stock)"
 	fi
@@ -167,7 +167,7 @@ status() {
 # TTL runs out, which looks healthy until it does not. DNS-over-TLS rides TCP and
 # works in both states (honk on: cold names resolve through a LAN client).
 #
-# Fresh installs get DoT from /etc/uci-defaults/97-mydist-dns. uci-defaults do
+# Fresh installs get DoT from /etc/uci-defaults/97-ebpf-dns. uci-defaults do
 # not run again on an upgrade, so a box that keeps its config would keep the old
 # UDP upstreams and lose DNS the moment honk is enabled. Convert exactly that one
 # case: our old default set (223.5.5.5 / 119.29.29.29, either or both, and no

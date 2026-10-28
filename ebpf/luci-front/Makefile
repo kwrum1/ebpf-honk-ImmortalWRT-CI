@@ -16,7 +16,7 @@ PKG_NAME:=luci-front
 PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
-PKG_MAINTAINER:=mydist
+PKG_MAINTAINER:=ebpf
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -65,7 +65,7 @@ define Package/luci-front/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/luci_front.config $(1)/etc/config/luci_front
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./files/96-mydist-front $(1)/etc/uci-defaults/96-mydist-front
+	$(INSTALL_BIN) ./files/96-ebpf-front $(1)/etc/uci-defaults/96-ebpf-front
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./files/luci-front-report $(1)/usr/libexec/luci-front-report
 endef

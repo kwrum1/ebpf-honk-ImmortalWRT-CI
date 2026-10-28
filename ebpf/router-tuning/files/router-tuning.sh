@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist router-tuning - the engine.
+# ebpf router-tuning - the engine.
 #
 # Sourced by /etc/init.d/router-tuning and by /etc/hotplug.d/iface/93-router-tuning.
 # There is no dispatcher here on purpose: the init owns the commands.
@@ -204,7 +204,7 @@ rt_sysctl_conf() {
 	esac
 
 	cat <<-EOF
-		# mydist router-tuning (tier: $tier). Generated - edit
+		# ebpf router-tuning (tier: $tier). Generated - edit
 		# /etc/config/router_tuning, not this file.
 		#
 		# Applied by /etc/init.d/sysctl (START=11), i.e. before network (20)

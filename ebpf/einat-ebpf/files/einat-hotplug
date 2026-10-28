@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist: einat -- start/refresh the eBPF NAT when the WAN actually exists.
+# ebpf: einat -- start/refresh the eBPF NAT when the WAN actually exists.
 #
 # Two measured reasons this file has to exist (工作计划.md §13.18):
 #

@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# mydist router-acl: WAN eBPF ACL (the conntrack escape)
+# ebpf router-acl: WAN eBPF ACL (the conntrack escape)
 #
 # Defaults are what this baseline ships:
 #   enabled '1'   -> attached, guard mode. Unsolicited inbound on the WAN is

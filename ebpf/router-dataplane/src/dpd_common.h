@@ -2,7 +2,7 @@
 /*
  * dpd_common.h - shared ABI between the dpd_fastpath BPF program and dpdctl.
  *
- * mydist / router-dataplane
+ * ebpf / router-dataplane
  *
  * REDLINES (see docs / 工作计划.md §3-§4). The BPF program:
  *   - does NOT do NAT            (NAT has exactly one owner: einat-ebpf)

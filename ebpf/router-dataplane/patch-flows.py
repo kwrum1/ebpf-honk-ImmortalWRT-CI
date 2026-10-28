@@ -1,5 +1,5 @@
 ﻿import io
-p = r"C:\路由设计\work\gh\src\mydist\router-dataplane\src\dpdctl.c"
+p = r"C:\路由设计\work\gh\src\ebpf\router-dataplane\src\dpdctl.c"
 s = io.open(p, encoding="utf-8").read()
 
 old = '''\t\t\tprintf("%-10s fam=%u proto=%u egress=%-10s age=%llums "

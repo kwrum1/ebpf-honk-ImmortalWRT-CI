@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * dpd_fastpath.bpf.c - mydist TC *ingress* eBPF fastpath.
+ * dpd_fastpath.bpf.c - ebpf TC *ingress* eBPF fastpath.
  *
  * See src/dpd_common.h for the redlines and the hook layout. Short version:
  * ingress-only, no NAT, no conntrack, does not read einat maps, always yields

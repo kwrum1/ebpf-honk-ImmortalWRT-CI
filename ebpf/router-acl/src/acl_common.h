@@ -2,7 +2,7 @@
 /*
  * acl_common.h - shared ABI between the router-acl BPF program and aclctl.
  *
- * mydist / router-acl
+ * ebpf / router-acl
  *
  * What this program is
  * --------------------
