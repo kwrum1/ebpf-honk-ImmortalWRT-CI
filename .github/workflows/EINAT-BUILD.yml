@@ -104,7 +104,8 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@master
         with:
-          tag_name: einat-p1-${{ github.run_id }}
+          # fixed tag: the package pins this URL; the body records the run
+          tag_name: einat-p1
           files: out/*
           body: |
             einat-ebpf built from upstream source with `patches/einat-perf.py`
