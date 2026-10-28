@@ -9,8 +9,14 @@
 # the whole matrix a single start time, instead of six independent crons that
 # can overlap on a shared runner quota.
 #
-# Retention is upstream's: all releases and runs are removed each night. Set
-# `releases_keep_latest` to N if a few days of images should survive.
+# Retention is upstream's: all firmware releases and runs are removed each
+# night. Set `releases_keep_latest` to N if a few days of images should survive.
+#
+# EXCEPTION: `einat-*` releases/tags are kept. They are not firmware output --
+# they are the *input* the image builds download (`ebpf/einat-ebpf/Makefile`
+# pins `releases/download/einat-p2`). Deleting them made every X86/ROCKCHIP
+# build fail at the einat download with a 404; the keyword filter runs before
+# the retention count, so firmware releases still go away every night.
 
 name: Auto-Clean
 
@@ -31,6 +37,8 @@ jobs:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           delete_releases: true
           releases_keep_latest: 0
+          # einat binaries are build inputs, never delete them (see header).
+          releases_keep_keyword: "einat-"
           delete_tags: true
           delete_workflows: true
           workflows_keep_day: 0
