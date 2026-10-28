@@ -278,6 +278,10 @@ jobs:
           SRC_SHA=$(cd "$GITHUB_WORKSPACE/ebpf" && find . -type f -name '*.c' -o -type f -name '*.h' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
           CLANG_VER=$(clang --version | head -1)
           LIBBPF_VER=$(pkg-config --modversion libbpf 2>/dev/null || echo "unknown")
+          # Which einat asset (and therefore which perf patch level) is inside
+          # this image. PKG_VERSION cannot carry it: apk rejects a dash in the
+          # version string.
+          EINAT_BIN=$(sed -n 's|^[[:space:]]*EINAT_ASSET:=\(einat-[^[:space:]]*\)|\1|p' "$GITHUB_WORKSPACE/ebpf/einat-ebpf/Makefile" 2>/dev/null | head -1)
 
           {
             echo "config        $WRT_CONFIG"
@@ -291,6 +295,7 @@ jobs:
             echo "ebpf_abi      $ABI"
             echo "ebpf_object   sha256=$OBJ_SHA size=$OBJ_SIZE"
             echo "ebpf_src_tree sha256=$SRC_SHA"
+            echo "einat_bin     ${EINAT_BIN:-none}"
             echo "clang         $CLANG_VER"
             echo "libbpf        $LIBBPF_VER"
             echo "built_at      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
