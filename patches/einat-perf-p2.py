@@ -99,7 +99,7 @@ patch(
 // Milliseconds between two CT timer refreshes of an established TCP flow
 // before the datapath is forced back onto the slow path. 0 disables the fast
 // path (every packet then looks the CT up, as upstream does).
-const volatile u32 CT_FAST_PATH_MS = 1000;
+const volatile u64 CT_FAST_PATH_MS = 1000;
 """,
     "CT_FAST_PATH_MS rodata",
 )
@@ -312,7 +312,7 @@ patch(
     """    pub TIMEOUT_TCP_EST: u64,
     /// How long an established TCP flow may skip the CT lookup (and timer
     /// refresh) after the last slow-path lookup. 0 disables the fast path.
-    pub CT_FAST_PATH_MS: u32,
+    pub CT_FAST_PATH_MS: u64,
 }
 """,
     "EinatRoData CT_FAST_PATH_MS",
