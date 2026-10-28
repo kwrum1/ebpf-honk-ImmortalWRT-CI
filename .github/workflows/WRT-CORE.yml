@@ -135,8 +135,12 @@ jobs:
         if: env.WRT_TEST != 'true'
         uses: actions/cache@main
         with:
-          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
-          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
+          # The branch is part of the key: QCA-PPE and QCA-NSS both build
+          # IPQ60XX/IPQ807X (only the branch differs) and run at the same time
+          # after Auto-Clean. Without it they restore each other's toolchain and
+          # then delete the same cache ids.
+          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_HASH}}
+          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}
           path: |
             ./wrt/.ccache
             ./wrt/staging_dir/host*
@@ -158,11 +162,15 @@ jobs:
           fi
 
           if ${{steps.check-cache.outputs.cache-hit != 'true'}}; then
-            CACHE_LIST=$(gh cache list --key "$WRT_CONFIG-$WRT_INFO" | cut -f 1)
-            for CACHE_KEY in $CACHE_LIST; do
-              gh cache delete $CACHE_KEY
-            done
-
+            # Drop stale caches for this config *and branch*. Two workflows run at
+            # the same time after Auto-Clean (QCA-PPE on owrt, QCA-NSS on main)
+            # and share the config name; without the branch they list -- and then
+            # delete -- the same ids, and the loser of that race died here with
+            # "Could not find a cache matching <id>". Deletion is best-effort.
+            gh cache list --key "$WRT_CONFIG-$WRT_INFO-$WRT_BRANCH" --json id --jq '.[].id' 2>/dev/null |
+              while read -r CACHE_ID; do
+                gh cache delete "$CACHE_ID" >/dev/null 2>&1 || true
+              done
             echo "caches cleanup done!"
           fi
 
@@ -190,6 +198,12 @@ jobs:
           $GITHUB_WORKSPACE/Scripts/Settings.sh
 
           make defconfig -j$(nproc) && make clean -j$(nproc)
+
+          # What the fragment actually resolved to. Cheap, and the only way to
+          # tell from the log which hostapd/wpad variant a target ended up with
+          # (a missing CONFIG_DRIVER_11AX_SUPPORT breaks the full-openssl build).
+          echo "== resolved config =="
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=|^CONFIG_DRIVER_11(AX|BE)_SUPPORT|^CONFIG_PACKAGE_wpad[-a-z0-9]*=y|^CONFIG_DEFAULT_wpad' .config || true
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
