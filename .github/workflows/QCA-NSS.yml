@@ -5,13 +5,13 @@
 #
 # Source: VIKINGYFY/immortalwrt@main (NSS firmware branch).
 #
-# This is the *same device list as QCA-PPE* plus the two platforms that only
-# exist here:
+# This is the *same device list as QCA-PPE* plus the platform that only exists
+# on this branch:
 #
 #   IPQ60XX / IPQ807x   both flavours: owrt (PPE, QCA-PPE) and main (NSS, here)
-#   IPQ53XX / IPQ95XX   NSS only: target/linux/qualcommbe has no image/ on
-#                       owrt (just Makefile/config-6.18/dts), so a PPE build
-#                       of these boards cannot be produced from that branch.
+#   IPQ95xx             main only: `main` ships just the ipq95xx subtarget on
+#                       qualcommbe (owrt has ipq53xx too, and no ipq95xx-only
+#                       config of its own -- IPQ53xx is built by QCA-PPE).
 #
 # Configs are upstream's own Config/*.txt files.
 
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO, IPQ53XX, IPQ95XX]
+        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO, IPQ95XX]
         SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [main]
 

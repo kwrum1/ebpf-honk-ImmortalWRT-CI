@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 kwrum1
 #
-# QCA-PPE: Qualcommax IPQ60xx / IPQ807x on the mainline PPE path.
+# QCA-PPE: Qualcommax IPQ60xx / IPQ807x + Qualcommbe IPQ53xx on the mainline
+# PPE path.
 #
 # Source: VIKINGYFY/immortalwrt@owrt -- the same branch and the same Config/*.txt
 # files upstream uses in its own QCA-ALL workflow, so a device list change there
 # is picked up here by copying the config.
 #
-# The NSS-firmware counterpart is QCA-NSS (IPQ53xx / IPQ95xx, branch main).
+# IPQ53xx lives on `owrt` only: its subtarget and devices exist there
+# (`target/linux/qualcommbe/{SUBTARGETS:=ipq53xx ipq95xx}`), while `main` ships
+# only `ipq95xx`. Building the IPQ53XX config against `main` used to resolve to
+# subtarget ipq95xx silently -- a 90-minute build of the wrong boards.
+#
+# The NSS-firmware counterpart is QCA-NSS (IPQ95xx, branch main).
 # The eBPF datapath (this repo's ebpf/) is X86/ROCKCHIP only and is never
 # installed on these targets; their acceleration is kernel flow offloading.
 
@@ -40,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO]
+        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO, IPQ53XX]
         SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [owrt]
 
