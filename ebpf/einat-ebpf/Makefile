@@ -3,18 +3,30 @@
 # ebpf: einat-ebpf as a PREBUILT-BINARY package.
 #
 # The binary is built by this repository's EINAT-BUILD workflow from upstream
-# source (pinned commit) with patches/einat-perf.py applied, and published at
-# the fixed release tag `einat-p1`:
+# source (pinned commit) with two patches applied, and published at the fixed
+# release tag `einat-p2`:
 #
-#   * upstream `static` preset: v4-only, no NAT66 code in the BPF program
-#     (this firmware never NATs v6; v6 is routed and accelerated by dpd);
-#   * one less full L2/L3 parse per packet per direction: the v4-only build
-#     still called get_is_ipv4() at the top of both TC programs even though
-#     parse_packet() immediately parses the same header again.
+#   patches/einat-perf.py (p1)
+#     * upstream `static` preset: v4-only, no NAT66 code in the BPF program
+#       (this firmware never NATs v6; v6 is routed and accelerated by dpd);
+#     * one less full L2/L3 parse per packet per direction: the v4-only build
+#       still called get_is_ipv4() at the top of both TC programs even though
+#       parse_packet() immediately parses the same header again.
 #
-# Hashes below are the sha256 of the published assets. Re-running EINAT-BUILD
-# on a newer upstream commit means updating the version, the four hash lines and
-# PKG_RELEASE.
+#   patches/einat-perf-p2.py (p2)
+#     * dest_config fast path: with a single dest entry (the WAN address) the
+#       egress hook compares the packet destination instead of doing an LPM
+#       lookup on every packet;
+#     * established-TCP CT fast path: a TCP data packet on an established
+#       connection skips the CT lookup and the (locked) bpf_timer_start() for
+#       up to CT_FAST_PATH_MS after the last real lookup. SYN/FIN/RST, ICMP
+#       errors, UDP/ICMP and any other CT state still take the slow path.
+#
+# The same EINAT-BUILD run executes patches/einat-e2e-nat.sh in network
+# namespaces (EIM, EIF/full cone, ICMP, 20 MB TCP) before publishing, so the
+# assets below are known to load and forward. Hashes are the sha256 of those
+# assets: re-running EINAT-BUILD on a newer upstream commit means updating the
+# version, the four hash lines and PKG_RELEASE.
 #
 # Why not build it from source: upstream's own OpenWrt packaging
 # (muink/openwrt-einat-ebpf) declares
@@ -36,8 +48,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=einat-ebpf
-PKG_VERSION:=0.1.11-p1
-PKG_RELEASE:=2
+PKG_VERSION:=0.1.11-p2
+PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only GPL-2.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -46,18 +58,18 @@ PKG_LICENSE_FILES:=LICENSE
 # listed: it needs BPF-to-BPF calls, which the kernel only has for actively
 # maintained archs (x86-64, aarch64). The DEPENDS line rejects everything else.
 ifeq ($(ARCH),x86_64)
-  EINAT_ASSET:=einat-p1-x86_64-unknown-linux-musl
-  EINAT_HASH:=200acccaefbe68dc5e77e0250eafe6782bfd7b881d87d97106007a393104a0b3
+  EINAT_ASSET:=einat-p2-x86_64-unknown-linux-musl
+  EINAT_HASH:=c3390bee96f71bbbef497da27010a438b180e3622d29ac510a4c796afcade6e4
 else ifeq ($(ARCH),aarch64)
-  EINAT_ASSET:=einat-p1-aarch64-unknown-linux-musl
-  EINAT_HASH:=067e2b889e64d4d5c11ff2f0a36bceb9394edf7dd702e2f5c7048a69faeb344f
+  EINAT_ASSET:=einat-p2-aarch64-unknown-linux-musl
+  EINAT_HASH:=b7d667fc6c1fd05d22452e988a32f0a0d3a36f330ab7fec229fb29e19307c744
 else
-  EINAT_ASSET:=einat-p1-$(ARCH)-unknown-linux-musl
+  EINAT_ASSET:=einat-p2-$(ARCH)-unknown-linux-musl
   EINAT_HASH:=skip
 endif
 
 PKG_SOURCE:=$(EINAT_ASSET)
-PKG_SOURCE_URL:=https://github.com/kwrum1/ebpf-honk-ImmortalWRT-CI/releases/download/einat-p1
+PKG_SOURCE_URL:=https://github.com/kwrum1/ebpf-honk-ImmortalWRT-CI/releases/download/einat-p2
 PKG_HASH:=$(EINAT_HASH)
 
 include $(INCLUDE_DIR)/package.mk
