@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# Cache-Clean: drop the build caches once a week.
+#
+# The caches are keyed by source commit, so a stale one is never reused for a
+# different tree; they exist only to skip the toolchain rebuild. Clearing them
+# weekly keeps the repository's cache quota from filling up and is upstream's
+# behaviour.
+
+name: Cache-Clean
+
+on:
+  schedule:
+    - cron: 0 20 * * 0
+  workflow_dispatch:
+
+permissions: write-all
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Projects
+        uses: actions/checkout@main
+
+      - name: Cache Clean
+        run: gh cache delete --all

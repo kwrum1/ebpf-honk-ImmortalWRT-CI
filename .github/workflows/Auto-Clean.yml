@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# Auto-Clean: the daily housekeeping run, and the thing that starts the builds.
+#
+# Upstream's model, kept on purpose: one nightly run deletes yesterday's
+# releases/tags/workflow history, and every build pipeline is triggered by its
+# completion (`workflow_run`). That keeps exactly one day of artifacts and gives
+# the whole matrix a single start time, instead of six independent crons that
+# can overlap on a shared runner quota.
+#
+# Retention is upstream's: all releases and runs are removed each night. Set
+# `releases_keep_latest` to N if a few days of images should survive.
+
+name: Auto-Clean
+
+on:
+  schedule:
+    - cron: 0 22 * * *
+  workflow_dispatch:
+
+permissions: write-all
+
+jobs:
+  auto_clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old Releases and Workflows
+        uses: ophub/delete-releases-workflows@main
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_releases: true
+          releases_keep_latest: 0
+          delete_tags: true
+          delete_workflows: true
+          workflows_keep_day: 0

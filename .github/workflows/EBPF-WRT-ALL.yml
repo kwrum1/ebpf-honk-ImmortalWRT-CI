@@ -8,15 +8,20 @@
 #                  Scripts/Packages.sh. Only these two configs get it; every
 #                  other target builds the stock package set.
 #
-# Triggers are self-contained (schedule + manual) - no dependency on upstream's
-# workflow chain. Every release records the firmware commit and the datapath
-# hash in provenance-<CONFIG>.txt.
+# Trigger chain, same shape as upstream: Auto-Clean runs nightly and its
+# completion starts every build pipeline (workflow_run above), plus manual
+# dispatch. Every release records the firmware commit and the datapath hash in
+# provenance-<CONFIG>.txt.
 
 name: EBPF-WRT-ALL
 
 on:
-  schedule:
-    - cron: 0 19 * * *
+  # 自动编译：Auto-Clean 跑完后（与上游一致的“清理 -> 编译”链）
+  workflow_run:
+    workflows: ["Auto-Clean"]
+    types:
+      - completed
+  # 手动编译
   workflow_dispatch:
     inputs:
       PACKAGE:

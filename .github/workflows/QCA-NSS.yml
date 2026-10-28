@@ -18,8 +18,12 @@
 name: QCA-NSS
 
 on:
-  schedule:
-    - cron: 30 20 * * *
+  # 自动编译：Auto-Clean 跑完后（与上游一致的“清理 -> 编译”链）
+  workflow_run:
+    workflows: ["Auto-Clean"]
+    types:
+      - completed
+  # 手动编译
   workflow_dispatch:
     inputs:
       PACKAGE:

@@ -32,11 +32,20 @@ at the end of a 90-minute image build.
 | `MTK-ALL` | MEDIATEK-WIFI-YES/NO | `@owrt` | MediaTek |
 | `WRT-TEST` | one config, by hand | `owrt` or `main` | reproduce a single build |
 | `BPF-CHECK` | — | `ebpf/` | compile the datapath + dpdctl in ~1 min |
-| `Clean` | — | — | keep 12 releases / 14 days of runs, drop caches |
 
-All build workflows are triggered by their own schedule and by
-`workflow_dispatch`. Nothing chains off upstream's `Auto-Clean` any more, and no
-push alone starts a build.
+Automation, restored to the upstream shape:
+
+| Workflow | When | What |
+|---|---|---|
+| `Auto-Clean` | daily 22:00 UTC, or manual | delete yesterday's releases/tags/runs, then **trigger every build pipeline** |
+| `Cache-Clean` | Sundays 20:00 UTC, or manual | `gh cache delete --all` |
+| `EBPF-WRT-ALL` / `QCA-PPE` / `QCA-NSS` / `MTK-ALL` | on `Auto-Clean` completion, or manual | the images |
+| `WRT-TEST` | manual only | one config |
+| `BPF-CHECK` | weekly + manual | compile the datapath in ~1 min |
+| `UPSTREAM-CHECK` | daily 18:15 UTC + manual | verify the build-time anchors on both branches |
+
+A push alone never starts a build: a nightly build always pins the source commit
+it cloned, and the release records it.
 
 ## What each build records
 

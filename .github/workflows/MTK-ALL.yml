@@ -3,16 +3,20 @@
 #
 # MTK-ALL: MediaTek (Filogic) images.
 #
-# Runs on a schedule of its own instead of chaining off upstream's nightly
-# Auto-Clean: this repository no longer depends on upstream's workflow order.
+# Started by Auto-Clean's completion (workflow_run), like every other build
+# pipeline here, plus manual dispatch.
 # Source is upstream VIKINGYFY/immortalwrt@owrt; the release provenance file
 # records the exact commit each image was built from.
 
 name: MTK-ALL
 
 on:
-  schedule:
-    - cron: 30 19 * * *
+  # 自动编译：Auto-Clean 跑完后（与上游一致的“清理 -> 编译”链）
+  workflow_run:
+    workflows: ["Auto-Clean"]
+    types:
+      - completed
+  # 手动编译
   workflow_dispatch:
     inputs:
       PACKAGE:
