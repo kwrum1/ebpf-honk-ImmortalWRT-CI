@@ -167,6 +167,8 @@ honk 的 `lan_ingress_l2` 是 TCX，dpd 是 classic。上游 core 的 direct 出
 
 `ebpf` 镜像用的 honk 来自 `kwrum1/openwrt-honk@main`，构建期打 **p1** 补丁（`ci/patches/honk-direct-unspec.py`，不改上游源码）：
 
+**所有目标都用这个 p1 core**，包括 IPQ / MediaTek 的 PPE/NSS 镜像：p1 对 direct 流返回 `TC_ACT_UNSPEC`，不会把后面的数据面（x86 是 dpd、IPQ 是内核 flowtable/NSS）挡掉；IPQ / MTK 的其它包仍然用 `GENERAL-STOCK.txt`，只有 honk 的来源换成本仓库这一个改动。`Scripts/Packages.sh` 先找 `honk-core-<commit>-p1-<arch>` 的 release，找不到才回退到旧的 plain core。
+
 1. 4 个 direct 出口返回 `TC_ACT_UNSPEC` 并打 `DIRECT_UNSPEC_MARK`；
 2. bridge 二次遍历看到该 mark 时跳过分类、仍返回 `UNSPEC`；
 3. proxy 仍 redirect 到 `dae0`，block 仍 `SHOT`。
