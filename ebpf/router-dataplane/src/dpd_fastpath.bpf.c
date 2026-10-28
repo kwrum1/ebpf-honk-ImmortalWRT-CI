@@ -989,8 +989,22 @@ int dpd_fastpath(struct __sk_buff *skb)
 		/* ---- Mode B: learn the shortcut, this packet stays slow ---- */
 		{
 			struct dpd_flow_val nv = {};
-			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh,
-						   !tagged);
+			__u16 cls;
+
+			/*
+			 * IPv6 is forward-only. With no NAT66, a v6 reply is a plain
+			 * routed packet whose state lives in conntrack; accelerating it
+			 * on the WAN ingress adds a second, independently learned
+			 * reverse entry (and one real bug: the reverse FIB has to be
+			 * taken from the WAN side, which is exactly where a stale
+			 * entry sends the frame out the wrong port). Letting v6
+			 * replies walk the stack keeps the feature small and keeps
+			 * conntrack authoritative for the return direction.
+			 */
+			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
+				return TC_ACT_UNSPEC;
+
+			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, !tagged);
 
 			nv.egress_ifindex = fib.ifindex;
 			nv.last_seen_ms = (__u32)(bpf_ktime_get_ns() / 1000000ULL);

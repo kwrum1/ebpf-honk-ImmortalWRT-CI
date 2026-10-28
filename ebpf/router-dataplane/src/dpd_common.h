@@ -115,8 +115,10 @@
  *      `ct state established,related accept` covers the primed packets and the
  *      rest is redirected on the WAN ingress hook.
  *      Only TCP/UDP without extension headers, non-fragment, unicast, non-53,
- *      non-DHCPv6(546/547) v6 packets are eligible. `ST_V6_OK` counts the ones
- *      that took the fast path; ST_V6_SKIP keeps counting refusals. */
+ *      non-DHCPv6(546/547) v6 packets are eligible, and only in the LAN->WAN
+ *      direction: v6 replies stay on the stack (conntrack is authoritative for
+ *      the return half, there is no NAT66 to reconstruct it). `ST_V6_OK` counts
+ *      the packets that took the fast path; ST_V6_SKIP keeps counting refusals. */
 #define DPD_ABI_VERSION		10
 
 /* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */

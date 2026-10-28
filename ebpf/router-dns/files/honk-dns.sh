@@ -64,6 +64,12 @@ MARK="# ebpf: honk-dns"
 SMARTDNS='udp://127.0.0.1:53'
 STOCK_DNS="default: *'https://223\\.5\\.5\\.5/dns-query"
 RULE='dport(53) -> direct(must)'
+# IPv6 has no proxy support in this firmware (no NAT66, no v6 node), and honk's
+# datapath without a v6 rule was measured to break v6 TCP entirely (SYN-ACK
+# never came back; stopping honk restored 2.2 Gbit/s). Send all v6 direct, and
+# keep the line in our marked block so it is re-applied on every boot.
+MARK2='# ebpf: honk-v6'
+RULE2='ipversion(6) -> direct(must)'
 
 log() { logger -t router-dns "$*"; }
 
@@ -79,8 +85,9 @@ usable() {
 	[ -f "$CONF" ] || return 1
 	[ ! -L "$CONF" ] || return 1
 	# Already ours: nothing to do (patch() would be idempotent, but skipping here
-	# keeps the boot log quiet).
-	grep -qF "$MARK" "$CONF" && return 1
+	# keeps the boot log quiet). Both rules must be present: an image upgraded
+	# from the version that only carried the :53 rule must get the v6 rule too.
+	grep -qF "$MARK" "$CONF" && grep -qF "$RULE2" "$CONF" && return 1
 	# BRE, on purpose: in ERE a bare `{` may be an interval operator, and the
 	# first version of this check matched nothing and refused every patch.
 	grep -q '^[[:space:]]*routing[[:space:]]*{' "$CONF" || return 1
@@ -91,7 +98,8 @@ patch() {
 	# The UI can rewrite config.dae (it is the user's file). If our rule is gone
 	# and we kept the stock copy from the first boot, start from that copy again --
 	# the handover is the firmware's DNS plane, not a one-shot suggestion.
-	if [ -f "$CONF" ] && ! grep -qF "$RULE" "$CONF" 2>/dev/null && [ -f "$CONF.ebpf.bak" ]; then
+	if [ -f "$CONF" ] && { ! grep -qF "$RULE" "$CONF" || ! grep -qF "$RULE2" "$CONF"; } 2>/dev/null &&
+		[ -f "$CONF.ebpf.bak" ]; then
 		cp -f "$CONF.ebpf.bak" "$CONF" 2>/dev/null &&
 			log "config.dae had been rewritten without the DNS handover; restored the backup and re-applying"
 	fi
@@ -103,13 +111,17 @@ patch() {
 	#    rule that drifted out of the first position is re-inserted at the top.
 	# 2. the two `&& !dport(53)` clauses are contradicted by rule 1.
 	# 3. the :53 rule itself, right after the top-level `routing {`.
-	awk -v m="$MARK" -v r="$RULE" '
+	awk -v m="$MARK" -v r="$RULE" -v m2="$MARK2" -v r2="$RULE2" '
 		$0 ~ "^[[:space:]]*" r "[[:space:]]*$" { next }
 		$0 ~ "^[[:space:]]*" m "[[:space:]]*$" { next }
+		$0 ~ "^[[:space:]]*" r2 "[[:space:]]*$" { next }
+		$0 ~ "^[[:space:]]*" m2 "[[:space:]]*$" { next }
 		{ gsub(/ && !dport\(53\)/, ""); print }
 		!done && $0 ~ /^routing[[:space:]]*\{/ {
 			print "    " m
 			print "    " r
+			print "    " m2
+			print "    " r2
 			done = 1
 		}
 	' "$CONF" >"$CONF.new" || { rm -f "$CONF.new"; return 1; }
@@ -122,6 +134,7 @@ patch() {
 	# an operator's own upstream is left alone, and demanding ours would make the
 	# handover refuse to apply to exactly the file it must fix.
 	if grep -qE '^[[:space:]]*dport\(53\)' "$CONF.new" &&
+		grep -qE '^[[:space:]]*ipversion\(6\)[[:space:]]*->[[:space:]]*direct' "$CONF.new" &&
 		grep -qF "$MARK" "$CONF.new" &&
 		! grep -qF '!dport(53)' "$CONF.new"; then
 		mv -f "$CONF.new" "$CONF"
