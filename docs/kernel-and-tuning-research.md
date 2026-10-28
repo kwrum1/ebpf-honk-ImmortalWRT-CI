@@ -215,10 +215,10 @@ OpenWrt 的补丁语义决定了这件事的代价：`backport-*` 是把**更新
 
 | 文件 | 内容 |
 |---|---|
-| `mydist/router-tuning/` | 首启自动调优包（uci + 引擎 + procd + hotplug + uci-defaults + README） |
+| `ebpf/router-tuning/` | 首启自动调优包（uci + 引擎 + procd + hotplug + uci-defaults + README） |
 | `docs/kernel-and-tuning-research.md` | 本文 |
 | `build/qemu-tuning-audit.sh` | 审计 + A/B 测试台（staged，待跑） |
-| `dist/…` | 需要时随 feed 补丁一起出（本包属 `mydist/`） |
+| `dist/…` | 需要时随 feed 补丁一起出（本包属 `ebpf/`） |
 
 ---
 

@@ -2,6 +2,11 @@
 
 测试日期 2026-10-27 ｜ 环境：单台 ESXi（12 核 / 17 GB）｜ 网卡：vmxnet3 ｜ 路由器：2 vCPU / 1 GB
 
+> **这是一份历史快照（dpd ABI 8）**。文中的 release tag 带 `kwrum1-mydist`，是 2026-10-28
+> 全量改名之前的产物。ABI 9 的改动（统计单块、出口缓存、代际失效、时间戳限频、GSO
+> 分段长度、门禁前移）没有在这里给新数字：共享 ESXi 上跨轮波动 ±40%，A/B 差异落在
+> 噪声里，只能证明每包工作量减少，不能证明吞吐提升。方法学仍适用。
+
 ---
 
 ## 1. 结论
@@ -22,8 +27,8 @@
 | 变体 | 固件 | 数据面 |
 |---|---|---|
 | 原版无加速 | `X86-VIKINGYFY-owrt-26.10.26-07.24.32` | fw4 nftables conntrack + `MASQUERADE` |
-| eBPF 优化前 | `X86-kwrum1-mydist-26.10.26-08.00.37`（源码 `a37c1ea`） | einat NAT + dpd stateless，只加速 LAN→WAN |
-| eBPF 优化后 | `mydist` @ `ff48b36`（同一个镜像热换 dpd 对象） | einat NAT + dpd stateful：GSO 快路径、L2 直发、双向加速 |
+| eBPF 优化前 | `X86-kwrum1-mydist-26.10.26-08.00.37`（历史 tag，源码 `a37c1ea`） | einat NAT + dpd stateless，只加速 LAN→WAN |
+| eBPF 优化后 | 当时叫 `mydist`，现为 `ebpf/` @ `ff48b36`（同一个镜像热换 dpd 对象） | einat NAT + dpd stateful：GSO 快路径、L2 直发、双向加速 |
 
 三者内核同为 6.18.55；优化前后只差 dpd 程序与模式，einat 与其余组件完全相同。
 
