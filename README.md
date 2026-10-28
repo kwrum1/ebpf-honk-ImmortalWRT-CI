@@ -242,7 +242,8 @@ sh Scripts/upstream-check.sh <fresh clone of VIKINGYFY/immortalwrt>
 
 ## 9. 已知限制
 
-- **eBPF 只覆盖 X86/ROCKCHIP**：IPv6 不加速（无 NAT66）；IPQ/MTK 走各自的原厂加速。
+- **eBPF 只覆盖 X86/ROCKCHIP**；IPQ/MTK 走各自的原厂加速。
+- **IPv6 尚未默认加速**：dpd 的 v6 路径已实现（ABI 10，`option ipv6 '1'`），但实验台上加速后一条 v6 TCP 会话会断；且当前 honk 运行时 v6 转发本身不通（停 honk 即恢复）。默认保持关闭，等 honk 的 v6 直连规则 + dpd 的 v6 出口一起修完再开。
 - **honk 直连加速依赖 p1 core**：用上游原版 core 时 dpd 会保持 `observe`。
 - **PPPoE**：`bpf_fib_lookup` 首次 `NO_NEIGH` 会重试一次（`fib_retry`），出口用 `bpf_redirect`；没有真实 PPPoE 线路的实验室只验证到这条路径能发出去。
 - **性能数字**：`docs/BENCHMARK.md` 里的吞吐/pps 是 2026-10-27 在共享 ESXi 上测的（ABI 8 对象）；ABI 9 的收益体现为每包工作量减少，共享环境下的 A/B 差异落在噪声里，不作为结论。
