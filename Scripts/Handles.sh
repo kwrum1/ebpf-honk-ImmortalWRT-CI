@@ -445,15 +445,15 @@ echo " "
 if [[ "${WRT_CONFIG}" != "X86" && "${WRT_CONFIG}" != "ROCKCHIP" ]]; then
 	F4P="$GITHUB_WORKSPACE/wrt/package/network/config/firewall4/patches/002-default-enable-fullcone.patch"
 	if [ -f "$F4P" ]; then
-		if grep -qE '^\+[[:space:]]*option[[:space:]]+flow_offloading_hw[[:space:]]+1$' "$F4P"; then
-			echo "offload: $WRT_CONFIG keeps flow_offloading_hw=1"
+		v_sw=$(grep -oE 'option[[:space:]]+flow_offloading[[:space:]]+[01]' "$F4P" 2>/dev/null | head -1 | awk '{print $NF}')
+		v_hw=$(grep -oE 'option[[:space:]]+flow_offloading_hw[[:space:]]+[01]' "$F4P" 2>/dev/null | head -1 | awk '{print $NF}')
+		# owrt ships 1 (kernel flowtable), main ships 0 (qca-nss/ECM does the
+		# offload there). Both are upstream's choice; only a *missing* line is a
+		# problem, because that is what the IPQ guard is meant to protect.
+		if [ -n "$v_sw" ] && [ -n "$v_hw" ]; then
+			echo "offload: $WRT_CONFIG keeps firewall4 flow_offloading=$v_sw flow_offloading_hw=$v_hw"
 		else
-			echo "!! offload: $WRT_CONFIG lost hardware flow offload (firewall4 patch)" >&2
-		fi
-		if grep -qE '^\+[[:space:]]*option[[:space:]]+flow_offloading[[:space:]]+1$' "$F4P"; then
-			echo "offload: $WRT_CONFIG keeps flow_offloading=1"
-		else
-			echo "!! offload: $WRT_CONFIG lost software flow offload (firewall4 patch)" >&2
+			echo "!! offload: $WRT_CONFIG lost the flow_offloading lines in the firewall4 patch" >&2
 		fi
 	else
 		echo "!! offload: firewall4 patch not found; cannot confirm offload defaults for $WRT_CONFIG" >&2

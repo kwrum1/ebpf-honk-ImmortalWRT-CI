@@ -46,18 +46,23 @@ for mk in "$TREE"/target/linux/x86/image/*.mk; do
 done
 [ "$found_mk" = 1 ] && ok "x86 image/*.mk: kmod-drm-i915" || bad "x86 image/*.mk: kmod-drm-i915"
 
-# firewall4: the default we flip from 1 to 0 on the eBPF targets.
-if have package/network/config/firewall4/patches/002-default-enable-fullcone.patch \
-	'^\+[[:space:]]*option[[:space:]]+flow_offloading[[:space:]]+1'; then
-	ok "firewall4 patch: flow_offloading 1"
+# firewall4: the line we flip on the eBPF targets. Its *value* differs by
+# branch on purpose: owrt ships 1 (kernel flowtable is the acceleration path),
+# main ships 0 (those images accelerate with qca-nss/ECM, not with the nft
+# flowtable). What must never disappear is the line itself, because that is what
+# Handles.sh flips for X86/ROCKCHIP and what the IPQ guard reports.
+F4=package/network/config/firewall4/patches/002-default-enable-fullcone.patch
+if have "$F4" '^\+[[:space:]]*option[[:space:]]+flow_offloading[[:space:]]+[01]'; then
+	val=$(grep -oE 'option[[:space:]]+flow_offloading[[:space:]]+[01]' "$TREE/$F4" 2>/dev/null | head -1 | awk '{print $NF}')
+	ok "firewall4 patch: flow_offloading $val"
 else
-	bad "firewall4 patch: flow_offloading 1"
+	bad "firewall4 patch: flow_offloading (line absent)"
 fi
-if have package/network/config/firewall4/patches/002-default-enable-fullcone.patch \
-	'^\+[[:space:]]*option[[:space:]]+flow_offloading_hw[[:space:]]+1'; then
-	ok "firewall4 patch: flow_offloading_hw 1"
+if have "$F4" '^\+[[:space:]]*option[[:space:]]+flow_offloading_hw[[:space:]]+[01]'; then
+	val=$(grep -oE 'option[[:space:]]+flow_offloading_hw[[:space:]]+[01]' "$TREE/$F4" 2>/dev/null | head -1 | awk '{print $NF}')
+	ok "firewall4 patch: flow_offloading_hw $val"
 else
-	bad "firewall4 patch: flow_offloading_hw 1"
+	bad "firewall4 patch: flow_offloading_hw (line absent)"
 fi
 
 # target.mk: kmod-nft-offload removal + odhcpd handover.
