@@ -57,6 +57,7 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 | 定时编译 | `Auto-Clean` 完成后，`EBPF-WRT-ALL` / `QCA-PPE` / `QCA-NSS` / `MTK-ALL` 通过 `workflow_run` **同时**触发 |
 | 缓存清理 | `Cache-Clean` 每周日 20:00 UTC `gh cache delete --all` |
 | 数据面快编译 | `BPF-CHECK`：每周 + 手动，1 分钟编译 `ebpf/` 的 BPF 对象与 `dpdctl` |
+| NAT 加速构建 | `EINAT-BUILD`（手动 / 补丁变更）：上游源码（pin 提交）+ p1/p2 补丁构建 einat，发布前在 netns 里跑 EIM/EIF/ICMP/20MB TCP 回归，产物发在固定 tag `einat-p2` |
 | 上游锚点检查 | `UPSTREAM-CHECK`：每天 18:15 UTC，对 `owrt` / `main` 各 clone 一次上游，核对构建期改动还匹配不匹配 |
 | 手动 | Actions → 选工作流 → Run workflow（`WRT-TEST` 默认只出 `.config`） |
 
@@ -68,7 +69,7 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 
 ```
 .github/workflows/   Auto-Clean / Cache-Clean / EBPF-WRT-ALL / QCA-PPE / QCA-NSS
-                     MTK-ALL / WRT-TEST / WRT-CORE / BPF-CHECK / UPSTREAM-CHECK
+                     MTK-ALL / WRT-TEST / WRT-CORE / BPF-CHECK / UPSTREAM-CHECK / EINAT-BUILD
 ebpf/                数据面包（构建时拷进 package/ebpf/，只给 X86/ROCKCHIP）
   router-dataplane     dpd_fastpath.bpf.c + dpdctl + ebpf-mwan + 门禁/看门狗/回归脚本
   router-acl           WAN eBPF ACL（acl.bpf.c + aclctl）
@@ -137,7 +138,7 @@ TCX 先于 classic `cls_bpf`：honk 判给代理的流到不了 dpd；classic �
 
 | 组件 | 来源 | 作用 | 默认 |
 |---|---|---|---|
-| **einat-ebpf** | `EHfive/einat-ebpf` v0.1.11 静态二进制 | TC 上的 Full Cone NAT44（EIM+EIF），不依赖 conntrack | 端口段 20000-29999 / 30000-39999（多 WAN 各一段） |
+| **einat-ebpf** | `EHfive/einat-ebpf` v0.1.11 静态二进制 | TC 上的 Full Cone NAT44（EIM+EIF），不依赖 conntrack | 端口段 20000-29999 / 30000-39999（多 WAN 各一段）；本仓库打 p1/p2 性能补丁（少一次解析、dest_config 快路径、已建立 TCP 的 CT 快路径）并由 EINAT-BUILD 构建 + netns 回归 |
 | **dpd-fastpath** | `ebpf/router-dataplane` | TC ingress 快路径；**不做 NAT**，只加速已建立的直连转发 | `mode=stateful`，`downlink=1`，`flow_refresh_ms=250` |
 | **router-acl** | `ebpf/router-acl` | WAN eBPF ACL/guard，丢弃无主入站 | `guard` + `import_firewall=1` |
 | **router-qos** | `ebpf/router-qos` | WAN root qdisc，无限速：≤1G `cake diffserv4 nat`，更快 `fq_codel`；`profile=auto/throughput/latency` | 开启，无 UI |
@@ -179,6 +180,19 @@ dpd 通过 `/usr/share/honk/direct-unspec` 判断 core 是否带 p1；没有就�
 
 ---
 
+
+### 5.6 einat 补丁（p1 / p2）
+
+`einat-ebpf` 不再直接下载上游 release，而是由 `EINAT-BUILD` 从上游源码（pin 到 `ba647ce6`）打补丁后构建：
+
+| 补丁 | 内容 | 每包收益 |
+|---|---|---|
+| `patches/einat-perf.py`（p1） | v4-only 构建里 `get_is_ipv4()` 仍解析一遍 L2/L3，`parse_packet()` 紧接着又解析同一份头 | 每包每方向少一次头部解析 |
+| `patches/einat-perf-p2.py`（p2） | ① `dest_config` 只有 WAN 地址一个条目时用 32 位比较代替 LPM 查表；② 已建立 TCP 连接的数据包在 1s 内跳过 CT 查表 + `bpf_timer_start()` | ① WAN 出向每包少一次 LPM 查表；② TCP 数据包少一次 hash 查表 + 一次带锁的定时器重排 |
+
+语义边界：p2 只跳过「不可能命中」的查表（单个 dest 条目且等于默认外部地址、且为满前缀）和「只刷新定时器」的路径（`CT_ESTABLISHED` + TCP 数据包；SYN/FIN/RST、ICMP 错误、UDP/ICMP、非 ESTABLISHED 全部走慢路径）。定时器刷新被限流到 1s 一次，不是关闭。
+
+`EINAT-BUILD` 的 `e2e (netns)` 作业在发布前跑 `patches/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
 ## 6. 配置分层
 
 | 文件 | 谁用 | 内容 |
