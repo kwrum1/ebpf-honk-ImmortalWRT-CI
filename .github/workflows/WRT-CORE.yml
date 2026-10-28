@@ -116,11 +116,14 @@ jobs:
           fi
 
           # The datapath that will actually be compiled: fail now, not 90 minutes
-          # later, if the source tree lost it.
-          test -d ./mydist/router-dataplane/src || {
-            echo "!! $WRT_SOURCE@$WRT_BRANCH has no mydist/router-dataplane" >&2
-            exit 1
-          }
+          # later, if the source tree lost it. Only the eBPF targets ship it;
+          # IPQ/MTK build from the stock `owrt` branch, which has no mydist/.
+          if [ "$WRT_CONFIG" = "X86" ] || [ "$WRT_CONFIG" = "ROCKCHIP" ]; then
+            test -d ./mydist/router-dataplane/src || {
+              echo "!! $WRT_SOURCE@$WRT_BRANCH has no mydist/router-dataplane" >&2
+              exit 1
+            }
+          fi
 
       - name: Check Scripts
         run: |
