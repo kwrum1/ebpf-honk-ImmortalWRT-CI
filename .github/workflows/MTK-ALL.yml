@@ -5,8 +5,8 @@
 #
 # Runs on a schedule of its own instead of chaining off upstream's nightly
 # Auto-Clean: this repository no longer depends on upstream's workflow order.
-# Source is our own fork (kwrum1/immortalwrt@owrt, a mirror of upstream owrt),
-# so a build can always be traced to a commit we control.
+# Source is upstream VIKINGYFY/immortalwrt@owrt; the release provenance file
+# records the exact commit each image was built from.
 
 name: MTK-ALL
 
@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         CONFIG: [MEDIATEK-WIFI-YES, MEDIATEK-WIFI-NO]
-        SOURCE: [kwrum1/immortalwrt]
+        SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [owrt]
 
     uses: ./.github/workflows/WRT-CORE.yml

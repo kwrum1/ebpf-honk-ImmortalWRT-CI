@@ -34,14 +34,16 @@ jobs:
           sudo apt-get -yqq install clang llvm libbpf-dev libelf-dev pkg-config
 
       - name: Fetch datapath source
+        uses: actions/checkout@main
+
+      - name: Locate sources
         run: |
-          git clone --depth=1 --single-branch --branch mydist \
-            https://github.com/kwrum1/immortalwrt.git src
-          test -f src/mydist/router-dataplane/src/dpd_fastpath.bpf.c
+          test -f ebpf/router-dataplane/src/dpd_fastpath.bpf.c
+          echo "datapath: this repository's ebpf/ (firmware source is VIKINGYFY/immortalwrt)"
 
       - name: Compile BPF object
         run: |
-          SRC=src/mydist/router-dataplane/src
+          SRC=ebpf/router-dataplane/src
           clang -target bpf -g -O2 -Wall -Wno-unused-function -Wno-unused-variable \
             -D__KERNEL__ -D__BPF_TRACING__ -DDPD_MODE_DEFAULT=1 \
             -I/usr/include/$(uname -m)-linux-gnu \
@@ -56,7 +58,7 @@ jobs:
 
       - name: Compile dpdctl
         run: |
-          SRC=src/mydist/router-dataplane/src
+          SRC=ebpf/router-dataplane/src
           cc -O2 -Wall -Wextra -I"$SRC" -o dpdctl "$SRC/dpdctl.c" -lbpf -lelf -lz
           ./dpdctl version
 

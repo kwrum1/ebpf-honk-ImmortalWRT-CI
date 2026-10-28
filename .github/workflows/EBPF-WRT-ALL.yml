@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# EBPF-WRT-ALL: the eBPF targets (X86, ROCKCHIP).
+#
+# Firmware source: VIKINGYFY/immortalwrt@owrt (the upstream tree, unchanged).
+# Datapath:        this repository's ebpf/ directory, copied into package/ by
+#                  Scripts/Packages.sh. Only these two configs get it; every
+#                  other target builds the stock package set.
+#
+# Triggers are self-contained (schedule + manual) - no dependency on upstream's
+# workflow chain. Every release records the firmware commit and the datapath
+# hash in provenance-<CONFIG>.txt.
+
+name: EBPF-WRT-ALL
+
+on:
+  schedule:
+    - cron: 0 19 * * *
+  workflow_dispatch:
+    inputs:
+      PACKAGE:
+        description: 'Extra package lines for .config'
+        required: false
+        type: string
+      TEST:
+        description: 'Config-only run (no image)'
+        default: 'false'
+        required: false
+        type: boolean
+
+permissions: write-all
+
+concurrency:
+  group: ebpf-wrt-all
+  cancel-in-progress: false
+
+jobs:
+  config:
+    name: ${{ matrix.CONFIG }}
+    strategy:
+      fail-fast: false
+      matrix:
+        CONFIG: [ROCKCHIP, X86]
+        SOURCE: [VIKINGYFY/immortalwrt]
+        BRANCH: [owrt]
+
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: ${{ matrix.CONFIG }}
+      WRT_THEME: aurora
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: 12345678
+      WRT_IP: 192.168.10.1
+      WRT_PW: 无
+      WRT_REPO: https://github.com/${{ matrix.SOURCE }}.git
+      WRT_BRANCH: ${{ matrix.BRANCH }}
+      WRT_SOURCE: ${{ matrix.SOURCE }}
+      WRT_PACKAGE: ${{ inputs.PACKAGE }}
+      WRT_TEST: ${{ inputs.TEST }}

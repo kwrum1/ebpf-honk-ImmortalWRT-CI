@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 VIKINGYFY
 #
-# QCA-ALL: Qualcommax (IPQ60xx / IPQ807x) images. These keep the stock NSS
-# offload path and the mainline honk package -- the eBPF datapath in this repo
-# is built for X86/ROCKCHIP only and is never installed here.
+# QCA-ALL: the PPE variant of the Qualcommax (IPQ60xx / IPQ807x) images.
+#
+# Source: VIKINGYFY/immortalwrt@owrt (mainline PPE + kernel flowtable).
+# The NSS-firmware variant of the same boards is QCB-ALL, built from the
+# `main` branch. The eBPF datapath (this repo's ebpf/) is X86/ROCKCHIP only.
 
 name: QCA-ALL
 
@@ -31,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO]
-        SOURCE: [kwrum1/immortalwrt]
+        SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [owrt]
 
     uses: ./.github/workflows/WRT-CORE.yml

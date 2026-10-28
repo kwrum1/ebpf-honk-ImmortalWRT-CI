@@ -117,10 +117,10 @@ jobs:
 
           # The datapath that will actually be compiled: fail now, not 90 minutes
           # later, if the source tree lost it. Only the eBPF targets ship it;
-          # IPQ/MTK build from the stock `owrt` branch, which has no mydist/.
+          # IPQ/MTK build the stock package set (this repo's ebpf/ is not installed).
           if [ "$WRT_CONFIG" = "X86" ] || [ "$WRT_CONFIG" = "ROCKCHIP" ]; then
-            test -d ./mydist/router-dataplane/src || {
-              echo "!! $WRT_SOURCE@$WRT_BRANCH has no mydist/router-dataplane" >&2
+            test -d "$GITHUB_WORKSPACE/ebpf/router-dataplane/src" || {
+              echo "!! this repository has no ebpf/router-dataplane/src" >&2
               exit 1
             }
           fi
@@ -244,11 +244,11 @@ jobs:
         run: |
           cd ./wrt/
 
-          ABI=$(grep -oP '^#define DPD_ABI_VERSION\s+\K[0-9]+' ./mydist/router-dataplane/src/dpd_common.h 2>/dev/null || echo "unknown")
+          ABI=$(grep -oP '^#define DPD_ABI_VERSION\s+\K[0-9]+' "$GITHUB_WORKSPACE/ebpf/router-dataplane/src/dpd_common.h" 2>/dev/null || echo "unknown")
           OBJ=$(find ./build_dir -name 'dpd_fastpath.bpf.o' -type f 2>/dev/null | head -1)
           OBJ_SHA=$( [ -n "$OBJ" ] && sha256sum "$OBJ" | cut -d' ' -f1 || echo "none" )
           OBJ_SIZE=$( [ -n "$OBJ" ] && stat -c %s "$OBJ" || echo 0 )
-          SRC_SHA=$(cd ./mydist && find . -type f -name '*.c' -o -type f -name '*.h' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+          SRC_SHA=$(cd "$GITHUB_WORKSPACE/ebpf" && find . -type f -name '*.c' -o -type f -name '*.h' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
           CLANG_VER=$(clang --version | head -1)
           LIBBPF_VER=$(pkg-config --modversion libbpf 2>/dev/null || echo "unknown")
 

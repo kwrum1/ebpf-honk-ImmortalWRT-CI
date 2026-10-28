@@ -51,12 +51,12 @@ einat-ebpf
 firewall4
 fullconenat-sonic
 dnsmasq-full
-# smartdns 做解析、dnsmasq 留作前端（mydist/router-dns）。断言的是「包在镜像里」，
+# smartdns 做解析、dnsmasq 留作前端（ebpf/router-dns）。断言的是「包在镜像里」，
 # 行为断言（/etc/dnsmasq.conf 的内容、smartdns 的 port/auto_set_dnsmasq）在
 # build/final-check3.sh 里做，因为那些是文件内容而不是包名。
 router-dns
 smartdns
-# ebpf 性能档位（mydist/router-tuning）。它带着「只能靠包选择做」的两条：
+# ebpf 性能档位（ebpf/router-tuning）。它带着「只能靠包选择做」的两条：
 # kmod-tcp-bbr（BBRv1 + 自己的 /etc/sysctl.d/12-tcp-bbr.conf）与 kmod-sched
 # （其 KCONFIG 含 CONFIG_NET_SCH_FQ -> sch_fq.ko，BBR 的首选 pacing qdisc）。
 # 少了它们首启脚本会自己降级并记日志，但那就说明这一版固件少了

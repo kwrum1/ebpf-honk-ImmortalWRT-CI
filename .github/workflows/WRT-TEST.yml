@@ -4,9 +4,10 @@
 # WRT-TEST: build ONE configuration by hand (config-only by default). Useful to
 # reproduce a single platform without waiting for the nightly matrices.
 #
-# Branch matrix (this repository's fork):
-#   X86 / ROCKCHIP            -> mydist   (eBPF datapath + honk handover)
-#   IPQ / MEDIATEK / TEST     -> owrt     (stock NSS/PPE + mainline honk)
+# Source: VIKINGYFY/immortalwrt.
+#   X86 / ROCKCHIP        -> owrt  (the eBPF datapath comes from this repo's ebpf/)
+#   IPQ / MEDIATEK / TEST -> owrt  (PPE / MediaTek)
+#   same IPQ configs      -> main  (NSS-firmware variant, see QCB-ALL)
 
 name: WRT-TEST
 
@@ -28,11 +29,12 @@ on:
           - X86
           - TEST
       SOURCE:
-        default: 'kwrum1/immortalwrt'
+        default: 'VIKINGYFY/immortalwrt'
         required: true
         type: string
       BRANCH:
         default: 'owrt'
+        description: 'owrt (PPE/MediaTek) or main (Qualcomm NSS firmware)'
         required: true
         type: string
       PACKAGE:

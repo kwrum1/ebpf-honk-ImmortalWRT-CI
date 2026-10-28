@@ -139,13 +139,13 @@ UPDATE_PACKAGE "v2ray-geodata" "kenzok8/wall" "main" "pkg" "v2ray-geoip v2ray-ge
 UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 
 # =============================================================================
-# 本项目自己的包：mydist/（TC ingress eBPF 快路径 + eBPF full-cone NAT）
+# 本项目自己的包：ebpf/（TC ingress eBPF 快路径 + eBPF full-cone NAT）
 # =============================================================================
-# mydist/ 是**唯一**的分发逻辑归属地，所以它必须是「仓库内一个目录」，而不是
+# ebpf/ 是**唯一**的分发逻辑归属地，所以它必须是「仓库内一个目录」，而不是
 # 散落在 upstream 文件里的改动。它不属于任何第三方仓库，所以走本地拷贝而不是
 # git clone —— 落地方式与 UPDATE_PACKAGE 一致（都进构建树的 package/）。
 #
-# 整个 mydist/ 一起拷，不逐个列举：以后往里加包（einat-ebpf 已经在了）不需要
+# 整个 ebpf/ 一起拷，不逐个列举：以后往里加包（einat-ebpf 已经在了）不需要
 # 再改这个脚本，符合「所有分发逻辑一个目录」的约定。
 #
 # 找不到就**直接失败**。静默产出一个「没有数据面」的固件是最糟的结果：
@@ -153,36 +153,36 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # 里也登记了 dpd-fastpath 作为第二道闸。
 # ebpf 数据面只给 X86 / ROCKCHIP。IPQ / MTK 走原版逻辑（NSS + 原版 honk），
 # 不拷贝、也不启用 einat/dpd/router-* 这一套；它们的 GENERAL 用的是原版清单。
-# mydist/ is the only carrier of the eBPF datapath (TC ingress fastpath +
+# ebpf/ is the only carrier of the eBPF datapath (TC ingress fastpath +
 # full-cone NAT + router-* packages). It is installed for X86/ROCKCHIP only:
 # IPQ/MTK keep their stock NSS/PPE path and the mainline package set.
 #
 # It must come from the firmware tree that is being built --
-# $GITHUB_WORKSPACE/wrt/mydist -- and from nowhere else: a second copy in this
+# $GITHUB_WORKSPACE/ebpf -- and from nowhere else: a second copy in this
 # repository used to shadow it and shipped whatever it happened to contain.
 case "$WRT_CONFIG" in
 X86|ROCKCHIP)
-	MYDIST_ROOT="$GITHUB_WORKSPACE/wrt/mydist"
+	MYDIST_ROOT="$GITHUB_WORKSPACE/ebpf"
 
 	if [ ! -d "$MYDIST_ROOT/router-dataplane" ]; then
 		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 		echo "!! FATAL: $MYDIST_ROOT/router-dataplane not found."
-		echo "!! The source tree ($WRT_SOURCE@$WRT_BRANCH) must carry mydist/."
-		echo "!! A firmware without the eBPF datapath is not a valid build."
+		echo "!! This repository must carry ebpf/router-dataplane (it is the"
+		echo "!! datapath source; the firmware tree is upstream VIKINGYFY/immortalwrt)."
 		echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 		exit 1
 	fi
 
 	echo " "
-	rm -rf ./mydist
-	mkdir -p ./mydist
-	cp -rf "$MYDIST_ROOT"/. ./mydist/
-	find ./mydist -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+	rm -rf ./ebpf
+	mkdir -p ./ebpf
+	cp -rf "$MYDIST_ROOT"/. ./ebpf/
+	find ./ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
 		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
 
 	# Provenance: hash the exact source directory that is compiled, not the
 	# one we intended to copy.
-	DPD_SRC_SHA=$(find ./mydist -type f \( -name '*.c' -o -name '*.h' \) -print0 |
+	DPD_SRC_SHA=$(find ./ebpf -type f \( -name '*.c' -o -name '*.h' \) -print0 |
 		sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
 	echo "ebpf datapath installed into package/ (from $MYDIST_ROOT)"
 	echo "ebpf datapath src sha256: $DPD_SRC_SHA"

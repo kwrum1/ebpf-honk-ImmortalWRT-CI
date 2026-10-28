@@ -54,25 +54,11 @@ if [ -d *"luci-app-mini-diskmanager"* ]; then
 fi
 
 
-#修复TailScale配置文件冲突
-TS_FILE=$(find ../feeds/packages/ -maxdepth 3 -type f -wholename "*/tailscale/Makefile")
-if [ -f "$TS_FILE" ]; then
-	echo " "
-
-	sed -i '/\/files/d' $TS_FILE
-
-	cd $PKG_PATH && echo "tailscale has been fixed!"
-fi
-
-#修复Rust编译失败
-RUST_FILE=$(find ../feeds/packages/ -maxdepth 3 -type f -wholename "*/rust/Makefile")
-if [ -f "$RUST_FILE" ]; then
-	echo " "
-
-	sed -i 's/ci-llvm=true/ci-llvm=false/g' $RUST_FILE
-
-	cd $PKG_PATH && echo "rust has been fixed!"
-fi
+# NOTE: the Tailscale and Rust hunks that used to live here were removed.
+# This firmware set enables neither package (no tailscale, no tailscale
+# LuCI app, and no Rust-based plugin in Config/*.txt), so the sed calls
+# could never match and only added two find sweeps over the feed tree per
+# build. Put them back together with the plugin if it is ever enabled.
 
 #=============================================================================
 # 以下全部是 ebpf 专属修改：只对 X86 / ROCKCHIP 生效

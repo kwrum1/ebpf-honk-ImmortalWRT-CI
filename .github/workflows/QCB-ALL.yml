@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2026 VIKINGYFY
+# Copyright (C) 2026 kwrum1
 #
-# QCA-PPE-NOWIFI-ALL: the no-wifi IPQ60xx/IPQ807x images (PPE/NSS builds used
-# as routers behind another AP). Same stock NSS datapath as QCA-ALL.
+# QCB-ALL: the IPQ60xx / IPQ807x images built from the NSS-firmware branch.
+#
+# "QCB" = the Qualcomm NSS firmware variant, as opposed to QCA-ALL (the PPE
+# variant built from owrt). Same configs, different source branch:
+#
+#   QCA-ALL  (PPE)    VIKINGYFY/immortalwrt@owrt   mainline PPE + flowtable
+#   QCB-ALL  (NSSFW)  VIKINGYFY/immortalwrt@main   qca-nss-drv firmware offload
+#
+# The two are separate releases on purpose: the package sets and the offload
+# engine differ, and mixing them makes "which image am I running" unanswerable.
 
-name: QCA-PPE-NOWIFI-ALL
+name: QCB-ALL
 
 on:
   schedule:
-    - cron: 0 20 * * *
+    - cron: 30 20 * * *
   workflow_dispatch:
     inputs:
       PACKAGE:
@@ -25,13 +33,13 @@ permissions: write-all
 
 jobs:
   config:
-    name: ${{ matrix.CONFIG }}
+    name: ${{ matrix.CONFIG }}-NSSFW
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [IPQ60XX-WIFI-NO, IPQ807X-WIFI-NO]
-        SOURCE: [kwrum1/immortalwrt]
-        BRANCH: [owrt]
+        CONFIG: [IPQ60XX-WIFI-YES, IPQ60XX-WIFI-NO, IPQ807X-WIFI-YES, IPQ807X-WIFI-NO]
+        SOURCE: [VIKINGYFY/immortalwrt]
+        BRANCH: [main]
 
     uses: ./.github/workflows/WRT-CORE.yml
     with:
