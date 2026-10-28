@@ -4,10 +4,10 @@
 		"order": 60,
 		"action": {
 			"type": "view",
-			"path": "mydist/firewall"
+			"path": "ebpf/firewall"
 		},
 		"depends": {
-			"acl": [ "luci-app-mydist" ],
+			"acl": [ "luci-app-ebpf" ],
 			"uci": { "firewall": true }
 		}
 	}

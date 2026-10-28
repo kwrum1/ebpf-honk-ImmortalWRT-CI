@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# 96-mydist-front -- move uhttpd to loopback and enable the front end.
+# 96-ebpf-front -- move uhttpd to loopback and enable the front end.
 #
 # Why this is safe to do once and not on every boot: these are uhttpd's own
 # listen addresses, not /etc/config/firewall or /etc/config/dhcp. Once moved, the

@@ -28,11 +28,11 @@
 		"order": 73,
 		"action": {
 			"type": "view",
-			"path": "mydist/mwan"
+			"path": "ebpf/mwan"
 		},
 		"depends": {
-			"acl": [ "luci-app-mydist" ],
-			"uci": { "mydist_mwan": true }
+			"acl": [ "luci-app-ebpf" ],
+			"uci": { "ebpf_mwan": true }
 		}
 	}
 }

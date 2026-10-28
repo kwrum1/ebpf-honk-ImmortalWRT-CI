@@ -1,8 +1,8 @@
 #!/bin/sh
-# 99-luci-mydist-trim -- one-time defaults for this firmware's UI and posture.
+# 99-luci-ebpf-trim -- one-time defaults for this firmware's UI and posture.
 #
 #  1) No "Services" menu: SmartDNS and honk are network tools here and are
-#     re-registered under Network by zz-mydist-network.json.
+#     re-registered under Network by zz-ebpf-network.json.
 #  2) Firewall posture: open by default. The WAN zone forwards, IPv4 is full-cone
 #     (fullcone + masq), and the catch-all "rule 999" (external source ->
 #     internal destination, v4+v6) exists and ships ENABLED. Port control is
@@ -10,7 +10,7 @@
 #  3) DNS: SmartDNS owns :53 and is the only resolver. dnsmasq keeps no DNS role
 #     at all (port 0); odhcpd is the DHCP authority.
 #
-# mydist-posture re-applies the same values at every boot (S26). This script only
+# ebpf-posture re-applies the same values at every boot (S26). This script only
 # makes the first boot *before* S26 consistent with them, so a boot that somehow
 # never reaches S26 cannot leave rule 999 disabled or dnsmasq holding :53.
 set -u
@@ -22,14 +22,14 @@ rm -f /usr/share/luci/menu.d/luci-app-honk.json 2>/dev/null
 # --- firewall posture -------------------------------------------------------
 uci -q set firewall.@zone[1].forward='ACCEPT'
 uci -q set firewall.@defaults[0].fullcone='1'
-if ! uci -q get firewall.mydist999 >/dev/null 2>&1; then
-	uci -q set firewall.mydist999='rule'
-	uci -q set firewall.mydist999.name='999'
-	uci -q set firewall.mydist999.src='wan'
-	uci -q set firewall.mydist999.dest='lan'
-	uci -q set firewall.mydist999.target='REJECT'
+if ! uci -q get firewall.ebpf999 >/dev/null 2>&1; then
+	uci -q set firewall.ebpf999='rule'
+	uci -q set firewall.ebpf999.name='999'
+	uci -q set firewall.ebpf999.src='wan'
+	uci -q set firewall.ebpf999.dest='lan'
+	uci -q set firewall.ebpf999.target='REJECT'
 fi
-uci -q set firewall.mydist999.enabled='1'
+uci -q set firewall.ebpf999.enabled='1'
 uci -q commit firewall
 
 # --- DNS ownership ----------------------------------------------------------
@@ -72,7 +72,7 @@ if [ -f /etc/config/router_qos ]; then
 	uci -q set router_qos.global.enabled='1'
 	uci -q commit router_qos
 fi
-rm -f /www/luci-static/resources/view/mydist/qos.js 2>/dev/null
+rm -f /www/luci-static/resources/view/ebpf/qos.js 2>/dev/null
 # The package ships the init script but does not enable it by itself; without
 # this the qdisc is only installed when someone restarts it by hand. (Measured
 # on the bench: /etc/init.d/router-qos enabled -> false after a clean flash.)
@@ -90,5 +90,5 @@ if [ -f /etc/config/dpd_fastpath ] &&
 	uci -q commit dpd_fastpath
 fi
 
-logger -t mydist "luci: firewall posture open + rule 999 on; SmartDNS owns :53; QoS on (no knobs)"
+logger -t ebpf "luci: firewall posture open + rule 999 on; SmartDNS owns :53; QoS on (no knobs)"
 exit 0

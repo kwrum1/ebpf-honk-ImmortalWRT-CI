@@ -6,7 +6,7 @@
 'require ui';
 
 /* Network -> 多 WAN 负载: per-flow load balancing across the uplinks that
- * mydist-mwan owns (routing tables, fwmark rules, dpd_wans, einat).
+ * ebpf-mwan owns (routing tables, fwmark rules, dpd_wans, einat).
  *
  * Layout rules for this page:
  *   - the table is the list of uplinks; the WAN interface column is read-only
@@ -17,9 +17,9 @@
  *     and asking for confirmation before an empty row exists is just friction.
  *     The row stays inactive until an interface is chosen in the dialog.
  *   - every change is written with uci and applied right away (commit, then
- *     restart mydist-mwan). There is no page-level Save that can be forgotten.
+ *     restart ebpf-mwan). There is no page-level Save that can be forgotten.
  *
- * Status comes from /var/run/mydist-mwan/wans (one line per reconciled uplink:
+ * Status comes from /var/run/ebpf-mwan/wans (one line per reconciled uplink:
  * ifn dev mark table pref weight target flags, flags bit 0 = up) and
  * from netifd's device statistics.
  */
@@ -37,7 +37,7 @@ var callDevices = rpc.declare({
 });
 
 /* rpcd's uci.apply commits the staged changes and fires the config-change
- * triggers (mydist-mwan's reload trigger is "mydist_mwan"). rollback=false
+ * triggers (ebpf-mwan's reload trigger is "ebpf_mwan"). rollback=false
  * skips the confirm/rollback flow that LuCI's uci.apply() helper uses and
  * that failed with "no data" (ubus code 5) on this image. */
 var callApply = rpc.declare({
@@ -74,11 +74,11 @@ return view.extend({
 		self.runtime = {};
 
 		return Promise.all([
-			uci.load('mydist_mwan'),
+			uci.load('ebpf_mwan'),
 			uci.load('network'),
 			callInterfaces().catch(function() { return []; }),
 			callDevices().catch(function() { return {}; }),
-			fs.read('/var/run/mydist-mwan/wans').catch(function() { return ''; })
+			fs.read('/var/run/ebpf-mwan/wans').catch(function() { return ''; })
 		]).then(function(res) {
 			self.ifaces = res[2] || [];
 			self.devstats = res[3] || {};
@@ -138,8 +138,8 @@ return view.extend({
 				add(sec['.name']);
 		});
 
-		/* Keep interfaces already in mydist_mwan selectable. */
-		uci.sections('mydist_mwan', 'wan', function(sec) {
+		/* Keep interfaces already in ebpf_mwan selectable. */
+		uci.sections('ebpf_mwan', 'wan', function(sec) {
 			add(sec.interface);
 		});
 
@@ -162,19 +162,19 @@ return view.extend({
 		var self = this;
 
 		self.gEnable = E('input', { type: 'checkbox' });
-		self.gEnable.checked = uci.get('mydist_mwan', 'global', 'enabled') == '1';
+		self.gEnable.checked = uci.get('ebpf_mwan', 'global', 'enabled') == '1';
 
 		self.gInterval = E('input', {
 			'class': 'cbi-input-text', type: 'number',
 			min: '1', max: '3600',
-			value: uci.get('mydist_mwan', 'global', 'health_interval') || '5'
+			value: uci.get('ebpf_mwan', 'global', 'health_interval') || '5'
 		});
 
 		self.gMode = E('select', { 'class': 'cbi-input-select' }, [
 			E('option', { value: 'auto' }, [ _('按带宽比例自动') ]),
 			E('option', { value: 'manual' }, [ _('手动权重') ])
 		]);
-		self.gMode.value = uci.get('mydist_mwan', 'global', 'mode') || 'auto';
+		self.gMode.value = uci.get('ebpf_mwan', 'global', 'mode') || 'auto';
 
 		self.tbody = E('tbody');
 
@@ -258,7 +258,7 @@ return view.extend({
 		while (self.tbody.firstChild)
 			self.tbody.removeChild(self.tbody.firstChild);
 
-		uci.sections('mydist_mwan', 'wan', function(sec) {
+		uci.sections('ebpf_mwan', 'wan', function(sec) {
 			any = true;
 			self.tbody.appendChild(self.renderRow(sec));
 		});
@@ -330,36 +330,36 @@ return view.extend({
 		opts = opts || {};
 
 		/* Stage through the LuCI uci RPC, not /sbin/uci: the RPC is the path
-		 * the page ACL covers (write.uci mydist_mwan), while fs.exec would
+		 * the page ACL covers (write.uci ebpf_mwan), while fs.exec would
 		 * need a shell command whitelist and was rejected with "no permission".
 		 *
 		 * Command shapes from the callers:
-		 *   [set, mydist_mwan, <name>, <type>]        create a section
-		 *   [set, mydist_mwan, <sid>, <opt>, <val>]   set an option
-		 *   [delete, mydist_mwan, <sid>, <opt>]       unset an option
-		 *   [delete, mydist_mwan, <sid>]              remove a section
+		 *   [set, ebpf_mwan, <name>, <type>]        create a section
+		 *   [set, ebpf_mwan, <sid>, <opt>, <val>]   set an option
+		 *   [delete, ebpf_mwan, <sid>, <opt>]       unset an option
+		 *   [delete, ebpf_mwan, <sid>]              remove a section
 		 */
 		(cmds || []).forEach(function(args) {
 			var op = args[0];
 
 			if (op == 'set' && args.length == 4) {
-				uci.add('mydist_mwan', args[3], args[2]);
+				uci.add('ebpf_mwan', args[3], args[2]);
 			}
 			else if (op == 'set') {
-				uci.set('mydist_mwan', args[2], args[3], args[4]);
+				uci.set('ebpf_mwan', args[2], args[3], args[4]);
 			}
 			else if (op == 'delete' && args.length == 4) {
-				if (uci.get('mydist_mwan', args[2], args[3]) !== undefined)
-					uci.unset('mydist_mwan', args[2], args[3]);
+				if (uci.get('ebpf_mwan', args[2], args[3]) !== undefined)
+					uci.unset('ebpf_mwan', args[2], args[3]);
 			}
 			else if (op == 'delete') {
-				uci.remove('mydist_mwan', args[2]);
+				uci.remove('ebpf_mwan', args[2]);
 			}
 		});
 
 		return uci.save().then(function() {
 			/* Commit + config-change triggers (this also reloads
-			 * mydist-mwan, whose procd trigger names mydist_mwan).
+			 * ebpf-mwan, whose procd trigger names ebpf_mwan).
 			 * rollback=false: LuCI's uci.apply() helper polls confirm
 			 * for ten seconds, which made the dialog feel stuck. */
 			return callApply(0, false);
@@ -383,10 +383,10 @@ return view.extend({
 	reload: function() {
 		var self = this;
 
-		uci.unload([ 'mydist_mwan' ]);
+		uci.unload([ 'ebpf_mwan' ]);
 
-		return uci.load('mydist_mwan').then(function() {
-			return fs.read('/var/run/mydist-mwan/wans').catch(function() { return ''; });
+		return uci.load('ebpf_mwan').then(function() {
+			return fs.read('/var/run/ebpf-mwan/wans').catch(function() { return ''; });
 		}).then(function(text) {
 			self.parseRuntime(text || '');
 			self.renderRows();
@@ -403,9 +403,9 @@ return view.extend({
 			]), 'danger');
 
 		return self.applyChanges([
-			[ 'set', 'mydist_mwan', 'global', 'enabled', self.gEnable.checked ? '1' : '0' ],
-			[ 'set', 'mydist_mwan', 'global', 'health_interval', String(parseInt(iv, 10)) ],
-			[ 'set', 'mydist_mwan', 'global', 'mode', self.gMode.value ]
+			[ 'set', 'ebpf_mwan', 'global', 'enabled', self.gEnable.checked ? '1' : '0' ],
+			[ 'set', 'ebpf_mwan', 'global', 'health_interval', String(parseInt(iv, 10)) ],
+			[ 'set', 'ebpf_mwan', 'global', 'mode', self.gMode.value ]
 		], { notify: _('已保存并应用') });
 	},
 
@@ -413,7 +413,7 @@ return view.extend({
 		var self = this;
 		var used = {}, n = 1, name;
 
-		uci.sections('mydist_mwan', 'wan', function(sec) {
+		uci.sections('ebpf_mwan', 'wan', function(sec) {
 			used[sec['.name']] = true;
 		});
 
@@ -425,15 +425,15 @@ return view.extend({
 		/* No dialog: the row appears at once and is inactive until an
 		 * interface is chosen here. */
 		return self.applyChanges([
-			[ 'set', 'mydist_mwan', name, 'wan' ],
-			[ 'set', 'mydist_mwan', name, 'enabled', '1' ],
-			[ 'set', 'mydist_mwan', name, 'weight', '1' ]
+			[ 'set', 'ebpf_mwan', name, 'wan' ],
+			[ 'set', 'ebpf_mwan', name, 'enabled', '1' ],
+			[ 'set', 'ebpf_mwan', name, 'weight', '1' ]
 		], { notify: _('已添加接口行，点“编辑”选择 WAN 接口') });
 	},
 
 	removeUplink: function(sid) {
 		var self = this;
-		var ifn = uci.get('mydist_mwan', sid, 'interface') || sid;
+		var ifn = uci.get('ebpf_mwan', sid, 'interface') || sid;
 
 		ui.showModal(_('删除接口'), [
 			E('p', {}, [ _('把 “%s” 从负载均衡里删除？').format(ifn) ]),
@@ -444,7 +444,7 @@ return view.extend({
 					'class': 'btn cbi-button cbi-button-negative important',
 					click: function() {
 						return self.applyChanges([
-							[ 'delete', 'mydist_mwan', sid ]
+							[ 'delete', 'ebpf_mwan', sid ]
 						], { closeModal: true, notify: _('已删除') });
 					}
 				}, [ _('删除') ])
@@ -454,7 +454,7 @@ return view.extend({
 
 	editUplink: function(sid) {
 		var self = this;
-		var cur = uci.get('mydist_mwan', sid, 'interface') || '';
+		var cur = uci.get('ebpf_mwan', sid, 'interface') || '';
 
 		var sel = E('select', { 'class': 'cbi-input-select' });
 
@@ -466,22 +466,22 @@ return view.extend({
 		var bw = E('input', {
 			'class': 'cbi-input-text', type: 'number',
 			min: '1', max: '100000', placeholder: '100',
-			value: uci.get('mydist_mwan', sid, 'bandwidth') || ''
+			value: uci.get('ebpf_mwan', sid, 'bandwidth') || ''
 		});
 
 		var wt = E('input', {
 			'class': 'cbi-input-text', type: 'number',
 			min: '1', max: '8', placeholder: '1',
-			value: uci.get('mydist_mwan', sid, 'weight') || '1'
+			value: uci.get('ebpf_mwan', sid, 'weight') || '1'
 		});
 
 		var on = E('input', { type: 'checkbox' });
-		on.checked = uci.get('mydist_mwan', sid, 'enabled') != '0';
+		on.checked = uci.get('ebpf_mwan', sid, 'enabled') != '0';
 
 		var hl = E('input', {
 			'class': 'cbi-input-text',
 			placeholder: _('缺省用网关'),
-			value: uci.get('mydist_mwan', sid, 'health') || ''
+			value: uci.get('ebpf_mwan', sid, 'health') || ''
 		});
 
 		function save() {
@@ -497,7 +497,7 @@ return view.extend({
 
 			/* One uplink, one row: two rows on the same interface would each
 			 * get their own einat instance and fwmark table. */
-			uci.sections('mydist_mwan', 'wan', function(sec) {
+			uci.sections('ebpf_mwan', 'wan', function(sec) {
 				if (sec['.name'] != sid && (sec.interface || '') == ifn)
 					dup = sec['.name'];
 			});
@@ -515,13 +515,13 @@ return view.extend({
 				return ui.addNotification(null, E('p', {}, [ _('健康目标只能是 IP 或主机名') ]), 'danger');
 
 			cmds = [
-				[ 'set', 'mydist_mwan', sid, 'interface', ifn ],
-				[ 'set', 'mydist_mwan', sid, 'enabled', on.checked ? '1' : '0' ],
-				[ 'set', 'mydist_mwan', sid, 'weight', String(parseInt(w, 10)) ],
-				b === '' ? [ 'delete', 'mydist_mwan', sid, 'bandwidth' ]
-				         : [ 'set', 'mydist_mwan', sid, 'bandwidth', b ],
-				h === '' ? [ 'delete', 'mydist_mwan', sid, 'health' ]
-				         : [ 'set', 'mydist_mwan', sid, 'health', h ]
+				[ 'set', 'ebpf_mwan', sid, 'interface', ifn ],
+				[ 'set', 'ebpf_mwan', sid, 'enabled', on.checked ? '1' : '0' ],
+				[ 'set', 'ebpf_mwan', sid, 'weight', String(parseInt(w, 10)) ],
+				b === '' ? [ 'delete', 'ebpf_mwan', sid, 'bandwidth' ]
+				         : [ 'set', 'ebpf_mwan', sid, 'bandwidth', b ],
+				h === '' ? [ 'delete', 'ebpf_mwan', sid, 'health' ]
+				         : [ 'set', 'ebpf_mwan', sid, 'health', h ]
 			];
 
 			return self.applyChanges(cmds, { closeModal: true, notify: _('已保存并应用') });

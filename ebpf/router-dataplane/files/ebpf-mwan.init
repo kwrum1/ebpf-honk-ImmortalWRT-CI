@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# mydist: multi-WAN load balancing (routing tables, fwmark rules, dpd_wans).
+# ebpf: multi-WAN load balancing (routing tables, fwmark rules, dpd_wans).
 #
 # Starts after einat (START=60) because reconcile needs the uplink devices to
 # exist and their TCX links to be up: it is einat's restart that drops the
@@ -10,7 +10,7 @@ START=61
 STOP=05
 USE_PROCD=1
 
-PROG=/usr/libexec/mydist-mwan
+PROG=/usr/libexec/ebpf-mwan
 
 start_service() {
 	$PROG reconcile
@@ -35,8 +35,8 @@ stop_service() {
 }
 
 service_triggers() {
-	procd_add_reload_trigger "mydist_mwan" "network"
-	procd_add_interface_trigger "interface.*" wan /etc/init.d/mydist-mwan reload
-	procd_add_interface_trigger "interface.*" wan2 /etc/init.d/mydist-mwan reload
-	procd_add_interface_trigger "interface.*" wan3 /etc/init.d/mydist-mwan reload
+	procd_add_reload_trigger "ebpf_mwan" "network"
+	procd_add_interface_trigger "interface.*" wan /etc/init.d/ebpf-mwan reload
+	procd_add_interface_trigger "interface.*" wan2 /etc/init.d/ebpf-mwan reload
+	procd_add_interface_trigger "interface.*" wan3 /etc/init.d/ebpf-mwan reload
 }

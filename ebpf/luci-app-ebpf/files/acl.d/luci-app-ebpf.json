@@ -1,5 +1,5 @@
 {
-	"luci-app-mydist": {
+	"luci-app-ebpf": {
 		"description": "ebpf pages: multi-WAN configuration, firewall port control and status",
 		"read": {
 			"ubus": {
@@ -8,14 +8,14 @@
 				"service": [ "list" ],
 				"file": [ "read" ]
 			},
-			"uci": [ "mydist_mwan", "network", "firewall" ],
+			"uci": [ "ebpf_mwan", "network", "firewall" ],
 			"file": {
-				"/var/run/mydist-mwan/wans": [ "read" ],
-				"/tmp/run/mydist-mwan/wans": [ "read" ]
+				"/var/run/ebpf-mwan/wans": [ "read" ],
+				"/tmp/run/ebpf-mwan/wans": [ "read" ]
 			}
 		},
 		"write": {
-			"uci": [ "mydist_mwan", "firewall" ]
+			"uci": [ "ebpf_mwan", "firewall" ]
 		}
 	}
 }

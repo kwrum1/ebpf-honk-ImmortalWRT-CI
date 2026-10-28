@@ -1,8 +1,8 @@
 #!/bin/sh
-# mydist router-dns: SmartDNS is the only resolver (port 53); dnsmasq keeps no
+# ebpf router-dns: SmartDNS is the only resolver (port 53); dnsmasq keeps no
 # DNS role at all. Runs once, on the first boot after flashing.
 #
-# This is the same state mydist-posture enforces at every boot (S26): smartdns
+# This is the same state ebpf-posture enforces at every boot (S26): smartdns
 # 53, dnsmasq port 0. The uci-defaults just makes the first boot *before* S26
 # consistent, so a boot that never reaches S26 cannot leave dnsmasq holding :53.
 #
@@ -35,7 +35,7 @@ uci -q set smartdns.@smartdns[0].port='53'
 uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
 
 # dnsmasq keeps no DNS role: port 0 means "listen nowhere" even if procd
-# respawns it (mydist-posture also stops and disables it at S26).
+# respawns it (ebpf-posture also stops and disables it at S26).
 uci -q set dhcp.@dnsmasq[0].port='0'
 uci -q set dhcp.@dnsmasq[0].noresolv='1'
 

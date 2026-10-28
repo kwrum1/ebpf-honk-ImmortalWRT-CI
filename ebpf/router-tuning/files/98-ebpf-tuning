@@ -1,5 +1,5 @@
 #!/bin/sh
-# mydist router-tuning - first boot only.
+# ebpf router-tuning - first boot only.
 #
 # Why this file exists at all, when the service could generate the same file at
 # START=26:

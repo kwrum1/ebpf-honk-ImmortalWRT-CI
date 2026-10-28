@@ -1,5 +1,5 @@
 #!/bin/sh
-# mydist-mwan -- multi-WAN load balancing for the mydist eBPF datapath.
+# ebpf-mwan -- multi-WAN load balancing for the ebpf eBPF datapath.
 #
 # Owns, for every configured uplink:
 #   * a routing table (100+i) with a default route via that uplink
@@ -12,19 +12,19 @@
 # stamps the first packet with the fwmark and caches the egress; the userspace
 # rules only have to route that first packet.
 #
-# usage: mydist-mwan reconcile|health|cleanup
+# usage: ebpf-mwan reconcile|health|cleanup
 
 . /lib/functions.sh
 
-CONF=mydist_mwan
-RUN=/var/run/mydist-mwan
+CONF=ebpf_mwan
+RUN=/var/run/ebpf-mwan
 PIN_WAN=/sys/fs/bpf/tc/globals/dpd_wans
 BASE_TABLE=100
 BASE_MARK=0x101
 BASE_PREF=40
 MAX_WAN=8
 
-log() { logger -t mydist-mwan "$*"; }
+log() { logger -t ebpf-mwan "$*"; }
 
 # ---------------------------------------------------------------- uci helpers
 uci_get() { uci -q get "$CONF.$1" 2>/dev/null; }
@@ -220,7 +220,7 @@ health_once() {
 
 # ---------------------------------------------------------------- entry point
 cleanup() {
-	pkill -f "mydist-mwan health" 2>/dev/null
+	pkill -f "ebpf-mwan health" 2>/dev/null
 	cleanup_rules
 	if [ -e "$PIN_WAN" ]; then
 		local zero="" k=0
