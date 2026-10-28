@@ -53,7 +53,7 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 
 | 方式 | 行为 |
 |---|---|
-| 定时清理 | `Auto-Clean` 每天 22:00 UTC（可手动）删掉上一轮 release/tag/运行记录 |
+| 定时清理 | `Auto-Clean` 每天 22:00 UTC（可手动）删掉上一轮 release/tag/运行记录；**保留 `einat-*`**（固件构建的输入，删了 X86/ROCKCHIP 会 404） |
 | 定时编译 | `Auto-Clean` 完成后，`EBPF-WRT-ALL` / `QCA-PPE` / `QCA-NSS` / `MTK-ALL` 通过 `workflow_run` **同时**触发 |
 | 缓存清理 | `Cache-Clean` 每周日 20:00 UTC `gh cache delete --all` |
 | 数据面快编译 | `BPF-CHECK`：每周 + 手动，1 分钟编译 `ebpf/` 的 BPF 对象与 `dpdctl` |
@@ -218,6 +218,7 @@ LPM 是这三种 map 里最贵的一种（前缀树遍历），hash 命中要算
 #### 发布门禁
 
 `EINAT-BUILD` 的 `e2e (netns)` 作业在发布前跑 `patches/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
+`einat-*` 的 release/tag 是**固件构建的输入**，不是产物：`Auto-Clean` 用 `releases_keep_keyword: einat-` 明确保留，固件 release 仍然每天清空。
 
 
 ## 6. 配置分层
