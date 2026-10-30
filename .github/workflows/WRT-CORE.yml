@@ -227,10 +227,7 @@ jobs:
           # missing dependency is visible here instead of at image assembly.
           if grep -q '^CONFIG_TARGET_BOARD="qualcommbe"' .config 2>/dev/null; then
             echo "== kmod-ath12k =="
-            ls -l tmp/.config-package.in tmp/.packageinfo 2>&1 | head -3
-            echo "pkg-config symbols: $(grep -c '^config PACKAGE_kmod-' tmp/.config-package.in 2>/dev/null || echo n/a)"
-            grep -m2 -n 'PACKAGE_kmod-ath12k' tmp/.config-package.in 2>/dev/null || echo "  no PACKAGE_kmod-ath12k symbol"
-            grep -m2 -c 'mac80211' tmp/.packageinfo 2>/dev/null || echo "  no mac80211 in .packageinfo"
+            grep -B1 -A14 '^[[:space:]]*config PACKAGE_kmod-ath12k$' tmp/.config-package.in | head -20
             grep -E '^CONFIG_PACKAGE_kmod-(ath|mac80211)' .config || echo "  (no ath/mac80211 kmod selected)"
           fi
 
