@@ -8,10 +8,12 @@
 # files upstream uses in its own QCA-ALL workflow, so a device list change there
 # is picked up here by copying the config.
 #
-# IPQ53xx lives on `owrt` only: its subtarget and devices exist there
-# (`target/linux/qualcommbe/{SUBTARGETS:=ipq53xx ipq95xx}`), while `main` ships
-# only `ipq95xx`. Building the IPQ53XX config against `main` used to resolve to
-# subtarget ipq95xx silently -- a 90-minute build of the wrong boards.
+# IPQ53xx / IPQ95xx are not built yet. Their device profiles require
+# kmod-ath12k, but the generated package config hides that kmod on qualcommbe
+# (`depends on !(TARGET_qualcommbe) || TARGET_qualcommax`), so image assembly
+# stops with "unable to select packages: kmod-ath12k (no such package)".
+# Config/IPQ53XX.txt and Config/IPQ95XX.txt stay in the repo; put them back in
+# the matrix once upstream lifts that restriction.
 #
 # The NSS-firmware counterpart is QCA-NSS (IPQ95xx, branch main).
 # The eBPF datapath (this repo's ebpf/) is X86/ROCKCHIP only and is never
