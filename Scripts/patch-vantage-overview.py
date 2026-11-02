@@ -80,7 +80,7 @@ FETCH_NEW = ("\t\tpatch(el.fw, [\n"
              "\t\tL.resolveDefault(callRead('/var/run/ebpf/status.json'), '').then(function(raw) {\n"
              "\t\t\tvar st = null;\n"
              "\t\t\ttry { st = JSON.parse(raw); } catch (e) {}\n"
-             "\t\t\tself.ebpf = st;\n"
+             "\t\t\tself.ebpf = st || { attached: false };\n"
              "\t\t\tself.paintHealth();\n"
              "\t\t});\n"
              "\t},\n")
@@ -113,6 +113,35 @@ def main():
 
     io.open(path, "w", encoding="utf-8").write(src)
     print("patch-vantage-overview: added the eBPF health chip to %s" % path)
+
+    # 1) drop the theme's own firewall overview page: the firewall menu belongs
+    #    to the eBPF port-control page here, and a leftover child paints a
+    #    "1" badge next to it.
+    menu = (root.rstrip("/") + "/luci-app-vantage/root/usr/share/luci/"
+            "menu.d/luci-app-vantage.json")
+    try:
+        import json
+        d = json.load(io.open(menu, encoding="utf-8"))
+        if d.pop("admin/network/firewall/overview", None) is not None:
+            io.open(menu, "w", encoding="utf-8", newline="\n").write(
+                json.dumps(d, ensure_ascii=False, indent="\t") + "\n")
+            print("patch-vantage-overview: dropped admin/network/firewall/overview")
+    except FileNotFoundError:
+        pass
+
+    # 2) five health chips on one row for wired boxes (the theme's grid is 4)
+    css = (root.rstrip("/") + "/luci-app-vantage/htdocs/luci-static/"
+           "resources/vantage/app.css")
+    try:
+        css_src = io.open(css, encoding="utf-8").read()
+        rule = ("\n@container vt (min-width: 1100px) { .vt-app.vt-wired .vt-health "
+                "{ grid-template-columns: repeat(5, minmax(0, 1fr)); } }\n")
+        if "repeat(5, minmax(0, 1fr))" not in css_src:
+            io.open(css, "a", encoding="utf-8", newline="\n").write(rule)
+            print("patch-vantage-overview: five-column health row for wired")
+    except FileNotFoundError:
+        pass
+
     return 0
 
 

@@ -510,21 +510,11 @@ else
 fi
 
 #=============================================================================
-# 首页 System 卡片加一行 eBPF 加速
+# 首页 System 卡片：不再插入 eBPF 行
 #=============================================================================
-# 首页是 luci-mod-status 的 view/status/index.js，它按目录加载
-# view/status/include/*.js；CPU 参数就在 10_system.js 的 System 卡片里。
-# 我们不新开区块、不替换卡片，只在该文件的 "CPU usage (%)" 后面插一行，
-# 读 /var/run/ebpf/status.json（gate watchdog 写的快照），没有就显示占位。
-#
-# 只对 eBPF 目标做：IPQ/MTK 没有 dpd，多一行“未挂载”只会误导。
-# 锚点漂移时脚本返回非零，让 CI 在这里失败，而不是悄悄少一行。
-if [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
-	if ! python3 "$GITHUB_WORKSPACE/Scripts/patch-luci-status.py" "$GITHUB_WORKSPACE/wrt"; then
-		echo "!! luci status: could not add the eBPF row (10_system.js anchors drifted?)" >&2
-		exit 1
-	fi
-fi
+# 加速信息只出现在 Vantage 仪表盘的 “Everything looks healthy” 健康条里
+# （patch-vantage-overview.py）。状态页保持上游原样，避免同一份数据出现两处。
+# 旧的 patch-luci-status.py 保留在仓库里，但不再调用。
 
 # Leave the caller where it was: the next step (prepare-i2c-tools.sh) expects
 # to run from the wrt root.
