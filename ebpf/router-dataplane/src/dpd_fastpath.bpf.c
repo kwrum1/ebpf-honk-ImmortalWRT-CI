@@ -966,6 +966,10 @@ int dpd_fastpath(struct __sk_buff *skb)
 		goto non_ip;
 	}
 
+	/* ABI 14: IP bytes by family, the denominator of the homepage share.
+	 * Non-IP frames never reach here (they take the non_ip path). */
+	DPD_ADD(st, fkey.family == AF_INET ? ST_BYTES_V4 : ST_BYTES_V6, skb->len);
+
 	/* ---- Mode B: try the self-learned shortcut first ---- */
 	if (cfg->mode == DPD_MODE_STATEFUL) {
 		__u32 now = (__u32)(bpf_ktime_get_ns() / 1000000ULL);
@@ -1072,9 +1076,21 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (fkey.family == AF_INET6)
 				DPD_INC(st, ST_V6_OK);
 
-			return dpd_emit_cached(skb, fval->egress_ifindex,
-					       fval->flags, fval->dmac,
-					       fval->smac, st);
+			ret = dpd_emit_cached(skb, fval->egress_ifindex,
+					      fval->flags, fval->dmac,
+					      fval->smac, st);
+			if (ret == TC_ACT_REDIRECT) {
+				if (fkey.family == AF_INET) {
+					DPD_ADD(st, ST_BYTES_HIT_V4, skb->len);
+					if (fval->flags & DPD_FLOW_F_L2)
+						DPD_INC(st, ST_L2_V4);
+				} else {
+					DPD_ADD(st, ST_BYTES_HIT_V6, skb->len);
+					if (fval->flags & DPD_FLOW_F_L2)
+						DPD_INC(st, ST_L2_V6);
+				}
+			}
+			return ret;
 		}
 		DPD_INC(st, ST_FLOW_MISS);
 	}
@@ -1232,8 +1248,20 @@ int dpd_fastpath(struct __sk_buff *skb)
 					      fib.ifindex,
 					      fkey.family == AF_INET6, st);
 
-			return dpd_emit_cached(skb, fib.ifindex, cls, fib.dmac,
-					       fib.smac, st);
+			ret = dpd_emit_cached(skb, fib.ifindex, cls, fib.dmac,
+					      fib.smac, st);
+			if (ret == TC_ACT_REDIRECT) {
+				if (fkey.family == AF_INET) {
+					DPD_ADD(st, ST_BYTES_HIT_V4, skb->len);
+					if (cls & DPD_FLOW_F_L2)
+						DPD_INC(st, ST_L2_V4);
+				} else {
+					DPD_ADD(st, ST_BYTES_HIT_V6, skb->len);
+					if (cls & DPD_FLOW_F_L2)
+						DPD_INC(st, ST_L2_V6);
+				}
+			}
+			return ret;
 		}
 
 		/* ---- Mode B: learn the shortcut, this packet stays slow ---- */

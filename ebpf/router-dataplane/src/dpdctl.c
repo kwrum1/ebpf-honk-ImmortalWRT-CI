@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <sys/socket.h>
 
 #include "dpd_common.h"
 #include "dpd_bpf.h"
@@ -189,6 +190,8 @@ static const char *stat_name(int i)
 		"v6_skip", "vlan_skip", "frag_skip", "dns_skip", "fib_retry",
 		"dhcp_skip", "bcast_skip", "v6_ok", "mss_clamp", "mss_skip",
 		"tag_pop", "tag_skip",
+		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
+		"l2_v4", "l2_v6",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -719,6 +722,46 @@ static int map_count(int fd, uint32_t key_size)
 	return n;
 }
 
+/* dpd_flows occupancy, split by address family: the status card shows the
+ * active flow count as "v4 / v6" and the family is part of the key, so one
+ * walk gives both the total and the split. */
+static void flow_count(uint32_t *max_entries, int *total, int *v4, int *v6)
+{
+	unsigned char key[64], next[64];
+	struct bpf_map_info info = {};
+	uint32_t len = sizeof(info);
+	int fd = map_open("dpd_flows");
+
+	*max_entries = 0;
+	*total = *v4 = *v6 = -1;
+	if (fd < 0)
+		return;
+	if (dpd_bpf_map_get_info_by_fd(fd, &info, &len)) {
+		close(fd);
+		return;
+	}
+	*max_entries = info.max_entries;
+	*total = *v4 = *v6 = 0;
+	if (info.key_size != sizeof(struct dpd_flow_key) ||
+	    info.key_size > sizeof(key) ||
+	    dpd_bpf_map_get_next_key(fd, NULL, key))
+		goto out;
+	for (;;) {
+		const struct dpd_flow_key *k = (const void *)key;
+
+		(*total)++;
+		if (k->family == AF_INET)
+			(*v4)++;
+		else if (k->family == AF_INET6)
+			(*v6)++;
+		if (dpd_bpf_map_get_next_key(fd, key, next))
+			break;
+		memcpy(key, next, info.key_size);
+	}
+out:
+	close(fd);
+}
+
 /* One map's capacity (and, for the small tables, its occupancy). */
 static void map_limits(const char *name, uint32_t *max_entries, int *entries)
 {
@@ -732,11 +775,10 @@ static void map_limits(const char *name, uint32_t *max_entries, int *entries)
 		return;
 	if (dpd_bpf_map_get_info_by_fd(fd, &info, &len) == 0) {
 		*max_entries = info.max_entries;
-		/* dpd_flows is an LRU hash with 16k entries: walking it on every
-		 * status poll would cost more than the answer is worth, and the
-		 * LRU evicts anyway, so occupancy is not a stable fact. */
-		if (strcmp(name, "dpd_flows"))
-			*entries = map_count(fd, info.key_size);
+		/* Every map is counted now: the homepage shows the number of
+		 * active flows, and a 16k-key walk is a few milliseconds at the
+		 * 5 s / 20 s cadence the status page and the watchdog use. */
+		*entries = map_count(fd, info.key_size);
 	}
 	close(fd);
 }
@@ -786,7 +828,7 @@ static int status_json(void)
 	char gate[8192];
 	long glen = read_text_file(DPD_GATE_FILE, gate, sizeof(gate));
 	uint32_t max;
-	int cnt, fd, first;
+	int cnt, f4, f6, fd, first;
 	int have_cfg;
 	int have_wans = 0;
 
@@ -829,10 +871,9 @@ static int status_json(void)
 	}
 
 	printf("  \"maps\": {\n");
-	map_limits("dpd_flows", &max, &cnt);
-	/* occupancy of the 16k LRU is deliberately not walked; max_entries is
-	 * what tells a reader whether the table is undersized. */
-	printf("    \"flows\": { \"max_entries\": %u, \"entries\": null },\n", max);
+	flow_count(&max, &cnt, &f4, &f6);
+	printf("    \"flows\": { \"max_entries\": %u, \"entries\": %d, "
+	       "\"v4\": %d, \"v6\": %d },\n", max, cnt, f4, f6);
 	map_limits("dpd_iface", &max, &cnt);
 	printf("    \"iface\": { \"max_entries\": %u, \"entries\": %d },\n",
 	       max, cnt);
@@ -958,7 +999,7 @@ static int status_text(void)
 	char *line[4] = { NULL };
 	struct dpd_flow_key k, nk;
 	uint32_t max;
-	int cnt;
+	int cnt, f4, f6;
 	int fd = map_open("dpd_cfg");
 
 	printf("dpd status\n");
@@ -1006,8 +1047,8 @@ static int status_text(void)
 		printf("  gate          unknown (no %s yet)\n", DPD_GATE_TEXT);
 	}
 
-	map_limits("dpd_flows", &max, &cnt);
-	printf("  flow cache    %u max (LRU)\n", max);
+	flow_count(&max, &cnt, &f4, &f6);
+	printf("  flow cache    %d/%u (LRU, v4 %d, v6 %d)\n", cnt, max, f4, f6);
 	map_limits("dpd_mtu", &max, &cnt);
 	printf("  mtu table     %d/%u\n", cnt, max);
 

@@ -17,22 +17,42 @@ MARK = "/* ebpf-status-row */"
 
 HELPER = """
 %s
-/* One compact line for the status card: mode + accelerated packets, or the
- * gate code when the datapath is not taking packets over. Reads the snapshot
- * the gate watchdog writes (no ubus/exec from the status page). */
+/* One line for the status card, next to CPU usage, with both numbers laid out
+ * horizontally and split by address family: active flows, and the share of
+ * traffic the fastpath took over (bytes, not packets: a packet ratio
+ * overstates the few large segments of a bulk flow). Each share is a share of
+ * that family's own traffic, so a v6-heavy or v4-heavy box does not look
+ * wrong. Reads the snapshot the gate watchdog writes, so the status page needs
+ * no exec rights. */
+var _ebpf_raw = null, _ebpf_val = null;
+
 function ebpf_status(raw) {
+	if (raw === _ebpf_raw && _ebpf_val)
+		return _ebpf_val;
+
+	var out = '\\u2014';
 	try {
-		var st = JSON.parse(raw);
-		if (!st || !st.attached)
-			return '\\u672a\\u6302\\u8f7d';
-		var cfg = st.cfg || {}, s = st.stats || {}, g = st.gate || {};
-		var mode = cfg.mode || '?';
-		if (mode != 'stateful' && mode != 'stateless')
-			return mode + (g.code && g.code != 'ok' ? ' (' + g.code + ')' : '');
-		var hit = Number(s.flow_hit) || 0;
-		return mode + ' \\u00b7 ' + hit.toLocaleString() + ' \\u5305';
+		var st = JSON.parse(raw), s = st.stats || {}, f = (st.maps || {}).flows || {};
+		var n4 = Number(f.v4) || 0, n6 = Number(f.v6) || 0;
+		var b4 = Number(s.bytes_v4) || 0, b6 = Number(s.bytes_v6) || 0;
+		var h4 = Number(s.bytes_hit_v4) || 0, h6 = Number(s.bytes_hit_v6) || 0;
+
+		function pct(hit, all) {
+			return all > 0 ? (hit * 100 / all).toFixed(1) + '%%' : '0.0%%';
+		}
+		function pair(v4, v6) {
+			return 'v4 ' + v4 + ' \\u00b7 v6 ' + v6;
+		}
+
+		out = '\\u52a0\\u901f\\u6d41 ' + pair(n4.toLocaleString(), n6.toLocaleString())
+			+ '\\u3000|\\u3000\\u52a0\\u901f\\u5360\\u6bd4 '
+			+ pair(pct(h4, b4), pct(h6, b6));
 	}
-	catch (e) { return '\\u2014'; }
+	catch (e) { /* datapath not loaded yet: keep the placeholder */ }
+
+	_ebpf_raw = raw;
+	_ebpf_val = out;
+	return out;
 }
 
 """ % MARK

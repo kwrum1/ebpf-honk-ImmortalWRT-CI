@@ -163,8 +163,16 @@
  *      hit path pops on every packet, and l3_off/l4_off are adjusted by the
  *      4 bytes the pop removes.
  *      New counters ST_TAG_POP / ST_TAG_SKIP.
+ *
+ * 14: ST_BYTES_HIT - bytes of the packets the fast path actually took over.
+ *      The homepage shows an acceleration share (bytes_hit / bytes), and a
+ *      packet ratio would misrepresent bulk flows (a few large segments per
+ *      flow vs many small ones). Incremented on the stateless emit and on the
+ *      stateful hit, never on primed/slow packets. The counters are split by
+ *      address family (ST_*_V4 / ST_*_V6) and the L2 shortcut has its own pair,
+ *      so the status card can show "v4 / v6" for each number.
  */
-#define DPD_ABI_VERSION		13
+#define DPD_ABI_VERSION		14
 
 /* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */
 #define DPD_BPF_SECTION		"classifier"
@@ -322,6 +330,15 @@ enum dpd_stat_idx {
 	ST_TAG_POP,		/* 802.1Q tag removed before an L2 emit	*/
 	ST_TAG_SKIP,		/* tagged packet the fast path refused to take
 				 * over (egress is stacked, or the pop failed) */
+	/* ABI 14: IPv4/IPv6 split for the homepage line. The totals are per
+	 * family so a share is a share of that family's traffic, not of the
+	 * mixed stream (a v6-heavy or v4-heavy box would look wrong). */
+	ST_BYTES_V4,		/* IPv4 bytes entering the program	*/
+	ST_BYTES_V6,		/* IPv6 bytes entering the program	*/
+	ST_BYTES_HIT_V4,	/* IPv4 bytes taken over		*/
+	ST_BYTES_HIT_V6,	/* IPv6 bytes taken over		*/
+	ST_L2_V4,		/* IPv4 packets emitted by the L2 shortcut */
+	ST_L2_V6,		/* IPv6 packets emitted by the L2 shortcut */
 	ST__MAX,
 };
 
