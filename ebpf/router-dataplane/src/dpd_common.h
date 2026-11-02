@@ -118,8 +118,53 @@
  *      non-DHCPv6(546/547) v6 packets are eligible, and only in the LAN->WAN
  *      direction: v6 replies stay on the stack (conntrack is authoritative for
  *      the return half, there is no NAT66 to reconstruct it). `ST_V6_OK` counts
- *      the packets that took the fast path; ST_V6_SKIP keeps counting refusals. */
-#define DPD_ABI_VERSION		10
+ *      the packets that took the fast path; ST_V6_SKIP keeps counting refusals.
+ *
+ * 11: TCP MSS clamp on the accelerated path, plus the machine-readable status
+ *      that goes with it.
+ *      - Taking a flow over skips fw4's `mtu_fix` (the nft `tcp option maxseg
+ *        size set rt mtu` rule), so on a PPPoE WAN (1492) the end points keep
+ *        their 1460 MSS and the first full segment is dropped by the uplink.
+ *        PMTUD would normally recover it, but an ICMP-filtered path then looks
+ *        exactly like "web pages open, downloads hang". The fast path now
+ *        rewrites the MSS option of SYN/SYN-ACK to the path MTU (the smaller of
+ *        the ingress and egress device MTUs) - 40 (v4) / - 60 (v6) before
+ *        redirecting, the same arithmetic fw4 uses. Both directions matter: the
+ *        MSS in a SYN-ACK is what the *client* may send into the 1492 uplink,
+ *        so an egress-only rule would fix downloads and leave uploads black-
+ *        holed. Only packets this program actually takes over are touched; the
+ *        slow path keeps getting fw4's clamp. `option mss_clamp '0'` disables it.
+ *      - dpd_config gains `mss_clamp`; new map `dpd_mtu` (ifindex -> MTU, fed
+ *        by `dpdctl ifaces` from /sys/class/net/<dev>/mtu) so the BPF side can
+ *        learn the egress MTU without a per-packet syscall.
+ *      - new counters ST_MSS_CLAMP / ST_MSS_SKIP; `dpdctl status [-j]` and
+ *        /var/run/ebpf/gate.json make the gate decision readable by scripts,
+ *        LuCI and humans (see dpd-fastpath.sh:dpd_gate_publish()).
+ *
+ * 12: one per-CPU block for config + counters (struct dpd_cpu).
+ *      The hit path used to look up dpd_cfg and dpd_stats separately, i.e. two
+ *      map lookups for what is one hot cache line each. They are now the same
+ *      per-CPU value, so the packet path does a single lookup and the cfg
+ *      fields sit in the same cache line as the counters it bumps. Userspace
+ *      keeps the invariant: a write reads every CPU's block, changes only the
+ *      cfg part and writes them back, so counters survive a `dpdctl set`.
+ *      No change to the config layout or the counter order; the ABI bump is
+ *      about the map *value* size (pinned maps must be dropped on upgrade).
+ *
+ * 13: 802.1Q-aware take-over. Tagged frames used to be refused (l2_ok = !tagged)
+ *      and fell back to bpf_redirect_neigh(), which keeps the tag in the skb:
+ *      on an untagged WAN that ships a tagged frame to the ISP, and on a VLAN
+ *      egress it can double-tag. The fast path now:
+ *        - pops the tag before emitting on a plain Ethernet egress
+ *          (bpf_skb_vlan_pop, then the normal L2 emit), and
+ *        - refuses the take-over when the egress is stacked (VLAN sub-interface,
+ *          veth, tunnel), leaving tag ownership to the stack.
+ *      The flow entry remembers that the flow is tagged (DPD_FLOW_F_TAG) so the
+ *      hit path pops on every packet, and l3_off/l4_off are adjusted by the
+ *      4 bytes the pop removes.
+ *      New counters ST_TAG_POP / ST_TAG_SKIP.
+ */
+#define DPD_ABI_VERSION		13
 
 /* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */
 #define DPD_BPF_SECTION		"classifier"
@@ -133,6 +178,36 @@
 /* default object path inside the image */
 #define DPD_BPF_OBJECT		"/lib/bpf/dpd_fastpath.bpf.o"
 #define DPD_PIN_DIR		"/sys/fs/bpf"
+
+/* Where the gate decision is published (dpd-fastpath.sh:dpd_gate_publish()).
+ * Rewritten by every gate evaluation, so scripts/CI/LuCI never have to parse
+ * logread to answer "why is this not accelerating?". Shape:
+ *
+ *   { "requested": "stateful", "effective": "observe",
+ *     "code": "no-einat", "reason": "einat is not attached ...",
+ *     "at": "2026-11-02T09:03:11Z", "uptime_s": 412,
+ *     "checks": { "uci_enabled": 1, "uplink": true, "einat": false,
+ *                 "einat_on_uplink": false, "honk": false, "honk_p1": true } }
+ *
+ * `code` is a stable token, `reason` the human sentence; both come from
+ * dpd_gate_mode() in files/dpd-fastpath.sh. dpdctl status embeds the object
+ * verbatim (`"gate": {...}`) when it parses, and LuCI renders the same file,
+ * so there is exactly one producer. */
+#define DPD_GATE_FILE		"/var/run/ebpf/gate.json"
+
+/* Same decision in a form a shell can read without a JSON parser: four lines,
+ * in this order, no escaping (the reason is one ASCII line by construction).
+ *   requested
+ *   effective
+ *   code
+ *   reason
+ * Written by dpd_gate_publish() together with the JSON. */
+#define DPD_GATE_TEXT		"/var/run/ebpf/gate"
+
+/* Per-CPU counters of the whole program are published here by the watchdog so
+ * a status page can show numbers without exec rights (dpdctl status -j writes
+ * the same shape). Refreshed every watchdog tick and by dpd-gate-refresh. */
+#define DPD_STATUS_FILE		"/var/run/ebpf/status.json"
 
 /* dpd_vlans: optional segment allow-list, u16 VLAN id -> u8 1 */
 #define DPD_VLAN_MAP_MAX	64
@@ -190,6 +265,12 @@ struct dpd_config {
 	 * the v6 path is newer and needs `ct state established` to carry the
 	 * return direction (there is no NAT66 to do it). */
 	__u32	ipv6;
+	/* 1 = clamp the TCP MSS option of the SYN/SYN-ACK packets the fast path
+	 * takes over to the egress MTU (mtu-40 for v4, mtu-60 for v6), i.e. what
+	 * fw4's mtu_fix would have done. The slow path is untouched: it already
+	 * goes through netfilter's clamp. 0 = no rewrite (diagnostics only; on a
+	 * PPPoE WAN that brings back the PMTUD black hole). */
+	__u32	mss_clamp;
 };
 
 enum dpd_stat_idx {
@@ -231,6 +312,16 @@ enum dpd_stat_idx {
 				 * 224/4, ff00::/8): has to be delivered
 				 * locally / flooded, not routed.		*/
 	ST_V6_OK,		/* IPv6 packet the fast path took over	*/
+	ST_MSS_CLAMP,		/* SYN/SYN-ACK whose MSS option was rewritten
+				 * to the egress MTU on the fast path (ABI 11) */
+	ST_MSS_SKIP,		/* SYN/SYN-ACK the fast path wanted to clamp but
+				 * could not: no dpd_mtu entry for the egress, or
+				 * the resulting MSS would be below the RFC 879
+				 * floor. Counted so "clamp is on but nothing
+				 * happens" is visible instead of silent. */
+	ST_TAG_POP,		/* 802.1Q tag removed before an L2 emit	*/
+	ST_TAG_SKIP,		/* tagged packet the fast path refused to take
+				 * over (egress is stacked, or the pop failed) */
 	ST__MAX,
 };
 
@@ -247,10 +338,10 @@ enum dpd_stat_idx {
  * they keep using bpf_redirect_neigh(). Taught by `dpdctl ifaces`. */
 #define DPD_IF_F_LOWER		0x0008
 
-/* dpd_flow_val.flags: Mode B remembered that this egress has no neighbour
- * (a FIB lookup needed BPF_FIB_LOOKUP_SKIP_NEIGH), so the shortcut hit path must
- * use bpf_redirect() rather than bpf_redirect_neigh(). Stored in what used to be
- * padding, so the structure layout is unchanged. */
+/* dpd_flow_val.flags: the emit class (see dpd_emit_class()). L2 = write the
+ * header and bpf_redirect(); DEV = bpf_redirect(ifindex, 0) for a device with no
+ * neighbour table (ppp/tunnel/NOARP); neither = bpf_redirect_neigh(). Stored in
+ * what used to be padding, so the structure layout is unchanged. */
 #define DPD_FLOW_F_NO_NEIGH	0x0001
 
 /* How to emit this flow, decided once at learn time (ABI 9). The hit path used
@@ -264,6 +355,10 @@ enum dpd_stat_idx {
 #define DPD_FLOW_F_DEV		0x0004
 /* egress came from the multi-WAN table (informational for dpdctl) */
 #define DPD_FLOW_F_WAN		0x0008
+/* The flow arrives 802.1Q/802.1AD-tagged: every packet has to have its tag
+ * popped before the L2 emit (ABI 13). Learned only for flows whose egress is a
+ * plain Ethernet device; a stacked egress is never learned. */
+#define DPD_FLOW_F_TAG		0x0010
 
 /* dpd_flow_val.flags bits 8..15: how many packets of this direction have been
  * let through netfilter since the entry was learned (saturating). A hit is only
@@ -329,6 +424,17 @@ struct dpd_flow_val {
  * `dpdctl stats` (sums every CPU). Keep ST_* in sync with dpd_stat_val.v[]. */
 struct dpd_stat_val {
 	__u64	v[ST__MAX];
+};
+
+/* One per-CPU value holding both the configuration and the counters (ABI 12).
+ * The program looks it up once per packet: cfg sits at offset 0 and the
+ * counters follow in the same cache line group, so the hot path pays one map
+ * lookup instead of two. Userspace must treat this as read-modify-write: a
+ * config change rewrites only .cfg of every CPU's block (see dpdctl cfg_write),
+ * otherwise a `dpdctl set` would zero the counters. */
+struct dpd_cpu {
+	struct dpd_config cfg;
+	struct dpd_stat_val stats;
 };
 
 /* ------------------------------------------------------------------ multi-WAN

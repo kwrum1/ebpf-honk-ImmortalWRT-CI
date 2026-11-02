@@ -178,7 +178,56 @@ else
 	note "fib_fail" "$fail0 -> $fail1"
 fi
 
-echo "== 6. chain summary =="
+echo "== 6. MSS clamp (ABI 11) =="
+# The clamp is the one fast-path behaviour whose absence is invisible on a
+# working 1500-MTU path: it only rewrites when the advertised MSS exceeds the
+# egress MTU - 40. So the check is conditional on the uplink actually being
+# narrower than Ethernet (PPPoE 1492 is the case this exists for).
+clamp=$("$CTL" status 2>/dev/null | sed -n 's/^  mss_clamp *//p')
+if [ "${clamp:-}" = on ]; then
+	ok "mss_clamp enabled in dpd_cfg"
+else
+	bad "mss_clamp is '${clamp:-unknown}' (expected on)"
+fi
+mtu_n=$("$CTL" status 2>/dev/null | sed -n 's/^  mtu table *\([0-9]*\)\/.*/\1/p')
+if [ -n "${mtu_n:-}" ] && [ "$mtu_n" -gt 0 ] 2>/dev/null; then
+	ok "dpd_mtu learned $mtu_n egress MTU(s)"
+else
+	bad "dpd_mtu is empty — the clamp cannot know any egress MTU"
+fi
+
+if [ -n "$TARGET" ]; then
+	. /lib/functions/network.sh 2>/dev/null
+	up=""
+	network_get_device up wan 2>/dev/null
+	[ -n "$up" ] || up=$(ip route show default 2>/dev/null |
+		sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+	mtu=$(cat "/sys/class/net/$up/mtu" 2>/dev/null || echo "")
+	if [ -n "$mtu" ] && [ "$mtu" -lt 1500 ] 2>/dev/null; then
+		c0=$("$CTL" stats 2>/dev/null | awk '/mss_clamp/{print $3}')
+		s0=$("$CTL" stats 2>/dev/null | awk '/mss_skip/{print $3}')
+		wget -q -T 5 -O /dev/null "http://$TARGET/" 2>/dev/null ||
+			nc -z -w 3 "$TARGET" 80 2>/dev/null || true
+		sleep 1
+		c1=$("$CTL" stats 2>/dev/null | awk '/mss_clamp/{print $3}')
+		s1=$("$CTL" stats 2>/dev/null | awk '/mss_skip/{print $3}')
+		note "uplink $up mtu" "$mtu (mss limit $((mtu - 40)))"
+		note "mss_clamp / mss_skip" "$c0->$c1 / $s0->$s1"
+		if [ -n "${c1:-}" ] && [ "${c1:-0}" -gt "${c0:-0}" ]; then
+			ok "MSS rewritten on the accelerated SYN"
+		elif [ "${s1:-0}" -gt "${s0:-0}" ]; then
+			bad "clamp wanted to rewrite but counted mss_skip (mtu not taught?)"
+		else
+			note "MSS clamp" "no rewrite counted (flow may have taken the slow path)"
+		fi
+	else
+		note "MSS clamp" "uplink mtu '${mtu:-unknown}' >= 1500; no rewrite expected"
+	fi
+else
+	note "MSS clamp" "skipped (no --target)"
+fi
+
+echo "== 7. chain summary =="
 if command -v bpftool >/dev/null 2>&1; then
 	bpftool net show 2>/dev/null | sed -n 's/^\(.*\)$/  \1/p' | head -8
 fi

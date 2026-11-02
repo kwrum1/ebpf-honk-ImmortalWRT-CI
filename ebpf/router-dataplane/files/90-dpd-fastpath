@@ -31,6 +31,7 @@ dpd_uci() {
 	config_get DPD_TTL global flow_ttl_ms 5000
 	config_get DPD_REFRESH global flow_refresh_ms 250
 	config_get DPD_IPV6 global ipv6 0
+	config_get DPD_MSS global mss_clamp 1
 	config_get DPD_IFACES global interfaces 'lan'
 	config_get DPD_POLICY global policy 'allow_all'
 	config_get DPD_VLANS global vlans ''
@@ -38,7 +39,7 @@ dpd_uci() {
 	# The configured mode is only a request; the gates may lower it. Evaluated
 	# per event, exactly like the init script does, so a hotplug cannot undo a
 	# downgrade.
-	DPD_EMODE="$(dpd_gate_mode "$DPD_MODE")"
+	DPD_EMODE="$(dpd_gate_mode "$DPD_MODE" "$DPD_ENABLED")"
 }
 
 dpd_selected() {
@@ -61,11 +62,14 @@ dpd_push_config() {
 	"$DPD_CTL" set ttl "$DPD_TTL" 2>/dev/null
 	"$DPD_CTL" set refresh "$DPD_REFRESH" 2>/dev/null
 	"$DPD_CTL" set ipv6 "$DPD_IPV6" 2>/dev/null
+	"$DPD_CTL" set mss "$DPD_MSS" 2>/dev/null
 	"$DPD_CTL" set policy "$DPD_POLICY" 2>/dev/null
 	"$DPD_CTL" set enable "$DPD_ENABLED" 2>/dev/null
 	# also re-publish the vlan allow-list, so a hotplug that lands before the
 	# init script ran still ends up with the configured policy in place
 	dpd_push_vlans "$DPD_POLICY" "$DPD_VLANS"
+	# keep the published snapshot in step with the maps (status page/CI)
+	dpd_status_publish
 	return 0
 }
 
@@ -99,7 +103,9 @@ ifup|ifupdate|add|update)
 			if dpd_attach_if "$DEVICE"; then
 				dpd_push_config
 				dpd_mode_wants_accel "$DPD_EMODE" && ! dpd_chain_guard "$DEVICE" &&
-					dpd_log "chain guard: a bpf filter sits after us on uplink $DEVICE"
+					{ dpd_log "chain guard: a bpf filter sits after us on uplink $DEVICE";
+					  dpd_gate_publish "$DPD_MODE" observe chain-guard \
+						"a bpf filter sits after ours (pref $DPD_PREF) on uplink $DEVICE" ; }
 				dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE downlink attached (effective mode $DPD_EMODE)"
 			else
 				dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE downlink attach deferred"
@@ -116,6 +122,8 @@ ifup|ifupdate|add|update)
 		if dpd_mode_wants_accel "$DPD_EMODE" && ! dpd_chain_guard "$DEVICE"; then
 			dpd_log "gate: downgrading to observe because of the filter chain on $DEVICE"
 			DPD_EMODE=observe
+			dpd_gate_publish "$DPD_MODE" observe chain-guard \
+				"a bpf filter sits after ours (pref $DPD_PREF) on $DEVICE, so the packet may be taken before we see it"
 		fi
 		dpd_push_config
 		dpd_log "hotplug $ACTION $INTERFACE -> $DEVICE attached (effective mode $DPD_EMODE)"

@@ -15,12 +15,17 @@ CONFIG_PACKAGE_dpd-fastpath=y
 CONFIG_PACKAGE_router-acl=y
 # --- ebpf 数据面（#22）：单条 qdisc + CAKE ---
 # 住在 ebpf/router-qos/，同样是纯脚本包（不编译任何东西），由 Packages.sh 拷贝。
-# 默认 enabled='1'，但 upload='0' 时它是空转的（init 只记日志、不装 qdisc）——
-# CAKE 是按你给的速率整形的，编一个速率比不整还糟。真正开起来要设：
-#   uci set router_qos.global.upload='<你的真实上行 kbit，略减一点>'
-# 开启后只在 WAN 设备上 replace root cake —— CAKE 自己做逐流公平和 DSCP→tin，
-# 没有 class、没有 classifier 级联。root qdisc 和 router-acl 建的 clsact
-# （handle ffff:）互不干扰，所以 ACL(90)/dpd(100) 的过滤器链照旧。
+# 默认 enabled='1'，且**不做速率整形**：它在 WAN 设备上 replace root qdisc，
+# 按链路速率自动挑调度器（cake diffserv4 + nat ≤ 1 Gbit/s，更快的链路或内核没有
+# cake 模块时用 fq_codel），只提供逐流公平和 AQM。
+# 没有 upload/download 选项是**故意的**：按猜出来的链路速率整形比不整形更糟，
+# 家用上行真正排队的地方在 ISP 侧（详见 router_qos.config 与 router-qos.sh 头注释）。
+# 需要低延迟时用 profile：
+#   uci set router_qos.global.profile='latency'   # cake + rtt 10ms
+#   uci set router_qos.global.profile='throughput' # 永远 fq_codel
+#   uci commit router_qos && /etc/init.d/router-qos restart
+# CAKE 自己做逐流公平和 DSCP→tin，没有 class、没有 classifier 级联。root qdisc 和
+# router-acl 建的 clsact（handle ffff:）互不干扰，所以 ACL(90)/dpd(100) 的过滤器链照旧。
 # 下载方向故意不做：需要 IFB，而 mirror 根本不延迟真实包、redirect 又会
 # 掐断 ACL/dpd 或改掉 fw4 匹配 zone 用的 iifname（实测见 router-qos.sh 头注释）。
 CONFIG_PACKAGE_router-qos=y
@@ -393,8 +398,13 @@ CONFIG_PACKAGE_einat-ebpf=y
 
 # ---- LuCI: the ebpf console, and the stock pages that no longer apply -----
 # firewall4/nft is not the datapath (einat + router-acl are), dnsmasq does not
-# resolve (SmartDNS does), smartdns's own UI edits a config we generate, and
-# fullconenat-sonic is a conntrack NAT that einat replaces.
+# resolve (SmartDNS does), and smartdns's own UI edits a config we generate.
+# fullconenat-sonic: the *LuCI app* is not installed (einat owns NAT and has no
+# UI), but the marker package itself stays in the image. It is what turns on
+# CONFIG_NF_NAT_FULLCONE in the kernel, i.e. the fw4 fallback used while einat
+# is stopped or has failed its self-check -- the same state where einat's init
+# hands masquerade back to fw4. Removing it would leave a box with no full-cone
+# NAT on the slow path, so verify-packages.sh requires it on purpose.
 CONFIG_PACKAGE_luci-app-ebpf=y
 # CONFIG_PACKAGE_luci-app-smartdns is not set
 # CONFIG_PACKAGE_luci-app-fullconenat-sonic is not set

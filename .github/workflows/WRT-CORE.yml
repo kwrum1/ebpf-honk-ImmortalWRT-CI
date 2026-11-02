@@ -136,6 +136,12 @@ jobs:
         run: |
           find ./ -maxdepth 3 -type f -iregex ".*\(txt\|sh\)$" -exec dos2unix {} \; -exec chmod +x {} \;
 
+      # Mechanical consistency gate (package install lists <-> menu.d <-> ACL <->
+      # /etc/config <-> docs). It is cheap and fails in seconds, so it runs before
+      # the 90-minute compile instead of after it.
+      - name: Verify drift
+        run: bash Scripts/verify-drift.sh
+
       - name: Check Caches
         id: check-cache
         if: env.WRT_TEST != 'true'

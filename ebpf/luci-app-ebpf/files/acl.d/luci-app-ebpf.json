@@ -1,17 +1,21 @@
 {
 	"luci-app-ebpf": {
-		"description": "ebpf pages: multi-WAN configuration, firewall port control and status",
+		"description": "ebpf pages: multi-WAN configuration, firewall port control, acceleration status",
 		"read": {
 			"ubus": {
 				"network.interface": [ "dump" ],
 				"network.device": [ "status" ],
 				"service": [ "list" ],
-				"file": [ "read" ]
+				"file": [ "read", "exec" ]
 			},
-			"uci": [ "ebpf_mwan", "network", "firewall" ],
+			"uci": [ "ebpf_mwan", "network", "firewall", "dpd_fastpath" ],
 			"file": {
 				"/var/run/ebpf-mwan/wans": [ "read" ],
-				"/tmp/run/ebpf-mwan/wans": [ "read" ]
+				"/tmp/run/ebpf-mwan/wans": [ "read" ],
+				"/var/run/ebpf/gate": [ "read" ],
+				"/var/run/ebpf/gate.json": [ "read" ],
+				"/var/run/ebpf/status.json": [ "read" ],
+				"/usr/sbin/dpdctl": [ "exec" ]
 			}
 		},
 		"write": {

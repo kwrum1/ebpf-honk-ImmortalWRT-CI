@@ -17,6 +17,63 @@ eBPF 数据面快路径。一个 TC-ingress eBPF 程序 + 一个 userspace 控�
 | **必须是 classic `tc` 过滤器，不能是 TCX** | 见 §1：TCX 在 classic 之前跑。本项目要**排在代理之后**，所以必须留在 classic 链上。 |
 | **有总开关** | `dpd_cfg.enable = 0` 时程序对一切返回 `TC_ACT_UNSPEC`，等效于不存在。 |
 
+### ABI 11：MSS clamp + 可读状态
+
+两件在真机验收里暴露出的事：
+
+* **加速流绕过了 fw4 的 `mtu_fix`。** PPPoE 上行 1492，两端按 1500 报 MSS 1460，
+  服务器的第一个满段是 1514 字节，运营商直接丢；PMTUD 本该用 ICMP 兜住，ICMP 一
+  被过滤就变成「网页能开、下载卡死」。所以快路径在**真正接管**的 SYN / SYN-ACK 上
+  把 MSS 改写成 `出口 MTU − 40`（IPv6 是 − 60），算法与 fw4 的
+  `tcp option maxseg size set rt mtu` 一致。出口 MTU 来自新 map `dpd_mtu`
+  （`dpdctl ifaces` 从 `/sys/class/net/<dev>/mtu` 学会），慢路径仍然由 fw4 负责，
+  不重复改写。`option mss_clamp '0'` 可关（只在实验箱上用）。
+* **gate 为什么降级只有 logread 知道。** 现在每次判定都会写
+  `/var/run/ebpf/gate.json`（结构化：requested/effective/code/reason/checks）和
+  `/var/run/ebpf/gate`（4 行、给 shell 用）；`dpdctl status [-j]` 直接读它，
+  LuCI 的「网络 → 加速状态」页也读它。watchdog 每个 tick 还会写一份
+  `/var/run/ebpf/status.json`（`dpdctl status -j` 的快照），所以即使 ACL 不允许
+  执行命令，页面也能显示计数。
+
+计数器新增 `mss_clamp` / `mss_skip`：前者是真正改写的 SYN/SYN-ACK，后者是
+「想改但改不了」（出口 MTU 没登记，或算出来低于 RFC 879 的 536）。两者都为 0
+且流量正常，说明这条路径本来就不需要 clamp（比如纯 1500 上行）。
+
+### ABI 12：配置与计数器合一
+
+命中路径原来要分别 lookup `dpd_cfg` 和 `dpd_stats`（两次 map 访问），现在它们
+是同一个 per-CPU 值 `struct dpd_cpu { cfg; stats; }`，一个 lookup 同时拿到两样，
+cfg 和它要改的计数器落在同一组 cache line 上。
+
+代价在用户态：per-CPU map 的 update 会整块替换，所以 `dpdctl set ...` 必须
+**读-改-写**（读出每个 CPU 的块，只改 `.cfg`，再写回），否则一次改配置就会把
+计数器清零。`dpdctl` 的 `cfg_write()` 就是这么做的，验收里有一条专门测它
+（20 个包 → `set mode` → `pkt_total` 不变）。
+
+没有采用报告里的 `cfg->now_ms` 替代 `bpf_ktime_get_ns()`：时间戳来自用户态，
+watchdog 挂掉或调度延迟会让 TTL 判断变松（最多多活一个 tick），而省下的只是一次
+helper 调用，收益/风险不划算。
+
+### ABI 13：802.1Q 感知的接管
+
+带 VLAN 的流以前直接放弃加速（`l2_ok = !tagged`），退回 `bpf_redirect_neigh()`：
+在**不带 tag 的 WAN** 上会把带 tag 的帧发给 ISP，在 **VLAN 子接口出口**上可能打
+两层 tag。两条路都不对，只是错法不同。
+
+现在：
+
+- 认两种 tag 形式：帧内的 0x8100/0x88a8，以及 **硬件加速元数据**
+  （`skb->vlan_present` + `vlan_tci`，veth/vmxnet3 走的是这种）；
+- 真正接管前用 `bpf_skb_vlan_pop()` 把 tag 摘掉再走 L2 直发；帧内 tag 摘掉后
+  L3/L4 偏移减 4，元数据 tag 不减；
+- 出口是**堆叠设备**（VLAN 子接口、veth、隧道）时不接管，把 tag 归属交回协议栈；
+- 流表里记 `DPD_FLOW_F_TAG`，命中路径每包都摘 tag；
+- 新计数器 `tag_pop` / `tag_skip`。
+
+netns 实测（kernel 6.17，VLAN 10 客户端 → 不 tag 的 WAN）：
+observe 基线 2/2 通；stateless 接管后 2/2 通、RTT 0.12 ms，WAN 侧抓包确认
+**以太网类型是 0x0800（无 tag）**，`tag_pop=2`、`tag_skip=0`。
+
 ---
 
 ## 1. 钩子顺序（全部为实测，不是推断）

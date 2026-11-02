@@ -7,7 +7,7 @@
  * where OpenWrt users expect to find it.
  *
  * Maps are pinned by name (see dpd_fastpath.bpf.c), so the normal case is a
- * plain bpf_obj_get("/sys/fs/bpf/dpd_cfg"). When pinning was not honoured by
+ * plain dpd_bpf_obj_get("/sys/fs/bpf/dpd_cfg"). When pinning was not honoured by
  * whoever loaded the object, we fall back to walking the global map id space
  * and matching on the BTF map name.
  */
@@ -22,10 +22,8 @@
 #include <unistd.h>
 #include <net/if.h>
 
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
-
 #include "dpd_common.h"
+#include "dpd_bpf.h"
 
 /* monotonic ms, to compare against values stored by bpf_ktime_get_ns() */
 static uint64_t mono_ns(void)
@@ -59,7 +57,7 @@ static const char *pin_path(const char *name)
 /* Open a map: try the pin first, then scan map ids for a matching BTF name. */
 static int map_open(const char *name)
 {
-	int fd = bpf_obj_get(pin_path(name));
+	int fd = dpd_bpf_obj_get(pin_path(name));
 
 	if (fd >= 0)
 		return fd;
@@ -68,12 +66,12 @@ static int map_open(const char *name)
 		struct bpf_map_info info = {};
 		uint32_t len = sizeof(info);
 
-		if (bpf_map_get_next_id(id, &id))
+		if (dpd_bpf_map_get_next_id(id, &id))
 			break;
-		fd = bpf_map_get_fd_by_id(id);
+		fd = dpd_bpf_map_get_fd_by_id(id);
 		if (fd < 0)
 			continue;
-		if (bpf_map_get_info_by_fd(fd, &info, &len) == 0 &&
+		if (dpd_bpf_map_get_info_by_fd(fd, &info, &len) == 0 &&
 		    !strcmp((char *)info.name, name))
 			return fd;
 		close(fd);
@@ -86,15 +84,51 @@ static int map_open(const char *name)
 static int cfg_read(int fd, struct dpd_config *cfg)
 {
 	uint32_t k = 0;
+	int n = dpd_num_possible_cpus();
+	struct dpd_cpu *buf;
 
-	return bpf_map_lookup_elem(fd, &k, cfg);
+	if (n <= 0)
+		n = 1;
+	buf = calloc((size_t)n, sizeof(*buf));
+	if (!buf)
+		return -1;
+	if (dpd_bpf_map_lookup_elem(fd, &k, buf)) {
+		free(buf);
+		return -1;
+	}
+	/* every CPU's copy holds the same config (cfg_write keeps them in
+	 * step), so the first block is authoritative for readers. */
+	*cfg = buf[0].cfg;
+	free(buf);
+	return 0;
 }
 
+/*
+ * Write the config for every CPU. The value is a per-CPU block that also holds
+ * the counters, and a map update replaces the whole value -- so this is a
+ * read-modify-write: keep .stats from the current block and change only .cfg.
+ * Without that, `dpdctl set mode ...` would silently zero every counter.
+ */
 static int cfg_write(int fd, const struct dpd_config *cfg)
 {
 	uint32_t k = 0;
+	int n = dpd_num_possible_cpus();
+	struct dpd_cpu *buf;
+	int r;
 
-	return bpf_map_update_elem(fd, &k, cfg, BPF_ANY);
+	if (n <= 0)
+		n = 1;
+	buf = calloc((size_t)n, sizeof(*buf));
+	if (!buf)
+		return -1;
+	/* A failed lookup (fresh map) leaves the zeroed buffer, which is the
+	 * correct initial state. */
+	dpd_bpf_map_lookup_elem(fd, &k, buf);
+	for (int i = 0; i < n; i++)
+		buf[i].cfg = *cfg;
+	r = dpd_bpf_map_update_elem(fd, &k, buf, BPF_ANY);
+	free(buf);
+	return r;
 }
 
 static const char *ifname(uint32_t ifindex)
@@ -153,7 +187,8 @@ static const char *stat_name(int i)
 		"redirect_ok", "neigh_ok", "neigh_fail", "flow_hit",
 		"flow_miss", "flow_write", "ttl_drop", "local",
 		"v6_skip", "vlan_skip", "frag_skip", "dns_skip", "fib_retry",
-		"dhcp_skip", "bcast_skip", "v6_ok",
+		"dhcp_skip", "bcast_skip", "v6_ok", "mss_clamp", "mss_skip",
+		"tag_pop", "tag_skip",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -205,6 +240,8 @@ static int cmd_set(int argc, char **argv)
 		cfg.epoch = strtoul(argv[1], NULL, 0) & 0xff;
 	} else if (!strcmp(argv[0], "ipv6")) {
 		cfg.ipv6 = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "mss")) {
+		cfg.mss_clamp = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -257,11 +294,11 @@ static int cmd_show(void)
 		int nv = 0;
 
 		printf("vlans        ");
-		if (!bpf_map_get_next_key(fd, NULL, &vk)) {
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &vk)) {
 			for (;;) {
 				printf("%u ", vk);
 				nv++;
-				if (bpf_map_get_next_key(fd, &vk, &vn))
+				if (dpd_bpf_map_get_next_key(fd, &vk, &vn))
 					break;
 				vk = vn;
 			}
@@ -276,18 +313,18 @@ static int cmd_show(void)
 	if (fd < 0)
 		return 0;
 	printf("iface flags:\n");
-	if (bpf_map_get_next_key(fd, NULL, &k))
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k))
 		return 0;
 	for (;;) {
 		uint32_t v = 0;
 
-		if (!bpf_map_lookup_elem(fd, &k, &v))
+		if (!dpd_bpf_map_lookup_elem(fd, &k, &v))
 			printf("  %-16s 0x%08x%s%s%s%s\n", ifname(k.ifindex), v,
 			       v & DPD_IF_F_UP ? " UP" : "",
 			       v & DPD_IF_F_NOARP ? " NOARP" : "",
 			       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
 			       v & DPD_IF_F_LOWER ? " LOWER" : "");
-		if (bpf_map_get_next_key(fd, &k, &nk))
+		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
 			break;
 		k = nk;
 		have_k = 1;
@@ -297,37 +334,20 @@ static int cmd_show(void)
 	return 0;
 }
 
+static int stats_read(uint64_t *out);
+
 static int cmd_stats(void)
 {
-	struct dpd_stat_val *vals;
-	int fd, ncpu;
+	uint64_t st[ST__MAX] = {};
 
-	fd = map_open("dpd_stats");
-	if (fd < 0)
-		return 1;
-	ncpu = libbpf_num_possible_cpus();
-	if (ncpu <= 0)
-		ncpu = 1;
-	vals = calloc((size_t)ncpu, sizeof(*vals));
-	if (!vals) {
-		fprintf(stderr, "dpdctl: out of memory\n");
-		return 1;
-	}
-	if (bpf_map_lookup_elem(fd, &(uint32_t){ 0 }, vals)) {
+	if (stats_read(st)) {
 		fprintf(stderr, "dpdctl: read dpd_stats: %s\n", strerror(errno));
-		free(vals);
 		return 1;
 	}
-
 	printf("  idx  %-13s %s\n", "name", "total");
-	for (uint32_t i = 0; i < ST__MAX; i++) {
-		unsigned long long sum = 0;
-
-		for (int c = 0; c < ncpu; c++)
-			sum += vals[c].v[i];
-		printf("  %3u  %-13s %llu\n", i, stat_name(i), sum);
-	}
-	free(vals);
+	for (uint32_t i = 0; i < ST__MAX; i++)
+		printf("  %3u  %-13s %llu\n", i, stat_name((int)i),
+		       (unsigned long long)st[i]);
 	return 0;
 }
 
@@ -385,7 +405,7 @@ static int cmd_bump(void)
  */
 static int cmd_ifaces(int argc, char **argv)
 {
-	int fd;
+	int fd, mfd;
 
 	if (argc == 0) {
 		fprintf(stderr, "usage: dpdctl ifaces <ifname>...\n");
@@ -394,11 +414,21 @@ static int cmd_ifaces(int argc, char **argv)
 	fd = map_open("dpd_iface");
 	if (fd < 0)
 		return 1;
+	/* ABI 11: the MSS clamp needs each egress device's MTU. Optional on
+	 * purpose -- an older object has no dpd_mtu map, and then the clamp
+	 * degrades to "count a skip" instead of breaking the attach. */
+	mfd = map_open("dpd_mtu");
+	if (mfd < 0) {
+		fprintf(stderr,
+			"dpdctl: no dpd_mtu map (object older than ABI 11); "
+			"MSS clamp will stay inactive\n");
+		mfd = -1;
+	}
 
 	for (int i = 0; i < argc; i++) {
 		char path[256];
 		uint32_t ifindex = if_nametoindex(argv[i]);
-		uint32_t v = 0;
+		uint32_t v = 0, mtu = 0;
 		FILE *f;
 		unsigned long flags = 0;
 		unsigned long iflink = 0;
@@ -428,22 +458,38 @@ static int cmd_ifaces(int argc, char **argv)
 			fclose(f);
 		}
 
+		snprintf(path, sizeof(path), "/sys/class/net/%s/mtu", argv[i]);
+		f = fopen(path, "r");
+		if (f) {
+			if (fscanf(f, "%u", &mtu) != 1)
+				mtu = 0;
+			fclose(f);
+		}
+
 		if (flags & IFF_UP)		v |= DPD_IF_F_UP;
 		if (flags & IFF_NOARP)		v |= DPD_IF_F_NOARP;
 		if (flags & IFF_POINTOPOINT)	v |= DPD_IF_F_POINTOPOINT;
 		if (iflink && iflink != ifindex) v |= DPD_IF_F_LOWER;
 
-		if (bpf_map_update_elem(fd, &ifindex, &v, BPF_ANY)) {
+		if (dpd_bpf_map_update_elem(fd, &ifindex, &v, BPF_ANY)) {
 			fprintf(stderr, "dpdctl: update dpd_iface[%s]: %s\n",
 				argv[i], strerror(errno));
 			return 1;
 		}
-		printf("%-16s ifindex=%-4u flags=0x%08x%s%s%s%s\n", argv[i], ifindex, v,
+		if (mfd >= 0 && mtu &&
+		    dpd_bpf_map_update_elem(mfd, &ifindex, &mtu, BPF_ANY))
+			fprintf(stderr, "dpdctl: update dpd_mtu[%s]: %s\n",
+				argv[i], strerror(errno));
+
+		printf("%-16s ifindex=%-4u mtu=%-5u flags=0x%08x%s%s%s%s\n",
+		       argv[i], ifindex, mtu, v,
 		       v & DPD_IF_F_UP ? " UP" : "",
 		       v & DPD_IF_F_NOARP ? " NOARP" : "",
 		       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
 		       v & DPD_IF_F_LOWER ? " LOWER" : "");
 	}
+	if (mfd >= 0)
+		close(mfd);
 	return 0;
 }
 
@@ -458,10 +504,10 @@ static int cmd_flows(int argc, char **argv)
 	fd = map_open("dpd_flows");
 	if (fd < 0)
 		return 1;
-	if (bpf_map_get_next_key(fd, NULL, &k))
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k))
 		return 0;
 	for (;;) {
-		if (!bpf_map_lookup_elem(fd, &k, &v)) {
+		if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
 			uint64_t age_ms = flow_age_ms(v.last_seen_ms);
 
 			printf("%-10s fam=%u proto=%u egress=%-10s wan=%u epoch=%u "
@@ -483,7 +529,7 @@ static int cmd_flows(int argc, char **argv)
 			if (++n >= max)
 				break;
 		}
-		if (bpf_map_get_next_key(fd, &k, &nk))
+		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
 			break;
 		k = nk;
 	}
@@ -521,7 +567,7 @@ static int cmd_vlan(int argc, char **argv)
 			fprintf(stderr, "dpdctl: bad vlan id %u\n", id);
 			return 1;
 		}
-		if (bpf_map_update_elem(fd, &id, &one, BPF_ANY)) {
+		if (dpd_bpf_map_update_elem(fd, &id, &one, BPF_ANY)) {
 			fprintf(stderr, "dpdctl: vlan add %u: %s\n", id,
 				strerror(errno));
 			return 1;
@@ -535,7 +581,7 @@ static int cmd_vlan(int argc, char **argv)
 			return 1;
 		}
 		id = (uint16_t)strtoul(argv[1], NULL, 0);
-		if (bpf_map_delete_elem(fd, &id) && errno != ENOENT) {
+		if (dpd_bpf_map_delete_elem(fd, &id) && errno != ENOENT) {
 			fprintf(stderr, "dpdctl: vlan del %u: %s\n", id,
 				strerror(errno));
 			return 1;
@@ -544,11 +590,11 @@ static int cmd_vlan(int argc, char **argv)
 	} else if (!strcmp(argv[0], "flush")) {
 		uint16_t k, n;
 
-		if (bpf_map_get_next_key(fd, NULL, &k))
+		if (dpd_bpf_map_get_next_key(fd, NULL, &k))
 			return 0;
 		for (;;) {
-			bpf_map_delete_elem(fd, &k);
-			if (bpf_map_get_next_key(fd, &k, &n))
+			dpd_bpf_map_delete_elem(fd, &k);
+			if (dpd_bpf_map_get_next_key(fd, &k, &n))
 				break;
 			k = n;
 		}
@@ -557,12 +603,12 @@ static int cmd_vlan(int argc, char **argv)
 		uint16_t k, n;
 		int cnt = 0;
 
-		if (bpf_map_get_next_key(fd, NULL, &k))
+		if (dpd_bpf_map_get_next_key(fd, NULL, &k))
 			return 0;
 		for (;;) {
 			printf("vlan %u\n", k);
 			cnt++;
-			if (bpf_map_get_next_key(fd, &k, &n))
+			if (dpd_bpf_map_get_next_key(fd, &k, &n))
 				break;
 			k = n;
 		}
@@ -574,10 +620,467 @@ static int cmd_vlan(int argc, char **argv)
 	return 0;
 }
 
+/* Sum the per-CPU counter blocks into out[]. ABI 12: the counters live in the
+ * same per-CPU value as the config, so one lookup returns every CPU's block. */
+static int stats_read(uint64_t *out)
+{
+	uint32_t k = 0;
+	int fd, ncpu;
+	struct dpd_cpu *buf;
+
+	fd = map_open("dpd_cfg");
+	if (fd < 0)
+		return -1;
+	ncpu = dpd_num_possible_cpus();
+	if (ncpu <= 0)
+		ncpu = 1;
+	buf = calloc((size_t)ncpu, sizeof(*buf));
+	if (!buf) {
+		close(fd);
+		return -1;
+	}
+	if (dpd_bpf_map_lookup_elem(fd, &k, buf)) {
+		free(buf);
+		close(fd);
+		return -1;
+	}
+	for (uint32_t i = 0; i < ST__MAX; i++) {
+		uint64_t sum = 0;
+
+		for (int c = 0; c < ncpu; c++)
+			sum += buf[c].stats.v[i];
+		out[i] = sum;
+	}
+	free(buf);
+	close(fd);
+	return 0;
+}
+
+/* ---- status ------------------------------------------------------------- */
+
+static const char *redirect_name(uint32_t r)
+{
+	switch (r) {
+	case DPD_REDIR_AUTO:		return "auto";
+	case DPD_REDIR_FORCE_NEIGH:	return "neigh";
+	case DPD_REDIR_FORCE_DEV:	return "dev";
+	default:			return "?";
+	}
+}
+
+static long read_text_file(const char *path, char *buf, size_t n)
+{
+	FILE *f = fopen(path, "r");
+	size_t r;
+
+	if (!f)
+		return -1;
+	r = fread(buf, 1, n - 1, f);
+	fclose(f);
+	buf[r] = '\0';
+	return (long)r;
+}
+
+/* Is this buffer one JSON object? The gate file is written by shell, so a
+ * half-written file (or an older one) must not be pasted into our output:
+ * only a leading '{' and a trailing '}' are accepted, the caller otherwise
+ * omits the key. */
+static int looks_like_json_object(const char *s)
+{
+	const char *p = s, *q;
+
+	while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+		p++;
+	if (*p != '{')
+		return 0;
+	q = p + strlen(p) - 1;
+	while (q > p && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r'))
+		q--;
+	return *q == '}';
+}
+
+static int map_count(int fd, uint32_t key_size)
+{
+	unsigned char key[64], next[64];
+	int n = 0;
+
+	if (!key_size || key_size > sizeof(key))
+		return -1;
+	if (dpd_bpf_map_get_next_key(fd, NULL, key))
+		return 0;
+	for (;;) {
+		n++;
+		if (n > 65536)
+			break;
+		if (dpd_bpf_map_get_next_key(fd, key, next))
+			break;
+		memcpy(key, next, key_size);
+	}
+	return n;
+}
+
+/* One map's capacity (and, for the small tables, its occupancy). */
+static void map_limits(const char *name, uint32_t *max_entries, int *entries)
+{
+	struct bpf_map_info info = {};
+	uint32_t len = sizeof(info);
+	int fd = map_open(name);
+
+	*max_entries = 0;
+	*entries = -1;
+	if (fd < 0)
+		return;
+	if (dpd_bpf_map_get_info_by_fd(fd, &info, &len) == 0) {
+		*max_entries = info.max_entries;
+		/* dpd_flows is an LRU hash with 16k entries: walking it on every
+		 * status poll would cost more than the answer is worth, and the
+		 * LRU evicts anyway, so occupancy is not a stable fact. */
+		if (strcmp(name, "dpd_flows"))
+			*entries = map_count(fd, info.key_size);
+	}
+	close(fd);
+}
+
+static void json_string(const char *s)
+{
+	putchar('"');
+	for (; *s; s++) {
+		unsigned char c = (unsigned char)*s;
+
+		if (c == '"' || c == '\\')
+			printf("\\%c", c);
+		else if (c < 0x20)
+			printf("\\u%04x", c);
+		else
+			putchar(c);
+	}
+	putchar('"');
+}
+
+static void json_iface_flags(uint32_t v)
+{
+	int first = 1;
+
+	putchar('"');
+#define DPD_FLAG(n, bit)						\
+	do {								\
+		if (v & (bit)) {					\
+			printf("%s%s", first ? "" : " ", (n));		\
+			first = 0;					\
+		}							\
+	} while (0)
+	DPD_FLAG("UP", DPD_IF_F_UP);
+	DPD_FLAG("NOARP", DPD_IF_F_NOARP);
+	DPD_FLAG("POINTOPOINT", DPD_IF_F_POINTOPOINT);
+	DPD_FLAG("LOWER", DPD_IF_F_LOWER);
+#undef DPD_FLAG
+	putchar('"');
+}
+
+static int status_json(void)
+{
+	struct dpd_config cfg = {};
+	uint64_t st[ST__MAX] = {};
+	struct dpd_flow_key k, nk;
+	struct dpd_wan_tbl tbl = {};
+	char gate[8192];
+	long glen = read_text_file(DPD_GATE_FILE, gate, sizeof(gate));
+	uint32_t max;
+	int cnt, fd, first;
+	int have_cfg;
+	int have_wans = 0;
+
+	fd = map_open("dpd_cfg");
+	have_cfg = fd >= 0 && cfg_read(fd, &cfg) == 0;
+	if (fd >= 0)
+		close(fd);
+
+	/* read the uplink table once: both the maps block (entries) and the
+	 * wans array below report it. */
+	fd = map_open("dpd_wans");
+	if (fd >= 0) {
+		uint32_t zero = 0;
+
+		have_wans = dpd_bpf_map_lookup_elem(fd, &zero, &tbl) == 0;
+		close(fd);
+	}
+
+	printf("{\n");
+	printf("  \"tool\": \"dpdctl\",\n");
+	printf("  \"abi\": %u,\n", DPD_ABI_VERSION);
+	printf("  \"attached\": %s,\n", have_cfg ? "true" : "false");
+	printf("  \"loaded_abi\": %u,\n", have_cfg ? cfg.abi_version : 0);
+
+	printf("  \"cfg\": ");
+	if (have_cfg) {
+		printf("{ \"enable\": %u, \"mode\": ", cfg.enable);
+		json_string(mode_name(cfg.mode));
+		printf(", \"redirect\": ");
+		json_string(redirect_name(cfg.redirect));
+		printf(", \"flow_ttl_ms\": %u, \"flow_refresh_ms\": %u",
+		       cfg.flow_ttl_ms, cfg.flow_refresh_ms);
+		printf(", \"ipv6\": %u, \"mss_clamp\": %u, \"epoch\": %u",
+		       cfg.ipv6, cfg.mss_clamp, cfg.epoch);
+		printf(", \"policy\": ");
+		json_string(policy_name(cfg.policy));
+		printf(" },\n");
+	} else {
+		printf("null,\n");
+	}
+
+	printf("  \"maps\": {\n");
+	map_limits("dpd_flows", &max, &cnt);
+	/* occupancy of the 16k LRU is deliberately not walked; max_entries is
+	 * what tells a reader whether the table is undersized. */
+	printf("    \"flows\": { \"max_entries\": %u, \"entries\": null },\n", max);
+	map_limits("dpd_iface", &max, &cnt);
+	printf("    \"iface\": { \"max_entries\": %u, \"entries\": %d },\n",
+	       max, cnt);
+	map_limits("dpd_mtu", &max, &cnt);
+	printf("    \"mtu\": { \"max_entries\": %u, \"entries\": %d },\n",
+	       max, cnt);
+	map_limits("dpd_vlans", &max, &cnt);
+	printf("    \"vlans\": { \"max_entries\": %u, \"entries\": %d },\n",
+	       max, cnt);
+	map_limits("dpd_wans", &max, &cnt);
+	/* dpd_wans is an ARRAY map with max_entries 1: counting its keys always
+	 * says "1". What a reader wants is how many uplinks the table holds. */
+	printf("    \"wans\": { \"max_entries\": %u, \"entries\": ", max);
+	if (have_wans)
+		printf("%u", tbl.count);
+	else
+		printf("null");
+	printf(" }\n");
+	printf("  },\n");
+
+	printf("  \"ifaces\": [");
+	first = 1;
+	fd = map_open("dpd_iface");
+	if (fd >= 0) {
+		int mfd = map_open("dpd_mtu");
+
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			for (;;) {
+				uint32_t v = 0, mtu = 0;
+
+				if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
+					if (mfd >= 0)
+						dpd_bpf_map_lookup_elem(mfd, &k.ifindex,
+									&mtu);
+					printf("%s\n    { \"name\": ", first ? "" : ",");
+					json_string(ifname(k.ifindex));
+					printf(", \"ifindex\": %u, \"mtu\": %u, \"flags\": ",
+					       k.ifindex, mtu);
+					json_iface_flags(v);
+					printf(" }");
+					first = 0;
+				}
+				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+					break;
+				k = nk;
+			}
+		}
+		if (mfd >= 0)
+			close(mfd);
+		close(fd);
+	}
+	printf("%s],\n", first ? "" : "\n  ");
+
+	printf("  \"vlans\": [");
+	first = 1;
+	fd = map_open("dpd_vlans");
+	if (fd >= 0) {
+		uint16_t vk, vn;
+
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &vk)) {
+			for (;;) {
+				printf("%s%u", first ? "" : ", ", vk);
+				first = 0;
+				if (dpd_bpf_map_get_next_key(fd, &vk, &vn))
+					break;
+				vk = vn;
+			}
+		}
+		close(fd);
+	}
+	printf("],\n");
+
+	printf("  \"wans\": [");
+	first = 1;
+	if (have_wans) {
+		for (uint32_t i = 0; i < DPD_WAN_MAX && i < tbl.count; i++) {
+			struct dpd_wan *w = &tbl.wan[i];
+
+			if (!w->ifindex && !w->weight)
+				continue;
+			printf("%s\n    { \"index\": %u, \"ifname\": ",
+			       first ? "" : ",", i + 1);
+			json_string(ifname(w->ifindex));
+			printf(", \"ifindex\": %u, \"mark\": %u, "
+			       "\"weight\": %u, \"up\": %s }",
+			       w->ifindex, w->mark, w->weight,
+			       (w->flags & DPD_WAN_F_UP) ? "true" : "false");
+			first = 0;
+		}
+	}
+	printf("%s],\n", first ? "" : "\n  ");
+
+	printf("  \"stats\": {");
+	if (stats_read(st) == 0) {
+		for (uint32_t i = 0; i < ST__MAX; i++)
+			printf("%s\"%s\": %llu", i ? ", " : " ",
+			       stat_name((int)i), (unsigned long long)st[i]);
+		printf(" },\n");
+	} else {
+		printf(" null,\n");
+	}
+
+	if (glen > 0 && looks_like_json_object(gate)) {
+		/* the file ends with a newline; trimming it keeps the outer object
+		 * readable (and the blank line out of the JSON) */
+		char *endp = gate + strlen(gate);
+
+		while (endp > gate && isspace((unsigned char)endp[-1]))
+			*--endp = '\0';
+		printf("  \"gate\": %s\n", gate);
+	} else {
+		printf("  \"gate\": null\n");
+	}
+	printf("}\n");
+	return 0;
+}
+
+static int status_text(void)
+{
+	struct dpd_config cfg = {};
+	uint64_t st[ST__MAX] = {};
+	char txt[8192];
+	char *line[4] = { NULL };
+	struct dpd_flow_key k, nk;
+	uint32_t max;
+	int cnt;
+	int fd = map_open("dpd_cfg");
+
+	printf("dpd status\n");
+	if (fd < 0 || cfg_read(fd, &cfg)) {
+		printf("  attached      no (no dpd_cfg pin; is the program loaded?)\n");
+		if (fd >= 0)
+			close(fd);
+		return 0;
+	}
+	close(fd);
+
+	printf("  attached      yes (ABI %u loaded, %u built)\n",
+	       cfg.abi_version, DPD_ABI_VERSION);
+	printf("  mode          %s (effective; the requested mode is in the gate)\n",
+	       mode_name(cfg.mode));
+	printf("  enable        %u\n", cfg.enable);
+	printf("  redirect      %s\n", redirect_name(cfg.redirect));
+	printf("  policy        %s\n", policy_name(cfg.policy));
+	printf("  ttl/refresh   %u ms / %u ms%s\n", cfg.flow_ttl_ms,
+	       cfg.flow_refresh_ms, cfg.flow_refresh_ms ? "" : " (every packet)");
+	printf("  ipv6          %u\n", cfg.ipv6);
+	printf("  mss_clamp     %s\n", cfg.mss_clamp ? "on" : "off");
+	printf("  epoch         %u\n", cfg.epoch);
+
+	/* Gate: four lines requested/effective/code/reason (DPD_GATE_TEXT). */
+	if (read_text_file(DPD_GATE_TEXT, txt, sizeof(txt)) > 0) {
+		char *p = txt;
+
+		for (int i = 0; i < 4 && p; i++) {
+			line[i] = p;
+			char *nl = strchr(p, '\n');
+
+			if (nl) {
+				*nl = '\0';
+				p = nl + 1;
+			} else {
+				p = NULL;
+			}
+		}
+		printf("  gate          %s (%s)\n", line[1] ? line[1] : "?",
+		       line[2] ? line[2] : "?");
+		if (line[3] && *line[3])
+			printf("  gate reason   %s\n", line[3]);
+	} else {
+		printf("  gate          unknown (no %s yet)\n", DPD_GATE_TEXT);
+	}
+
+	map_limits("dpd_flows", &max, &cnt);
+	printf("  flow cache    %u max (LRU)\n", max);
+	map_limits("dpd_mtu", &max, &cnt);
+	printf("  mtu table     %d/%u\n", cnt, max);
+
+	printf("  ifaces\n");
+	fd = map_open("dpd_iface");
+	if (fd >= 0) {
+		int mfd = map_open("dpd_mtu");
+
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			for (;;) {
+				uint32_t v = 0, mtu = 0;
+
+				if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
+					if (mfd >= 0)
+						dpd_bpf_map_lookup_elem(mfd, &k.ifindex,
+									&mtu);
+					printf("    %-16s mtu=%-5u%s%s%s%s\n",
+					       ifname(k.ifindex), mtu,
+					       v & DPD_IF_F_UP ? " UP" : "",
+					       v & DPD_IF_F_NOARP ? " NOARP" : "",
+					       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
+					       v & DPD_IF_F_LOWER ? " LOWER" : "");
+				}
+				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+					break;
+				k = nk;
+			}
+		}
+		if (mfd >= 0)
+			close(mfd);
+		close(fd);
+	}
+
+	if (stats_read(st) == 0) {
+		printf("  counters      pkt=%llu flow_hit=%llu flow_miss=%llu "
+		       "mss_clamp=%llu\n",
+		       (unsigned long long)st[ST_PKT_TOTAL],
+		       (unsigned long long)st[ST_FLOW_HIT],
+		       (unsigned long long)st[ST_FLOW_MISS],
+		       (unsigned long long)st[ST_MSS_CLAMP]);
+		printf("                redirect=%llu neigh=%llu fib_ok=%llu "
+		       "fib_fail=%llu\n",
+		       (unsigned long long)st[ST_REDIRECT_OK],
+		       (unsigned long long)st[ST_NEIGH_OK],
+		       (unsigned long long)st[ST_FIB_OK],
+		       (unsigned long long)st[ST_FIB_FAIL]);
+	} else {
+		printf("  counters      unavailable\n");
+	}
+	return 0;
+}
+
+static int cmd_status(int argc, char **argv)
+{
+	for (int i = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "-j") || !strcmp(argv[i], "--json"))
+			return status_json();
+		if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+			printf("usage: dpdctl status [-j]\n");
+			return 0;
+		}
+		fprintf(stderr, "dpdctl: unknown status option '%s'\n", argv[i]);
+		return 1;
+	}
+	return status_text();
+}
+
 static void usage(const char *argv0)
 {
-	fprintf(stderr,
+		fprintf(stderr,
 		"usage: %s <command>\n"
+		"  status [-j]             one-screen status (human, or JSON for\n"
+		"                          scripts/LuCI: cfg, gate, maps, counters)\n"
 		"  show                    dump dpd_cfg + dpd_iface + dpd_vlans\n"
 		"  set mode <off|observe|stateless|stateful|neigh-probe>\n"
 		"  set enable <0|1>\n"
@@ -585,13 +1088,14 @@ static void usage(const char *argv0)
 		"  set ttl <ms>\n"
 		"  set refresh <ms>        0 = touch the flow timestamp on every packet\n"
 		"  set ipv6 <0|1>          accelerate IPv6 TCP/UDP too (default 0)\n"
+		"  set mss <0|1>           clamp TCP MSS to the egress MTU (default 1)\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"
 		"  abi                     print the ABI of the loaded object (0 = none)\n"
 		"  vlan add <id>|del <id>|list|flush\n"
 		"  stats                   per-reason counters (all cpus summed)\n"
-		"  ifaces <ifname>...      learn IFF_* flags into dpd_iface\n"
+		"  ifaces <ifname>...      learn IFF_* flags and MTU into the maps\n"
 		"  flows [-a]              dump dpd_flows\n",
 		argv0);
 }
@@ -604,6 +1108,8 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[1], "show"))
 		return cmd_show();
+	if (!strcmp(argv[1], "status"))
+		return cmd_status(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "set"))
 		return cmd_set(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "vlan"))

@@ -72,21 +72,15 @@ struct dpd_vlan_hdr {
 
 /* ------------------------------------------------------------------ maps */
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, struct dpd_config);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} dpd_cfg SEC(".maps");
-
+/* ABI 12: config + counters in one per-CPU block (struct dpd_cpu). One lookup
+ * on the hot path; see dpd_common.h. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, struct dpd_stat_val);
+	__type(value, struct dpd_cpu);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} dpd_stats SEC(".maps");
+} dpd_cfg SEC(".maps");
 
 /* Mode B: self-learned shortcut table. Populated by nothing but us. */
 struct {
@@ -106,8 +100,21 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_iface SEC(".maps");
 
+/* Per-ifindex MTU, learned from userspace by `dpdctl ifaces`
+ * (/sys/class/net/<dev>/mtu). The MSS clamp needs the *egress* MTU and
+ * bpf_fib_lookup() does not return it, so it is one small map lookup on the
+ * SYN/SYN-ACK path only. A missing entry means "unknown": the packet is left
+ * alone and ST_MSS_SKIP is counted (an unclamped packet still moves, it just
+ * does not get the PPPoE black-hole protection). */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dpd_mtu SEC(".maps");
+
 /* dpd_vlans: optional segment allow-list, u16 VLAN id -> u8 1.
- *
  * Only consulted when dpd_cfg.policy == DPD_POLICY_VLANS_ONLY. Managed with
  * `dpdctl vlan add|del|list`; the list is written by the init script from
  * files/dpd_fastpath.config so it survives a reboot without dpdctl being run.
@@ -132,31 +139,19 @@ struct {
 
 /* ------------------------------------------------------------------ helpers */
 
-/* One lookup gets the whole counter block for this CPU. Callers hold the
- * pointer and bump several counters with it; nothing between those bumps may
- * modify a map (only bpf_fib_lookup()/bpf_redirect*() run on that path, and
- * they do not touch dpd_stats). */
-static __always_inline struct dpd_stat_val *dpd_stat(void)
+/* One lookup gets this CPU's config *and* its counter block (ABI 12). The
+ * caller enforces the killer switch on .cfg and bumps counters through .stats;
+ * nothing between those bumps may modify a map (only bpf_fib_lookup() /
+ * bpf_redirect*() run on that path, and they do not touch dpd_cfg). */
+static __always_inline struct dpd_cpu *dpd_cpu(void)
 {
 	__u32 zero = 0;
 
-	return bpf_map_lookup_elem(&dpd_stats, &zero);
+	return bpf_map_lookup_elem(&dpd_cfg, &zero);
 }
 
 #define DPD_INC(s, i)		do { if (s) (s)->v[i]++; } while (0)
 #define DPD_ADD(s, i, n)	do { if (s) (s)->v[i] += (n); } while (0)
-
-/* read the config once per packet; also enforces the killer switch */
-static __always_inline struct dpd_config *dpd_get_cfg(void)
-{
-	__u32 zero = 0;
-	struct dpd_config *cfg = bpf_map_lookup_elem(&dpd_cfg, &zero);
-
-	/* if the map is somehow absent, do nothing at all */
-	if (!cfg || !cfg->enable || cfg->mode == DPD_MODE_OFF)
-		return NULL;
-	return cfg;
-}
 
 /*
  * Decrement IPv4 TTL and repair the header checksum incrementally.
@@ -211,6 +206,156 @@ static __always_inline int dpd_dec_hop_v6(void *data, void *data_end, __u32 l3_o
 	ip6h->hop_limit -= 1;
 	/* IPv6 has no header checksum to repair */
 	return 0;
+}
+
+/* ------------------------------------------------------------------ MSS clamp
+ *
+ * Why this exists: accelerating a TCP flow means fw4 never sees it, and fw4
+ * is what clamps MSS (`tcp option maxseg size set rt mtu` in its
+ * mangle_prerouting chain, i.e. nft's mtu_fix). On a PPPoE WAN the uplink MTU
+ * is 1492 while both end points are on 1500-MTU Ethernet, so they advertise
+ * MSS 1460 and the server's first full segment is 1514 bytes on the wire --
+ * larger than the path -- and the carrier drops it. PMTUD is supposed to
+ * recover that by ICMP, and when the path filters ICMP the symptom is exactly
+ * "pages open, downloads hang": the handshake succeeds, the first full-MTU
+ * segment disappears.
+ *
+ * So the accelerated path does what the slow path would have done: rewrite the
+ * MSS option of SYN/SYN-ACK to egress_mtu - 40 (IPv4) or - 60 (IPv6). Three
+ * deliberate limits:
+ *
+ *   - only SYN / SYN-ACK. The MSS option exists nowhere else, and touching
+ *     data packets would mean recomputing checksums for no reason.
+ *   - only packets this program actually takes over. The slow path keeps
+ *     receiving fw4's clamp; doing it twice would only hide a broken fw4.
+ *   - fail-open. If dpd_mtu has no entry (userspace never taught the egress
+ *     device) or the computed MSS is absurd, count ST_MSS_SKIP and leave the
+ *     packet alone. A missing clamp is the old behaviour; a *wrong* clamp
+ *     (e.g. 0) would break paths that work today.
+ *
+ * The rewrite is done with the skb helpers rather than direct packet access:
+ * the option walk is over a variable offset, which the verifier cannot bound
+ * as a raw pointer, and bpf_skb_load_bytes()/bpf_skb_store_bytes() take that
+ * offset as a scalar. Checksum repair is the same incremental update the TTL
+ * code uses (bpf_l4_csum_replace), so CHECKSUM_PARTIAL skbs stay consistent.
+ */
+
+/* MSS ceiling for an MTU, 0 when it cannot be trusted. 536 is the RFC 879
+ * floor every stack must accept; below that the clamp would hurt more than
+ * the PMTUD problem it solves. */
+static __always_inline __u32 dpd_mss_limit(__u32 mtu, int v6)
+{
+	__u32 overhead = v6 ? 60 : 40;
+
+	if (!mtu || mtu <= overhead)
+		return 0;
+	if (mtu - overhead < 536)
+		return 536;
+	return mtu - overhead;
+}
+
+/* Smallest known MTU of the two devices a forwarded packet touches, 0 when
+ * neither is known.
+ *
+ * Why both, and why the *reverse* direction matters: the MSS option in a SYN
+ * describes what the sender is willing to receive, i.e. it constrains the
+ * segments travelling in the opposite direction. For a LAN->WAN SYN the
+ * bottleneck of that reverse path is the WAN device (the packet's egress), and
+ * for a WAN->LAN SYN-ACK it is also the WAN device (the packet's ingress). So a
+ * one-sided rule (egress only) fixes downloads and silently leaves uploads
+ * broken on a PPPoE line: the server's SYN-ACK advertises 1460, the client
+ * sends 1514-byte frames, the 1492 uplink drops them and PMTUD is what is
+ * supposed to recover -- which is exactly what an ICMP filter breaks. Taking the
+ * minimum of ingress and egress is correct for both halves of a symmetric
+ * forward path, and errs on the safe side (a smaller MSS) otherwise.
+ */
+static __always_inline __u32 dpd_mtu_min(__u32 a, __u32 b)
+{
+	__u32 *pa = bpf_map_lookup_elem(&dpd_mtu, &a);
+	__u32 *pb = bpf_map_lookup_elem(&dpd_mtu, &b);
+	__u32 va = pa ? *pa : 0;
+	__u32 vb = pb ? *pb : 0;
+
+	if (!va)
+		return vb;
+	if (!vb)
+		return va;
+	return va < vb ? va : vb;
+}
+
+static __always_inline void dpd_mss_clamp(struct __sk_buff *skb, __u32 l4_off,
+					  __u32 in_ifindex, __u32 out_ifindex,
+					  int v6, struct dpd_stat_val *st)
+{
+	__u32 limit, opt, end, mtu;
+	__u8 hdr[2];
+
+	/* Byte 12 of the TCP header is (data offset << 4) | reserved, byte 13
+	 * is the flags. A helper read is used instead of direct packet access
+	 * because l4_off is a variable offset: the verifier tracks it as a
+	 * bounded scalar, not as a packet pointer, and `data + l4_off` would be
+	 * rejected as an invalid memory access. It runs for TCP packets only
+	 * and costs one helper call; the write path is already helper based. */
+	if (bpf_skb_load_bytes(skb, l4_off + 12, hdr, 2) < 0)
+		return;
+	if (!(hdr[1] & 0x02))	/* not SYN / SYN-ACK: no MSS option */
+		return;
+	if ((hdr[0] >> 4) < 5)
+		return;
+
+	mtu = dpd_mtu_min(in_ifindex, out_ifindex);
+	limit = dpd_mss_limit(mtu, v6);
+	if (!limit) {
+		DPD_INC(st, ST_MSS_SKIP);
+		return;
+	}
+	opt = l4_off + sizeof(struct tcphdr);
+	end = l4_off + (__u32)(hdr[0] >> 4) * 4;
+
+	/* TCP options are at most 40 bytes and every option advances by >= 1,
+	 * so 20 iterations is an upper bound the verifier can unroll. */
+#pragma unroll
+	for (int i = 0; i < 20; i++) {
+		__u8 b[2];
+		__be16 old_be, new_be;
+		__u16 mss;
+		__u8 kind, len;
+
+		if (opt + 2 > end)
+			break;
+		if (bpf_skb_load_bytes(skb, opt, b, 2) < 0)
+			break;
+		kind = b[0];
+		if (kind == 0)		/* End of option list */
+			break;
+		if (kind == 1) {	/* NOP */
+			opt += 1;
+			continue;
+		}
+		len = b[1];
+		if (len < 2 || opt + len > end)
+			break;
+		if (kind == 2 && len == 4) {	/* MSS */
+			__u8 m[2];
+
+			if (bpf_skb_load_bytes(skb, opt + 2, m, 2) < 0)
+				break;
+			mss = (__u16)(((__u16)m[0] << 8) | m[1]);
+			if (mss <= limit)
+				return;
+			old_be = bpf_htons(mss);
+			new_be = bpf_htons((__u16)limit);
+			if (bpf_skb_store_bytes(skb, opt + 2, &new_be,
+						sizeof(new_be), 0) < 0)
+				break;
+			/* TCP checksum field sits at l4_off + 16 */
+			bpf_l4_csum_replace(skb, l4_off + 16, old_be, new_be, 2);
+			DPD_INC(st, ST_MSS_CLAMP);
+			return;
+		}
+		opt += len;
+	}
+	DPD_INC(st, ST_MSS_SKIP);
 }
 
 /*
@@ -569,8 +714,9 @@ static __always_inline int dpd_emit_l2(struct __sk_buff *skb, __u32 ifindex,
  *
  *   FORCE_NEIGH -> 0                      (neigh)
  *   FORCE_DEV   -> DEV
- *   NO_NEIGH    -> DEV                    (ppp/tunnel: no L2 header to write)
- *   NOARP/PPP   -> DEV
+ *   NOARP/PPP   -> DEV                    (no neighbour table, no L2 header)
+ *   NO_NEIGH    -> 0                      (Ethernet with a cold ARP cache:
+ *                                          let redirect_neigh resolve it)
  *   stacked dev -> 0                      (dev_hard_header does real work)
  *   plain eth   -> L2                     (only when a tagged frame is not in
  *                                          play and dmac/smac are usable)
@@ -586,14 +732,28 @@ static __always_inline __u16 dpd_emit_class(struct dpd_config *cfg,
 		return 0;
 	if (cfg->redirect == DPD_REDIR_FORCE_DEV)
 		return DPD_FLOW_F_DEV;
-	if (no_neigh)
-		return DPD_FLOW_F_DEV;
 
 	p = bpf_map_lookup_elem(&dpd_iface, &ifindex);
 	if (p)
 		flags = *p;
+
+	/* ppp / tunnels / NOARP devices: there is no neighbour table and no L2
+	 * header to write, so bpf_redirect(ifindex) is the only emit. */
 	if (flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT))
 		return DPD_FLOW_F_DEV;
+
+	/* NO_NEIGH on an Ethernet egress is NOT the ppp case: it means the
+	 * neighbour entry is not resolved *yet* (cold cache, flushed ARP). The
+	 * frame we hold still carries the ingress L2 header -- its destination
+	 * is our own address on the ingress side -- so emitting it with
+	 * bpf_redirect() sends a frame nobody will accept. Measured in the QEMU
+	 * lab: a veth egress with a cold neighbour cache black-holed the first
+	 * flow (pkt_total 16, redirect_ok 11, no reply) when NO_NEIGH was
+	 * mapped to DEV. redirect_neigh() is the correct answer here: it runs
+	 * the route lookup and resolves the neighbour before transmitting. */
+	if (no_neigh)
+		return 0;
+
 	if (l2_ok && !(flags & DPD_IF_F_LOWER))
 		return DPD_FLOW_F_L2;
 	return 0;
@@ -659,22 +819,37 @@ int dpd_fastpath(struct __sk_buff *skb)
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
 	struct dpd_config *cfg;
+	struct dpd_cpu *cpu;
 	struct dpd_flow_key fkey = {};
 	struct dpd_stat_val *st;
 	struct ethhdr *eth;
 	__u32 l3_off = sizeof(*eth);
+	__u32 l4_off = 0;	/* set once the L3 header length is known */
 	__u16 h_proto;
 	__u16 vlan_id = 0;	/* the 802.1Q/802.1AD VID, if tagged	*/
 	__u8 tagged = 0;
+	__u8 tag_meta = 0;	/* tag lives in skb->vlan_tci, not in the frame */
 	int ret;
 
-	cfg = dpd_get_cfg();
-	if (!cfg)
+	cpu = dpd_cpu();
+	if (!cpu || !cpu->cfg.enable || cpu->cfg.mode == DPD_MODE_OFF)
 		return TC_ACT_UNSPEC;
-
-	st = dpd_stat();
+	cfg = &cpu->cfg;
+	/* ABI 12: the same lookup that returned cfg also carries this CPU's
+	 * counters; one map access for both. */
+	st = &cpu->stats;
 	DPD_INC(st, ST_PKT_TOTAL);
 	DPD_ADD(st, ST_BYTES, skb->len);
+
+	/* ABI 13: the NIC/veth may hand us the 802.1Q tag as metadata
+	 * (skb->vlan_present + vlan_tci) with the frame itself untagged. Both
+	 * forms have to be seen as "tagged", because the take-over path has to
+	 * pop them; only the in-band form shifts the L3 offset when popped. */
+	if (skb->vlan_present) {
+		tagged = 1;
+		tag_meta = 1;
+		vlan_id = skb->vlan_tci & 0x0fff;
+	}
 
 	eth = data;
 	if ((void *)(eth + 1) > data_end) {
@@ -693,6 +868,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 		h_proto = bpf_ntohs(vh->h_vlan_encapsulated_proto);
 		vlan_id = bpf_ntohs(vh->h_vlan_TCI) & 0x0fff;
 		tagged = 1;
+		tag_meta = 0;
 		l3_off += sizeof(*vh);
 	}
 
@@ -709,6 +885,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 		ihl = (__u32)iph->ihl * 4;
 		if ((void *)iph + ihl > data_end)
 			goto non_ip;
+		l4_off = l3_off + ihl;
 
 		/* fragments: see dpd_may_accelerate() -- no honest L4 header,
 		 * no honest flow key, nothing to gate the :53 check on. */
@@ -739,7 +916,6 @@ int dpd_fastpath(struct __sk_buff *skb)
 		}
 	} else if (h_proto == ETH_P_IPV6) {
 		struct ipv6hdr *ip6h = data + l3_off;
-		__u32 l4_off;
 		__u8 nxt;
 
 		if ((void *)(ip6h + 1) > data_end)
@@ -852,6 +1028,24 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
+			/* ABI 13: this flow arrives tagged, so every packet
+			 * carries a tag that has to go before the L2 emit.
+			 * Only an in-band tag shifts L3/L4; a metadata tag
+			 * (skb->vlan_tci) leaves the frame layout alone. */
+			if (tagged) {
+				if (bpf_skb_vlan_pop(skb) < 0) {
+					DPD_INC(st, ST_TAG_SKIP);
+					return TC_ACT_UNSPEC;
+				}
+				DPD_INC(st, ST_TAG_POP);
+				if (!tag_meta) {
+					l3_off -= 4;
+					l4_off -= 4;
+				}
+				data = (void *)(long)skb->data;
+				data_end = (void *)(long)skb->data_end;
+			}
+
 			if (fkey.family == AF_INET)
 				ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
 			else
@@ -862,6 +1056,16 @@ int dpd_fastpath(struct __sk_buff *skb)
 			}
 			if (ret < 0)
 				return TC_ACT_UNSPEC;
+
+			/* ABI 11: the fast path bypasses fw4's mtu_fix, so a SYN
+			 * we take over here is the only chance to keep a PPPoE
+			 * path from black-holing full-size segments. Only TCP
+			 * SYN/SYN-ACK parses; for every other packet this is one
+			 * proto compare. */
+			if (cfg->mss_clamp && fkey.proto == IPPROTO_TCP)
+				dpd_mss_clamp(skb, l4_off, skb->ifindex,
+					      fval->egress_ifindex,
+					      fkey.family == AF_INET6, st);
 
 			/* count v6 takeovers separately, so "is IPv6 actually
 			 * accelerated here" is answerable from dpdctl */
@@ -987,8 +1191,29 @@ int dpd_fastpath(struct __sk_buff *skb)
 
 		/* ---- Mode A (and the #14 probe): take the packet over now ---- */
 		if (cfg->mode != DPD_MODE_STATEFUL) {
-			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh,
-						   !tagged);
+			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
+
+			/* ABI 13: a tagged frame can only be taken over when the
+			 * egress is plain Ethernet (L2 class); then the tag has
+			 * to be popped before the header is rewritten. A stacked
+			 * egress keeps tag ownership with the stack. */
+			if (tagged) {
+				if (!(cls & DPD_FLOW_F_L2)) {
+					DPD_INC(st, ST_TAG_SKIP);
+					return TC_ACT_UNSPEC;
+				}
+				if (bpf_skb_vlan_pop(skb) < 0) {
+					DPD_INC(st, ST_TAG_SKIP);
+					return TC_ACT_UNSPEC;
+				}
+				DPD_INC(st, ST_TAG_POP);
+				if (!tag_meta) {
+					l3_off -= 4;
+					l4_off -= 4;
+				}
+				data = (void *)(long)skb->data;
+				data_end = (void *)(long)skb->data_end;
+			}
 
 			if (fkey.family == AF_INET)
 				ret = dpd_dec_ttl_v4(skb, data, data_end, l3_off);
@@ -1000,6 +1225,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 			}
 			if (ret < 0)
 				return TC_ACT_UNSPEC;
+
+			/* same clamp as the hit path, using the FIB egress */
+			if (cfg->mss_clamp && fkey.proto == IPPROTO_TCP)
+				dpd_mss_clamp(skb, l4_off, skb->ifindex,
+					      fib.ifindex,
+					      fkey.family == AF_INET6, st);
 
 			return dpd_emit_cached(skb, fib.ifindex, cls, fib.dmac,
 					       fib.smac, st);
@@ -1019,11 +1250,18 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
 				return TC_ACT_UNSPEC;
 
-			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, !tagged);
+			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
+
+			/* ABI 13: only learn tagged flows whose egress is plain
+			 * Ethernet, where the hit path can pop the tag itself. */
+			if (tagged && !(cls & DPD_FLOW_F_L2))
+				return TC_ACT_UNSPEC;
 
 			nv.egress_ifindex = fib.ifindex;
 			nv.last_seen_ms = (__u32)(bpf_ktime_get_ns() / 1000000ULL);
-			nv.flags = cls | (no_neigh ? DPD_FLOW_F_NO_NEIGH : 0);
+			nv.flags = cls | ((cls & DPD_FLOW_F_DEV) ?
+					  DPD_FLOW_F_NO_NEIGH : 0) |
+				   (tagged ? DPD_FLOW_F_TAG : 0);
 			nv.wan = (__u16)((__u32)(cfg->epoch & 0xff) << 8);
 			__builtin_memcpy(nv.dmac, fib.dmac, ETH_ALEN);
 			__builtin_memcpy(nv.smac, fib.smac, ETH_ALEN);
@@ -1051,6 +1289,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 						nv.egress_ifindex = w.ifindex;
 						nv.wan = (__u16)((__u32)(wi + 1) |
 							((__u32)(cfg->epoch & 0xff) << 8));
+						/* ABI 13: a tagged flow can only
+						 * be learned when this uplink has an
+						 * L2 header to rewrite; a ppp/tun
+						 * uplink cannot pop the tag. */
+						if (tagged && (w.flags & DPD_WAN_F_L3))
+							return TC_ACT_UNSPEC;
 						/* ppp/tun uplinks have no L2
 						 * header to write; everything else
 						 * gets the usual decision. */
@@ -1058,9 +1302,22 @@ int dpd_fastpath(struct __sk_buff *skb)
 							? (DPD_FLOW_F_DEV | DPD_FLOW_F_WAN)
 							: (dpd_emit_class(cfg, w.ifindex, 0, 1) |
 							   DPD_FLOW_F_WAN);
+						if (tagged)
+							nv.flags |= DPD_FLOW_F_TAG;
 						__builtin_memcpy(nv.dmac, w.gw_mac, ETH_ALEN);
 						__builtin_memcpy(nv.smac, w.dev_mac, ETH_ALEN);
-						skb->mark = w.mark;
+						/* Only the low 28 bits are ours: they
+						 * select the routing table (the ip rule
+						 * matches with /0x0fffffff). The high
+						 * nibble belongs to the proxy/datapath
+						 * layer (honk: CLASSIFIED_MARK
+						 * 0x4000_0000, DIRECT_UNSPEC_MARK
+						 * 0x2000_0000). Overwriting the whole
+						 * field made a packet that had already
+						 * been classified look unclassified to
+						 * whatever ran after us. */
+						skb->mark = (skb->mark & 0xf0000000u) |
+							    (w.mark & 0x0fffffffu);
 					}
 				}
 			}
@@ -1128,9 +1385,10 @@ int dpd_fastpath(struct __sk_buff *skb)
 				}
 			}
 
-			/* the map write may have invalidated the cached stats
-			 * pointer; re-fetch before counting */
-			st = dpd_stat();
+			/* the map write may have invalidated the cached pointers;
+			 * re-fetch before counting */
+			cpu = dpd_cpu();
+			st = cpu ? &cpu->stats : NULL;
 			DPD_INC(st, ST_FLOW_WRITE);
 			return TC_ACT_UNSPEC;
 		}

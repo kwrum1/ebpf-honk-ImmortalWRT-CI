@@ -16,7 +16,10 @@ PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=ebpf
 
-PKG_BUILD_DEPENDS:=libbpf
+# dpdctl talks to the pinned maps with raw bpf(2) syscalls (src/dpd_bpf.h), so
+# there is no libbpf/libelf/zlib dependency to build against -- the loader is
+# tc(8). Keeping it that way means the control binary can be cross-built with
+# any musl toolchain and still runs on an image with a different libbpf.
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/bpf.mk
@@ -84,8 +87,7 @@ DPD_BPF_FLAGS := \
 
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-o $(PKG_BUILD_DIR)/dpdctl $(PKG_BUILD_DIR)/src/dpdctl.c \
-		-lbpf -lelf -lz
+		-o $(PKG_BUILD_DIR)/dpdctl $(PKG_BUILD_DIR)/src/dpdctl.c
 	$(CLANG) $(DPD_BPF_FLAGS) $(DPD_BPF_INCLUDES) \
 		-c $(PKG_BUILD_DIR)/src/dpd_fastpath.bpf.c \
 		-o $(PKG_BUILD_DIR)/dpd_fastpath.bpf.o

@@ -49,6 +49,10 @@ libbpf1
 # 行为断言（真的挂上 TCX、自证通过）在 build/qemu-closure.sh 里做。
 einat-ebpf
 firewall4
+# fullconenat-sonic 是**内核** full-cone 的开关（CONFIG_NF_NAT_FULLCONE），不是
+# 数据面 NAT：einat 才是 datapath 的 NAT，而这一包是 einat 停止/自检失败、
+# einat.init 把 masquerade 交回 fw4 时的回退路径（posture 里 fullcone=1 依赖它）。
+# 所以它在必备清单里；它的 LuCI 应用（luci-app-fullconenat-sonic）在禁用清单里。
 fullconenat-sonic
 dnsmasq-full
 # smartdns 做解析、dnsmasq 留作前端（ebpf/router-dns）。断言的是「包在镜像里」，

@@ -34,5 +34,17 @@
 			"acl": [ "luci-app-ebpf" ],
 			"uci": { "ebpf_mwan": true }
 		}
+	},
+	"admin/network/accel": {
+		"title": "\u52A0\u901F\u72B6\u6001",
+		"order": 72,
+		"action": {
+			"type": "view",
+			"path": "ebpf/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-ebpf" ],
+			"uci": { "dpd_fastpath": true }
+		}
 	}
 }

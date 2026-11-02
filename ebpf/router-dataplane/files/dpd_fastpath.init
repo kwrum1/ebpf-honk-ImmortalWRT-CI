@@ -53,6 +53,7 @@ start_service() {
 	config_get ttl global flow_ttl_ms 5000
 	config_get refresh global flow_refresh_ms 250
 	config_get ipv6 global ipv6 0
+	config_get mss global mss_clamp 1
 	config_get ifaces global interfaces 'lan'
 	config_get policy global policy 'allow_all'
 	config_get vlans global vlans ''
@@ -64,7 +65,7 @@ start_service() {
 
 	# What the datapath is allowed to do. Everything else below may lower this,
 	# never raise it.
-	emode="$(dpd_gate_mode "$mode")"
+	emode="$(dpd_gate_mode "$mode" "$enabled")"
 
 	# An upgraded image may leave pins whose map value layout no longer matches
 	# the object (dpd_stats became a block in ABI 9). libbpf then refuses to
@@ -73,7 +74,7 @@ start_service() {
 
 	# On restart/reload the program may already be loaded, so publish first;
 	# attaching below does not change these values.
-	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6"
+	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 	dpd_push_vlans "$policy" "$vlans"
 
 	for i in $ifaces; do
@@ -96,7 +97,9 @@ start_service() {
 			if dpd_mode_wants_accel "$emode" && ! dpd_chain_guard "$dev"; then
 				dpd_log "gate: downgrading to observe because of the filter chain on $dev"
 				emode=observe
-				dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6"
+				dpd_gate_publish "$mode" observe chain-guard \
+					"a bpf filter sits after ours (pref $DPD_PREF) on $dev, so the packet may be taken before we see it"
+				dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 			fi
 		else
 			pending="$pending $i"
@@ -104,7 +107,7 @@ start_service() {
 	done
 
 	# at least one map may exist now
-	[ "$nok" -gt 0 ] && dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6"
+	[ "$nok" -gt 0 ] && dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 
 	# An image upgraded in place can carry a stale uplink attachment: the older
 	# 90-dpd-fastpath attached the uplink for telemetry while observing, and a
@@ -129,6 +132,7 @@ start_service() {
 	logger -t dpd-fastpath \
 		"started: attach=$attach enabled=$enabled mode=$mode effective=$emode policy=$policy vlans='$vlans' redirect=$redirect ifaces='$ifaces' attached=$nok pending='$pending'"
 	logger -t dpd-fastpath "chain: $(dpd_chain_summary)"
+	dpd_status_publish
 }
 
 stop_service() {

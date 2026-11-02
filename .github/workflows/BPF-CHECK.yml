@@ -41,6 +41,9 @@ jobs:
           test -f ebpf/router-dataplane/src/dpd_fastpath.bpf.c
           echo "datapath: this repository's ebpf/ (firmware source is VIKINGYFY/immortalwrt)"
 
+      - name: Verify drift
+        run: bash Scripts/verify-drift.sh
+
       - name: Compile BPF object
         run: |
           SRC=ebpf/router-dataplane/src
@@ -59,7 +62,10 @@ jobs:
       - name: Compile dpdctl
         run: |
           SRC=ebpf/router-dataplane/src
-          cc -O2 -Wall -Wextra -I"$SRC" -o dpdctl "$SRC/dpdctl.c" -lbpf -lelf -lz
+          # dpdctl talks to the pinned maps with raw bpf(2) (src/dpd_bpf.h), so
+          # this needs no libbpf/libelf/zlib at all -- the same reason the package
+          # has no build dependency on them.
+          cc -O2 -Wall -Wextra -I"$SRC" -o dpdctl "$SRC/dpdctl.c"
           ./dpdctl version
 
       - name: Upload objects

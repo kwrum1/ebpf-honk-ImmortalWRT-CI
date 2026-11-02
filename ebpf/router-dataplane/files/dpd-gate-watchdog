@@ -48,6 +48,11 @@ while :; do
 	if dpd_has_uplink; then upl=1; else upl=0; fi
 	sig="$own$ein$eup$upl"
 
+	# Counters move even when the gate does not. Refresh the snapshot every
+	# tick so a status page that cannot exec dpdctl is at most one interval
+	# stale; it is a map read and a 2 KB write in tmpfs.
+	dpd_status_publish
+
 	[ "$sig" = "$sig_before" ] && continue
 	sig_before="$sig"
 	emode="$(dpd_gate_refresh_uci)"

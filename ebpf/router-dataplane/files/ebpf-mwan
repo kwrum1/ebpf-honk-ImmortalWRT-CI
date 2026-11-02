@@ -3,7 +3,10 @@
 #
 # Owns, for every configured uplink:
 #   * a routing table (100+i) with a default route via that uplink
-#   * an `ip rule fwmark 0x100+i lookup 100+i` at pref 40+i  (ahead of einat's
+#   * an `ip rule fwmark 0x100+i/0x0fffffff lookup 100+i` at pref 40+i (ahead of
+#     einat's rule), so the low 28 bits select the table and the high nibble
+#     stays available to the proxy/datapath layer (honk uses 0x2000_0000 and
+#     0x4000_0000). The mask is what makes preserving those bits safe.
 #     own 4787 rules, which sit at 100)
 #   * one einat instance with its own NAT port range
 #   * one entry in the dpd_wans BPF table (ifindex, mark, weight, health, MACs)
@@ -124,8 +127,8 @@ reconcile() {
 			flags=1
 		fi
 
-		ip rule del fwmark "$mark" 2>/dev/null
-		ip rule add fwmark "$mark" lookup "$table" pref "$pref"
+		ip rule del fwmark "$mark/0x0fffffff" 2>/dev/null
+		ip rule add fwmark "$mark/0x0fffffff" lookup "$table" pref "$pref"
 		[ -n "$health" ] || health="${gw:-1.1.1.1}"
 		# eight fields: the LuCI page and the health loop read exactly these.
 		# einat owns the NAT port ranges (it shifts its own base per instance);
@@ -176,7 +179,7 @@ reconcile() {
 cleanup_rules() {
 	local i=0
 	while [ $i -lt "$MAX_WAN" ]; do
-		ip rule del fwmark $((BASE_MARK + i)) 2>/dev/null
+		ip rule del fwmark $((BASE_MARK + i))/0x0fffffff 2>/dev/null
 		ip route flush table $((BASE_TABLE + i)) 2>/dev/null
 		i=$((i + 1))
 	done

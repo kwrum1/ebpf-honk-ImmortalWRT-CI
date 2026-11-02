@@ -40,6 +40,15 @@ DPD_SEC=classifier
 DPD_PREF=100
 DPD_CTL=/usr/sbin/dpdctl
 
+# Published state, kept next to each other so a status page, `logread` and CI
+# all read the same thing. gate    : 4 lines (requested/effective/code/reason)
+#                           gate.json: the same, for LuCI/scripts
+#                           status.json: `dpdctl status -j` snapshot (watchdog)
+DPD_RUN_DIR=/var/run/ebpf
+DPD_GATE_TEXT=$DPD_RUN_DIR/gate
+DPD_GATE_JSON=$DPD_RUN_DIR/gate.json
+DPD_STATUS_JSON=$DPD_RUN_DIR/status.json
+
 dpd_log() {
 	logger -t dpd-fastpath "$*" 2>/dev/null || true
 }
@@ -177,7 +186,7 @@ dpd_attach_logical() {
 # program is loaded yet: dpdctl then just fails and we retry after attaching.
 dpd_push_uci() {
 	local enabled="$1" mode="$2" redirect="$3" ttl="$4" policy="$5"
-	local refresh="$6" ipv6="$7"
+	local refresh="$6" ipv6="$7" mss="$8"
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
@@ -185,6 +194,7 @@ dpd_push_uci() {
 	"$DPD_CTL" set ttl "$ttl" 2>/dev/null
 	[ -n "$refresh" ] && "$DPD_CTL" set refresh "$refresh" 2>/dev/null
 	[ -n "$ipv6" ] && "$DPD_CTL" set ipv6 "$ipv6" 2>/dev/null
+	[ -n "$mss" ] && "$DPD_CTL" set mss "$mss" 2>/dev/null
 	[ -n "$policy" ] && "$DPD_CTL" set policy "$policy" 2>/dev/null
 	"$DPD_CTL" set enable "$enabled" 2>/dev/null
 	return 0
@@ -216,8 +226,11 @@ dpd_pins_compat() {
 	[ "$cur" = "$want" ] && return 0
 
 	dpd_log "ABI changed ($cur -> $want): dropping stale pinned maps"
+	# ABI 12 merged the counters into dpd_cfg's per-CPU value; older images
+	# may still have a dpd_stats pin, so remove it too if present.
 	rm -f /sys/fs/bpf/dpd_cfg /sys/fs/bpf/dpd_stats /sys/fs/bpf/dpd_flows \
-		/sys/fs/bpf/dpd_iface /sys/fs/bpf/dpd_vlans /sys/fs/bpf/dpd_wans 2>/dev/null
+		/sys/fs/bpf/dpd_iface /sys/fs/bpf/dpd_vlans \
+		/sys/fs/bpf/dpd_mtu /sys/fs/bpf/dpd_wans 2>/dev/null
 	return 0
 }
 
@@ -240,18 +253,101 @@ dpd_push_vlans() {
 	return 0
 }
 
-# The acceleration gate. $1 = the mode uci asked for. Echoes the mode that may
-# actually be used.
+# The acceleration gate. $1 = the mode uci asked for, $2 = enabled (0/1).
+# Echoes the mode that may actually be used and publishes the decision.
 #
 # Rationale (full version in src/dpd_common.h): taking a flow over skips
 # netfilter, so the return path of an accelerated flow exists only because einat
 # is the NAT and injects a blanket WAN->LAN accept into fw4. Without a
 # confirmed-attached einat the honest thing is to watch and not accelerate -- an
 # accelerator that silently eats replies is worse than no accelerator.
-dpd_gate_mode() {
-	local mode="$1" why="" r
+#
+# Why the decision is *published* and not only logged: the log tells you what
+# happened but not what is true now, and it is buried among a boot's worth of
+# other lines. /var/run/ebpf/gate.json is the answer to "why is nothing
+# accelerated?" that LuCI, `dpdctl status` and CI read. The shell globals
+# (DPD_GATE_CODE etc.) are best-effort: callers run this in $( ), where they do
+# not propagate -- the files are the interface.
+dpd_gate_code=ok
+dpd_gate_reason="accelerating"
+dpd_gate_req=""
+dpd_gate_eff=""
 
-	if dpd_mode_wants_accel "$mode"; then
+dpd_gate_publish() {
+	local req="$1" eff="$2" code="$3" reason="$4"
+	local uplink=0 ein=0 ein_up=0 honk=0 honk_p1=0 r
+
+	dpd_has_uplink && uplink=1
+	dpd_einat_attached
+	r=$?
+	[ "$r" = 0 ] && ein=1
+	dpd_einat_on_uplink
+	r=$?
+	[ "$r" = 0 ] && ein_up=1
+	dpd_honk_owns && honk=1
+	dpd_honk_passes_direct && honk_p1=1
+
+	mkdir -p "$DPD_RUN_DIR" 2>/dev/null
+	# 4-line text form first: a reader that only knows shell (or a human on
+	# the serial console) must not need a JSON parser.
+	printf '%s\n%s\n%s\n%s\n' "$req" "$eff" "$code" "$reason" \
+		> "$DPD_GATE_TEXT.tmp" 2>/dev/null &&
+		mv -f "$DPD_GATE_TEXT.tmp" "$DPD_GATE_TEXT" 2>/dev/null
+
+	# JSON form for LuCI. The reason is one ASCII line by construction, but
+	# quote/escape it anyway: a future reason with a quote must not produce
+	# invalid JSON that the page then has to guess about.
+	local rj
+	rj=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	{
+		printf '{\n'
+		printf '  "requested": "%s",\n' "$req"
+		printf '  "effective": "%s",\n' "$eff"
+		printf '  "code": "%s",\n' "$code"
+		printf '  "reason": "%s",\n' "$rj"
+		printf '  "at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+		printf '  "uptime_s": %s,\n' "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
+		printf '  "checks": { "uplink": %s, "einat": %s, ' \
+			"$([ "$uplink" = 1 ] && echo true || echo false)" \
+			"$([ "$ein" = 1 ] && echo true || echo false)"
+		printf '"einat_on_uplink": %s, "honk": %s, "honk_p1": %s }\n' \
+			"$([ "$ein_up" = 1 ] && echo true || echo false)" \
+			"$([ "$honk" = 1 ] && echo true || echo false)" \
+			"$([ "$honk_p1" = 1 ] && echo true || echo false)"
+		printf '}\n'
+	} > "$DPD_GATE_JSON.tmp" 2>/dev/null &&
+		mv -f "$DPD_GATE_JSON.tmp" "$DPD_GATE_JSON" 2>/dev/null
+
+	dpd_gate_code=$code
+	dpd_gate_reason=$reason
+	dpd_gate_req=$req
+	dpd_gate_eff=$eff
+}
+
+# Snapshot the counters for the status page. Written from the gate refresh and
+# from every watchdog tick, so a page without exec rights still reads fresh
+# numbers; when the page can exec dpdctl it ignores this file.
+dpd_status_publish() {
+	[ -x "$DPD_CTL" ] || return 0
+	mkdir -p "$DPD_RUN_DIR" 2>/dev/null
+	"$DPD_CTL" status -j > "$DPD_STATUS_JSON.tmp" 2>/dev/null &&
+		mv -f "$DPD_STATUS_JSON.tmp" "$DPD_STATUS_JSON" 2>/dev/null
+	return 0
+}
+
+dpd_gate_mode() {
+	local mode="$1" enabled="${2:-1}" why="" code="ok" r
+
+	if [ "$enabled" != "1" ]; then
+		code=uci-disabled
+		why="acceleration is disabled in uci (dpd_fastpath.global.enabled=0)"
+	elif [ "$mode" = "off" ]; then
+		code=mode-off
+		why="configured mode is 'off': the program still counts, but takes nothing over"
+	elif [ "$mode" = "observe" ]; then
+		code=mode-observe
+		why="configured mode is 'observe': telemetry only, by operator request"
+	elif dpd_mode_wants_accel "$mode"; then
 		# Acceleration is a *forwarding* optimisation: it redirects LAN->WAN
 		# flows out of the uplink. With no uplink at all (WAN down, no cable,
 		# no lease yet) there is nothing to accelerate, and the program must
@@ -261,34 +357,49 @@ dpd_gate_mode() {
 		# made every TCP/UDP connection *to the router* time out while ICMP
 		# still answered -- i.e. the box became unmanageable.
 		if ! dpd_has_uplink; then
+			code=no-uplink
 			why="no uplink (no WAN device or no default route), so there is no forwarding path to accelerate and hooking the LAN would only steal traffic addressed to the router itself"
 		fi
-		dpd_einat_attached
-		r=$?
-		case "$r" in
-		1) why="${why:-einat is not attached, so the reply of an accelerated flow would be dropped by fw4 (no conntrack state, no NAT)}" ;;
-		2) why="${why:-cannot tell whether einat is attached (no bpftool); refusing to accelerate blind}" ;;
-		esac
+		if [ "$code" = "ok" ]; then
+			dpd_einat_attached
+			r=$?
+			case "$r" in
+			1) code=no-einat
+			   why="einat is not attached, so the reply of an accelerated flow would be dropped by fw4 (no conntrack state, no NAT)" ;;
+			2) code=einat-unknown
+			   why="cannot tell whether einat is attached (no bpftool); refusing to accelerate blind" ;;
+			esac
+		fi
 		# and it must be on the uplink we actually steer into, not just
 		# somewhere on the box
-		if [ -z "$why" ]; then
+		if [ "$code" = "ok" ]; then
 			dpd_einat_on_uplink
 			r=$?
 			case "$r" in
-			1) why="einat is not attached on at least one uplink, so flows steered there would have untracked replies" ;;
-			2) why="cannot confirm einat on the uplinks (no bpftool or no uplink device)" ;;
+			1) code=einat-not-on-uplink
+			   why="einat is not attached on at least one uplink, so flows steered there would have untracked replies" ;;
+			2) code=einat-uplink-unknown
+			   why="cannot confirm einat on the uplinks (no bpftool or no uplink device)" ;;
 			esac
 		fi
-		if [ -z "$why" ] && dpd_honk_owns && ! dpd_honk_passes_direct; then
+		if [ "$code" = "ok" ] && dpd_honk_owns && ! dpd_honk_passes_direct; then
+			code=honk-unpatched
 			why="honk owns the LAN TCX and its direct exit is terminal (unpatched core), so the classic chain never runs -- the proxy is the datapath, and claiming a fastpath the counters cannot back would be a lie"
 		fi
+	else
+		code=mode-unknown
+		why="configured mode '$mode' is not one this datapath accelerates with"
 	fi
-	if [ -n "$why" ]; then
-		dpd_log "gate: mode '$mode' downgraded to 'observe': $why"
-		echo observe
+
+	if [ "$code" = "ok" ]; then
+		dpd_gate_publish "$mode" "$mode" ok "accelerating (mode $mode)"
+		echo "$mode"
 		return 0
 	fi
-	echo "$mode"
+	dpd_log "gate: mode '$mode' downgraded to 'observe' [$code]: $why"
+	dpd_gate_publish "$mode" observe "$code" "$why"
+	echo observe
+	return 0
 }
 
 # Is there a real uplink to accelerate towards? A device that exists, is not
@@ -325,7 +436,7 @@ dpd_has_uplink() {
 # einat invokes when the NAT comes or goes, and which an operator can run by
 # hand). Echoes the effective mode.
 dpd_gate_refresh_uci() {
-	local enabled mode redirect ttl policy vlans refresh ipv6 emode
+	local enabled mode redirect ttl policy vlans refresh ipv6 mss emode
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -334,17 +445,20 @@ dpd_gate_refresh_uci() {
 	config_get ttl global flow_ttl_ms 5000
 	config_get refresh global flow_refresh_ms 250
 	config_get ipv6 global ipv6 0
+	config_get mss global mss_clamp 1
 	config_get policy global policy 'allow_all'
 	config_get vlans global vlans ''
 
-	emode="$(dpd_gate_mode "$mode")"
-	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6"
+	emode="$(dpd_gate_mode "$mode" "$enabled")"
+	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" \
+		"$ipv6" "$mss"
 	dpd_push_vlans "$policy" "$vlans"
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,
 	# and the decision to attach is per event. An image upgraded in place can
 	# also carry the older behaviour, which attached the uplink for telemetry.
 	dpd_reconcile_uplink
+	dpd_status_publish
 	printf '%s' "$emode"
 }
 
@@ -665,14 +779,20 @@ dpd_status() {
 	[ "$any" = 1 ] || echo "  no interface has the program attached"
 	echo "--- who owns the TC hooks right now ---"
 	dpd_chain_summary
-	echo "--- gates ---"
-	dpd_mode_wants_accel "$(dpd_effective_mode_late)" && {
-		echo "  einat attached: $(dpd_einat_attached; case $? in 0) echo yes;; 1) echo NO;; *) echo unknown;; esac)"
-	} || echo "  mode does not accelerate"
+	echo "--- gate (published by the last evaluation) ---"
+	if [ -r "$DPD_GATE_TEXT" ]; then
+		printf '  requested   %s\n' "$(sed -n '1p' "$DPD_GATE_TEXT")"
+		printf '  effective   %s\n' "$(sed -n '2p' "$DPD_GATE_TEXT")"
+		printf '  code        %s\n' "$(sed -n '3p' "$DPD_GATE_TEXT")"
+		printf '  reason      %s\n' "$(sed -n '4p' "$DPD_GATE_TEXT")"
+	else
+		echo "  not published yet (run /usr/libexec/dpd-gate-refresh)"
+	fi
 	echo "--- dpd_cfg ---"
 	[ -x "$DPD_CTL" ] && "$DPD_CTL" show
 	echo "--- counters ---"
 	[ -x "$DPD_CTL" ] && "$DPD_CTL" stats
+	dpd_status_publish
 }
 
 # what the datapath is *actually* set to (the effective, gated mode)
