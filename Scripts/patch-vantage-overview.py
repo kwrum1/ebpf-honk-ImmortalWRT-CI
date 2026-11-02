@@ -1,62 +1,87 @@
-"""Add the eBPF acceleration line to the Vantage dashboard's System tile.
+"""Put the eBPF acceleration into the Vantage dashboard's health row.
 
-The theme is cloned from upstream at build time, so this is applied by
-Handles.sh when the image theme is vantage. It edits the view once and is
-idempotent (marker comment).
+The theme's landing page ("Everything looks healthy") renders one chip per
+health check (CPU, memory, storage, Wi-Fi, ...). This adds one more chip in
+exactly that style, fed by /var/run/ebpf/status.json:
 
-Layout: one compact line in the same tile and the same label/value style as
-"Storage", under it and above the firmware line:
+    eBPF       v4 86.7% · v6 45.0%
+               stateful · 1,204 / 80 流
 
-    eBPF   stateful · v4 1,204 (86.7%) · v6 80 (45.0%)
-
-Only the content comes from /var/run/ebpf/status.json; if the datapath is not
-present (non-eBPF images) the line shows a dash, which is still honest.
+The theme is cloned from upstream at build time, so Handles.sh applies this.
+Idempotent (marker comment).
 
 Usage: patch-vantage-overview.py <package dir containing luci-app-vantage>
 """
 import io
 import sys
 
-MARK = "/* ebpf-accel-tile */"
+MARK = "/* ebpf-health-chip */"
 
-EL_OLD = "\t\tel.fw = E('div', { 'class': 'vt-fw' });\n"
-EL_NEW = (EL_OLD +
-          "\t\t%s\n"
-          "\t\tel.ebpfVal = E('span', { 'class': 'vt-tn' });\n" % MARK)
+SIG_OLD = ("\t\tvar sig = JSON.stringify(this.st.health.map(function(c) { return [ c.level, c.title, c.value, c.reason, c.detail, c.client, c.page ]; }));\n")
+SIG_NEW = ("\t\tvar sig = JSON.stringify(this.st.health.map(function(c) { return [ c.level, c.title, c.value, c.reason, c.detail, c.client, c.page ]; }))\n"
+           "\t\t\t+ (this.ebpf ? JSON.stringify([ this.ebpf.cfg, this.ebpf.maps && this.ebpf.maps.flows,\n"
+           "\t\t\t\tthis.ebpf.stats && this.ebpf.stats.bytes_v4, this.ebpf.stats && this.ebpf.stats.bytes_hit_v4,\n"
+           "\t\t\t\tthis.ebpf.stats && this.ebpf.stats.bytes_v6, this.ebpf.stats && this.ebpf.stats.bytes_hit_v6 ]) : '');\n")
 
-TILE_OLD = "\t\t\tel.fw\n\t\t]));\n"
-TILE_NEW = ("\t\t\tE('div', { 'class': 'vt-sys-store' }, [\n"
-            "\t\t\t\tE('span', { 'class': 'vt-label' }, [ 'eBPF' ]),\n"
-            "\t\t\t\tel.ebpfVal\n"
-            "\t\t\t]),\n"
-            "\t\t\tel.fw\n\t\t]));\n")
+CHIP_OLD = ("\t\t}));\n"
+            "\t},\n"
+            "\n"
+            "\t/* ------------------------------------------------------------- hero */\n")
+CHIP_NEW = ("\t\t}));\n"
+            "\n"
+            "\t\t%s\n"
+            "\t\tif (this.ebpf) {\n"
+            "\t\t\tvar e = this.ebpf, es = e.stats || {}, ef = (e.maps || {}).flows || {};\n"
+            "\t\t\tvar mode = (e.cfg || {}).mode || '?';\n"
+            "\t\t\tvar accel = !!e.attached && (mode === 'stateful' || mode === 'stateless');\n"
+            "\t\t\tvar level = !e.attached ? 'warn' : (accel ? 'ok' : 'info');\n"
+            "\t\t\tvar ic = level === 'ok' ? 'check' : level === 'warn' ? 'warn' : 'info';\n"
+            "\t\t\tfunction pct(hit, all) {\n"
+            "\t\t\t\treturn all > 0 ? (hit * 100 / all).toFixed(1) + '%%' : '0.0%%';\n"
+            "\t\t\t}\n"
+            "\t\t\tvar value = e.attached\n"
+            "\t\t\t\t? 'v4 ' + pct(Number(es.bytes_hit_v4) || 0, Number(es.bytes_v4) || 0)\n"
+            "\t\t\t\t  + ' \\u00b7 v6 ' + pct(Number(es.bytes_hit_v6) || 0, Number(es.bytes_v6) || 0)\n"
+            "\t\t\t\t: '\\u672a\\u6302\\u8f7d';\n"
+            "\t\t\tvar reason = e.attached\n"
+            "\t\t\t\t? mode + ' \\u00b7 ' + (Number(ef.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t  + ' / ' + (Number(ef.v6) || 0).toLocaleString() + ' \\u6d41'\n"
+            "\t\t\t\t: '\\u6570\\u636e\\u9762\\u672a\\u52a0\\u8f7d';\n"
+            "\t\t\tthis.el.health.appendChild(E('div', { 'class': 'vt-chip vt-chip-' + level, 'role': 'listitem',\n"
+            "\t\t\t\t'title': 'eBPF ' + mode + ' \\u00b7 v4 ' + (Number(ef.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t\t+ ' (\\u5360\\u6bd4 ' + pct(Number(es.bytes_hit_v4) || 0, Number(es.bytes_v4) || 0) + ')'\n"
+            "\t\t\t\t\t+ ' \\u00b7 v6 ' + (Number(ef.v6) || 0).toLocaleString()\n"
+            "\t\t\t\t\t+ ' (\\u5360\\u6bd4 ' + pct(Number(es.bytes_hit_v6) || 0, Number(es.bytes_v6) || 0) + ')' }, [\n"
+            "\t\t\t\tE('span', { 'class': 'vt-chip-ico' }, [ icon(ic) ]),\n"
+            "\t\t\t\tE('span', { 'class': 'vt-chip-main' }, [\n"
+            "\t\t\t\t\tE('span', { 'class': 'vt-chip-top' }, [\n"
+            "\t\t\t\t\t\tE('span', { 'class': 'vt-chip-title' }, [ 'eBPF' ]),\n"
+            "\t\t\t\t\t\tE('span', { 'class': 'vt-chip-value' }, [ value ])\n"
+            "\t\t\t\t\t]),\n"
+            "\t\t\t\t\tE('span', { 'class': 'vt-chip-reason' }, [ reason ])\n"
+            "\t\t\t\t])\n"
+            "\t\t\t]));\n"
+            "\t\t}\n"
+            "\t},\n"
+            "\n"
+            "\t/* ------------------------------------------------------------- hero */\n") % MARK
 
-PAINT_OLD = ("\t\tpatch(el.fw, [\n"
+FETCH_OLD = ("\t\tpatch(el.fw, [\n"
              "\t\t\tE('span', {}, [ d.firmware || '' ]),\n"
              "\t\t\td.kernel ? E('span', { 'class': 'vt-hint' }, [ _('Kernel %s').format(d.kernel) ]) : ''\n"
              "\t\t]);\n\t},\n")
-PAINT_NEW = ("\t\tpatch(el.fw, [\n"
+FETCH_NEW = ("\t\tpatch(el.fw, [\n"
              "\t\t\tE('span', {}, [ d.firmware || '' ]),\n"
              "\t\t\td.kernel ? E('span', { 'class': 'vt-hint' }, [ _('Kernel %s').format(d.kernel) ]) : ''\n"
              "\t\t]);\n"
              "\n"
-             "\t\t/* eBPF acceleration: one compact line, same style as Storage */\n"
+             "\t\t/* feed the health row's eBPF chip (same file the status page uses) */\n"
+             "\t\tvar self = this;\n"
              "\t\tL.resolveDefault(callRead('/var/run/ebpf/status.json'), '').then(function(raw) {\n"
              "\t\t\tvar st = null;\n"
              "\t\t\ttry { st = JSON.parse(raw); } catch (e) {}\n"
-             "\t\t\tif (!st || !st.stats) {\n"
-             "\t\t\t\tel.ebpfVal.textContent = fmt.DASH;\n"
-             "\t\t\t\treturn;\n"
-             "\t\t\t}\n"
-             "\t\t\tvar f = (st.maps || {}).flows || {}, s = st.stats;\n"
-             "\t\t\tfunction pct(hit, all) {\n"
-             "\t\t\t\treturn all > 0 ? (hit * 100 / all).toFixed(1) + '%%' : '0.0%%';\n"
-             "\t\t\t}\n"
-             "\t\t\tel.ebpfVal.textContent = ((st.cfg || {}).mode || '?')\n"
-             "\t\t\t\t+ ' \\u00b7 v4 ' + (Number(f.v4) || 0).toLocaleString()\n"
-             "\t\t\t\t+ ' (' + pct(Number(s.bytes_hit_v4) || 0, Number(s.bytes_v4) || 0) + ')'\n"
-             "\t\t\t\t+ ' \\u00b7 v6 ' + (Number(f.v6) || 0).toLocaleString()\n"
-             "\t\t\t\t+ ' (' + pct(Number(s.bytes_hit_v6) || 0, Number(s.bytes_v6) || 0) + ')';\n"
+             "\t\t\tself.ebpf = st;\n"
+             "\t\t\tself.paintHealth();\n"
              "\t\t});\n"
              "\t},\n")
 
@@ -75,19 +100,19 @@ def main():
         print("patch-vantage-overview: already applied")
         return 0
 
-    for anchor, name in ((EL_OLD, "el.fw"), (TILE_OLD, "tile tail"),
-                         (PAINT_OLD, "paintSystem tail")):
+    for anchor, name in ((SIG_OLD, "health signature"), (CHIP_OLD, "health tail"),
+                         (FETCH_OLD, "paintSystem tail")):
         if anchor not in src:
             print("patch-vantage-overview: anchor for %s not found in %s"
                   % (name, path), file=sys.stderr)
             return 1
 
-    src = src.replace(EL_OLD, EL_NEW, 1)
-    src = src.replace(TILE_OLD, TILE_NEW, 1)
-    src = src.replace(PAINT_OLD, PAINT_NEW, 1)
+    src = src.replace(SIG_OLD, SIG_NEW, 1)
+    src = src.replace(CHIP_OLD, CHIP_NEW, 1)
+    src = src.replace(FETCH_OLD, FETCH_NEW, 1)
 
     io.open(path, "w", encoding="utf-8").write(src)
-    print("patch-vantage-overview: added the eBPF line to %s" % path)
+    print("patch-vantage-overview: added the eBPF health chip to %s" % path)
     return 0
 
 

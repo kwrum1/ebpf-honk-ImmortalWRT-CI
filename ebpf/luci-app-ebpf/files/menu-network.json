@@ -7,44 +7,44 @@
 			"path": "smartdns/smartdns"
 		},
 		"depends": {
-			"acl": [ "luci-app-smartdns" ],
-			"uci": { "smartdns": true }
+			"acl": [
+				"luci-app-smartdns"
+			],
+			"uci": {
+				"smartdns": true
+			}
 		}
 	},
 	"admin/network/proxy": {
-		"title": "\u4EE3\u7406",
+		"title": "\u4ee3\u7406",
 		"order": 71,
 		"action": {
 			"type": "view",
 			"path": "honk/overview"
 		},
 		"depends": {
-			"acl": [ "luci-app-honk" ],
-			"uci": { "honk": true }
+			"acl": [
+				"luci-app-honk"
+			],
+			"uci": {
+				"honk": true
+			}
 		}
 	},
 	"admin/network/mwan": {
-		"title": "\u591A WAN \u8D1F\u8F7D",
+		"title": "\u591a WAN \u8d1f\u8f7d",
 		"order": 73,
 		"action": {
 			"type": "view",
 			"path": "ebpf/mwan"
 		},
 		"depends": {
-			"acl": [ "luci-app-ebpf" ],
-			"uci": { "ebpf_mwan": true }
-		}
-	},
-	"admin/network/accel": {
-		"title": "\u52A0\u901F\u72B6\u6001",
-		"order": 72,
-		"action": {
-			"type": "view",
-			"path": "ebpf/status"
-		},
-		"depends": {
-			"acl": [ "luci-app-ebpf" ],
-			"uci": { "dpd_fastpath": true }
+			"acl": [
+				"luci-app-ebpf"
+			],
+			"uci": {
+				"ebpf_mwan": true
+			}
 		}
 	}
 }

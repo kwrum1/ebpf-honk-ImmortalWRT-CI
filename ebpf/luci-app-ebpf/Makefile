@@ -23,8 +23,6 @@ define Package/luci-app-ebpf/description
     * Network -> 防火墙    (five-tuple port control for IPv4 and IPv6 on top of
                             fw4; firewall.ebpf999 always blocks unsolicited
                             inbound and is not exposed in the UI)
-    * Network -> 加速状态  (live eBPF fastpath status: effective mode, why the
-                            gate downgraded, takeover counters, MSS clamp)
     * Network -> DNS       (SmartDNS, the only resolver; it owns :53)
     * Network -> 代理      (honk)
     * Network -> DHCP      (stock page, dnsmasq half hidden, odhcpd only)
@@ -44,7 +42,6 @@ define Package/luci-app-ebpf/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/ebpf
 	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/firewall.js $(1)/www/luci-static/resources/view/ebpf/firewall.js
 	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/mwan.js $(1)/www/luci-static/resources/view/ebpf/mwan.js
-	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/status.js $(1)/www/luci-static/resources/view/ebpf/status.js
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/99-luci-ebpf-trim $(1)/etc/uci-defaults/99-luci-ebpf-trim
 	$(INSTALL_DIR) $(1)/etc/init.d
