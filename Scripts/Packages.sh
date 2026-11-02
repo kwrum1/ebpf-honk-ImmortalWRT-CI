@@ -32,6 +32,7 @@ UPDATE_PACKAGE() {
 	local PKG_SPECIAL=$4
 	local PKG_LIST=("$PKG_NAME" $5)  # 第5个参数为自定义名称列表
 	local REPO_NAME=${PKG_REPO#*/}
+	local REPO_PATH="./package/$REPO_NAME"
 
 	echo " "
 
@@ -39,7 +40,7 @@ UPDATE_PACKAGE() {
 	for NAME in "${PKG_LIST[@]}"; do
 		# 查找匹配的目录
 		echo "Search directory: $NAME"
-		local FOUND_DIRS=$(find ../feeds/luci/ ../feeds/packages/ -maxdepth 3 -type d -iname "*$NAME*" 2>/dev/null)
+		local FOUND_DIRS=$(find ./feeds/luci/ ./feeds/packages/ -maxdepth 3 -type d -iname "*$NAME*" 2>/dev/null)
 
 		# 删除找到的目录
 		if [ -n "$FOUND_DIRS" ]; then
@@ -53,14 +54,12 @@ UPDATE_PACKAGE() {
 	done
 
 	# 克隆 GitHub 仓库
-	git clone --depth=1 --single-branch --branch $PKG_BRANCH "https://github.com/$PKG_REPO.git"
+	git clone --depth=1 --single-branch --branch $PKG_BRANCH "https://github.com/$PKG_REPO.git" $REPO_PATH
 
 	# 处理克隆的仓库
 	if [[ "$PKG_SPECIAL" == "pkg" ]]; then
-		find ./$REPO_NAME/*/ -maxdepth 3 -type d -iname "*$PKG_NAME*" -prune -exec cp -rf {} ./ \;
-		rm -rf ./$REPO_NAME/
-	elif [[ "$PKG_SPECIAL" == "name" ]]; then
-		mv -f $REPO_NAME $PKG_NAME
+		find $REPO_PATH/*/ -maxdepth 3 -type d -iname "*$PKG_NAME*" -prune -exec cp -rf {} ./package \;
+		rm -rf $REPO_PATH
 	fi
 }
 
@@ -88,8 +87,8 @@ UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg"
 # kenzok8/openwrt-honk URL 改成实际的 release 目录（asset 发布在 kwrum1 这边）。
 fetch_honk_stage() {
 	local core rel_json base stage prov doona
-	[ -d ./honk ] || return 0
-	core=$(sed -n 's/^CORE_COMMIT:=//p' ./honk/Makefile 2>/dev/null | head -1)
+	[ -d ./package/honk ] || return 0
+	core=$(sed -n 's/^CORE_COMMIT:=//p' ./package/honk/Makefile 2>/dev/null | head -1)
 	[ -n "$core" ] || return 0
 	rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
@@ -113,30 +112,30 @@ fetch_honk_stage() {
 		return 0
 	fi
 	base="${stage%/*}/"
-	if ! curl -fsSL -o ./honk/generated-stage.mk "$stage"; then
+	if ! curl -fsSL -o ./package/honk/generated-stage.mk "$stage"; then
 		echo "!! honk: could not download $stage" >&2
 		return 0
 	fi
-	sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./honk/generated-stage.mk
+	sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${base}|" ./package/honk/generated-stage.mk
 
 	prov=$(pick_from generated-provenance.json generated-provenance.json)
 	if [ -n "$prov" ] && [ "$prov" != "null" ]; then
-		curl -fsSL -o ./honk/generated-provenance.json "$prov" || true
+		curl -fsSL -o ./package/honk/generated-provenance.json "$prov" || true
 	fi
 
 	doona=$(pick_from generated-doona-stage.mk generated-doona-stage.mk)
-	if [ -n "$doona" ] && [ "$doona" != "null" ] && [ -d ./luci-app-honk ]; then
-		if curl -fsSL -o ./luci-app-honk/generated-doona-stage.mk "$doona"; then
+	if [ -n "$doona" ] && [ "$doona" != "null" ] && [ -d ./package/luci-app-honk ]; then
+		if curl -fsSL -o ./package/luci-app-honk/generated-doona-stage.mk "$doona"; then
 			# doona lives in the release that carries it (source-*), not in
 			# core-p1, so rewrite to *its* directory, not the core's.
-			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${doona%/*}/|" ./luci-app-honk/generated-doona-stage.mk
+			sed -i "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=${doona%/*}/|" ./package/luci-app-honk/generated-doona-stage.mk
 		fi
 	fi
 
 	echo "honk: stage assets <- ${base}"
-	echo "honk: PKG_SOURCE_URL=$(sed -n 's/^PKG_SOURCE_URL:=//p' ./honk/generated-stage.mk | head -1)"
+	echo "honk: PKG_SOURCE_URL=$(sed -n 's/^PKG_SOURCE_URL:=//p' ./package/honk/generated-stage.mk | head -1)"
 	# 早失败：HEAD 一下 x86_64 资产，省得编译 1.5 小时才发现 404。
-	_probe="${base}$(sed -n 's/^HONK_ASSET_X86_64:=//p' ./honk/generated-stage.mk | head -1)"
+	_probe="${base}$(sed -n 's/^HONK_ASSET_X86_64:=//p' ./package/honk/generated-stage.mk | head -1)"
 	if curl -fsL -I --connect-timeout 10 --max-time 30 "$_probe" >/dev/null 2>&1; then
 		echo "honk: core asset reachable"
 	else
@@ -186,15 +185,15 @@ X86|ROCKCHIP)
 	fi
 
 	echo " "
-	rm -rf ./ebpf
-	mkdir -p ./ebpf
-	cp -rf "$EBPF_ROOT"/. ./ebpf/
-	find ./ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+	rm -rf ./package/ebpf
+	mkdir -p ./package/ebpf
+	cp -rf "$EBPF_ROOT"/. ./package/ebpf/
+	find ./package/ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
 		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
 
 	# Provenance: hash the exact source directory that is compiled, not the
 	# one we intended to copy.
-	DPD_SRC_SHA=$(find ./ebpf -type f \( -name '*.c' -o -name '*.h' \) -print0 |
+	DPD_SRC_SHA=$(find ./package/ebpf -type f \( -name '*.c' -o -name '*.h' \) -print0 |
 		sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
 	echo "ebpf datapath installed into package/ (from $EBPF_ROOT)"
 	echo "ebpf datapath src sha256: $DPD_SRC_SHA"
@@ -207,8 +206,8 @@ X86|ROCKCHIP)
 	# release is missing, the failure used to surface ~30 minutes later as a bare
 	# 404 from the OpenWrt download helper. Check the asset now (seconds) and say
 	# what to do about it. Only a definite 404 is fatal; a network hiccup is not.
-	EINAT_URL=$(sed -n 's|^PKG_SOURCE_URL:=\(.*\)|\1|p' ./ebpf/einat-ebpf/Makefile | head -n 1)
-	EINAT_ASSET=$(sed -n 's|^[[:space:]]*EINAT_ASSET:=\(einat-[^[:space:]]*\)|\1|p' ./ebpf/einat-ebpf/Makefile | head -n 1)
+	EINAT_URL=$(sed -n 's|^PKG_SOURCE_URL:=\(.*\)|\1|p' ./package/ebpf/einat-ebpf/Makefile | head -n 1)
+	EINAT_ASSET=$(sed -n 's|^[[:space:]]*EINAT_ASSET:=\(einat-[^[:space:]]*\)|\1|p' ./package/ebpf/einat-ebpf/Makefile | head -n 1)
 	if [ -n "$EINAT_URL" ] && [ -n "$EINAT_ASSET" ]; then
 		EINAT_CODE=$(curl -s -o /dev/null -w '%{http_code}' -L --connect-timeout 10 --retry 2 \
 			"$EINAT_URL/$EINAT_ASSET" 2>/dev/null || echo 000)

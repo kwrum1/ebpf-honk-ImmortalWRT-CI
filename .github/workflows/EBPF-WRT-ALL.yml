@@ -30,7 +30,7 @@ on:
         type: string
       TEST:
         description: 'Config-only run (no image)'
-        default: 'false'
+        default: false
         required: false
         type: boolean
 
