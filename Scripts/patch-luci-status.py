@@ -1,17 +1,18 @@
-"""Add one eBPF row to LuCI's System status card, right after CPU usage.
+"""Add a two-line eBPF summary to LuCI's System status card, after CPU usage.
 
 The homepage is luci-mod-status's view/status/index.js, which requires every
 file in view/status/include/. We do NOT add a new section and we do NOT replace
-the card: this edits the existing 10_system.js so the datapath shows up as one
-more line next to Load Average / CPU usage, the way vendor PPE/NSS builds do.
+the card: this edits the existing 10_system.js so the datapath shows up under
+Load Average / CPU usage, the way vendor PPE/NSS builds do.
 
-The row is a single cell spanning both columns. Its value carries three groups
-(engine, flows, takeover share) and must not wrap, which the normal 33%/67%
-label/value split cannot guarantee; the right padding keeps the text off the
-card edge.
+Layout: the "eBPF acceleration" label cell spans two rows and is vertically
+centred; the two rows to its right are right-aligned and carry
+
+    acceleration engine: stateful
+    flows: [v4: n | v6: n]   takeover share: [v4: % | v6: %]
 
 Idempotent (marker comment). Fails loudly when the anchors move, so an upstream
-change shows up in CI instead of silently dropping the row.
+change shows up in CI instead of silently dropping the rows.
 
 Usage: patch-luci-status.py <build-tree-root>
 """
@@ -22,24 +23,21 @@ MARK = "/* ebpf-status-row */"
 
 HELPER = """
 %s
-/* One line for the status card, next to CPU usage, with the engine and both
- * numbers laid out horizontally: the engine mode (stateful/stateless/observe),
- * active flows, and the share of traffic the fastpath took over (bytes, not
- * packets: a packet ratio overstates the few large segments of a bulk flow).
- * The two counters are split by address family and each share is a share of
- * that family's own traffic, so a v6-heavy or v4-heavy box does not look
- * wrong. Reads the snapshot the gate watchdog writes, so the status page needs
- * no exec rights. */
+/* Summary for the status card: the engine mode, the active flow count and the
+ * share of traffic the fastpath took over (bytes, not packets: a packet ratio
+ * overstates the few large segments of a bulk flow). The counters are split by
+ * address family and each share is a share of that family's own traffic, so a
+ * v6-heavy or v4-heavy box does not look wrong. Reads the snapshot the gate
+ * watchdog writes, so the status page needs no exec rights. */
 var _ebpf_raw = null, _ebpf_val = null;
 
 function ebpf_status(raw) {
 	if (raw === _ebpf_raw && _ebpf_val)
 		return _ebpf_val;
 
-	var out = '\\u2014';
+	var out = { engine: '?', flows: '\\u2014', share: '\\u2014' };
 	try {
 		var st = JSON.parse(raw), s = st.stats || {}, f = (st.maps || {}).flows || {};
-		var mode = (st.cfg || {}).mode || '?';
 		var n4 = Number(f.v4) || 0, n6 = Number(f.v6) || 0;
 		var b4 = Number(s.bytes_v4) || 0, b6 = Number(s.bytes_v6) || 0;
 		var h4 = Number(s.bytes_hit_v4) || 0, h6 = Number(s.bytes_hit_v6) || 0;
@@ -51,13 +49,11 @@ function ebpf_status(raw) {
 			return '[v4: ' + v4 + ' | v6: ' + v6 + ']';
 		}
 
-		out = '\\u52a0\\u901f\\u5f15\\u64ce\\uff1a' + mode
-			+ '  |  \\u52a0\\u901f\\u6d41\\uff1a'
-			+ pair(n4.toLocaleString(), n6.toLocaleString())
-			+ '  |  \\u52a0\\u901f\\u5360\\u6bd4\\uff1a'
-			+ pair(pct(h4, b4), pct(h6, b6));
+		out.engine = (st.cfg || {}).mode || '?';
+		out.flows = pair(n4.toLocaleString(), n6.toLocaleString());
+		out.share = pair(pct(h4, b4), pct(h6, b6));
 	}
-	catch (e) { /* datapath not loaded yet: keep the placeholder */ }
+	catch (e) { /* datapath not loaded yet: keep the placeholders */ }
 
 	_ebpf_raw = raw;
 	_ebpf_val = out;
@@ -81,20 +77,28 @@ ROWS_OLD = (
     "\t\t}\n"
 )
 
-# Full-width row: white-space:nowrap keeps the three groups on one line, the
-# right padding reserves the space the user asked for, and colspan=2 gives it
-# the whole card instead of 67% of it.
+# Two rows, right-aligned, with the label cell spanning both and centred
+# vertically. Right padding keeps the numbers off the card edge.
 ROWS_ADD = (
     "\n"
-    "\t\t/* ebpf-status-row: one full-width line under CPU usage. The value\n"
-    "\t\t * has three groups and must not wrap, so it cannot use the 33/67\n"
-    "\t\t * label/value columns above. */\n"
+    "\t\t/* ebpf-status-row: a two-line summary under CPU usage. The label\n"
+    "\t\t * spans both rows; the values are right-aligned so the numbers sit\n"
+    "\t\t * in the same column instead of running into the card edge. */\n"
+    "\t\tvar ebpf = ebpf_status(data[8]);\n"
+    "\n"
     "\t\ttable.appendChild(E('tr', { 'class': 'tr' }, [\n"
-    "\t\t\tE('td', { 'class': 'td left', 'colspan': '2',\n"
-    "\t\t\t          'style': 'white-space:nowrap;padding-right:24px' }, [\n"
-    "\t\t\t\tE('span', { 'style': 'margin-right:12px' }, [ _('eBPF \\u52a0\\u901f') ]),\n"
-    "\t\t\t\tebpf_status(data[8])\n"
-    "\t\t\t])\n"
+    "\t\t\tE('td', { 'class': 'td left', 'rowspan': '2',\n"
+    "\t\t\t          'style': 'vertical-align:middle' }, [ _('eBPF \\u52a0\\u901f') ]),\n"
+    "\t\t\tE('td', { 'class': 'td',\n"
+    "\t\t\t          'style': 'text-align:right;padding-right:24px' },\n"
+    "\t\t\t  [ _('\\u52a0\\u901f\\u5f15\\u64ce') + '\\uff1a' + ebpf.engine ])\n"
+    "\t\t]));\n"
+    "\n"
+    "\t\ttable.appendChild(E('tr', { 'class': 'tr' }, [\n"
+    "\t\t\tE('td', { 'class': 'td',\n"
+    "\t\t\t          'style': 'text-align:right;padding-right:24px' },\n"
+    "\t\t\t  [ _('\\u52a0\\u901f\\u6d41') + '\\uff1a' + ebpf.flows\n"
+    "\t\t\t    + '\\u3000\\u3000' + _('\\u52a0\\u901f\\u5360\\u6bd4') + '\\uff1a' + ebpf.share ])\n"
     "\t\t]));\n"
 )
 
@@ -131,7 +135,7 @@ def main():
     src = src.replace(marker, HELPER + marker, 1)
 
     io.open(path, "w", encoding="utf-8").write(src)
-    print("patch-luci-status: added the eBPF row to %s" % path)
+    print("patch-luci-status: added the eBPF rows to %s" % path)
     return 0
 
 
