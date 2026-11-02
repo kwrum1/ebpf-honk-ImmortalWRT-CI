@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ebpf
-PKG_VERSION:=0.6.0
+PKG_VERSION:=0.7.0
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=ebpf
@@ -45,6 +45,8 @@ define Package/luci-app-ebpf/install
 	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/firewall.js $(1)/www/luci-static/resources/view/ebpf/firewall.js
 	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/mwan.js $(1)/www/luci-static/resources/view/ebpf/mwan.js
 	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/ebpf/status.js $(1)/www/luci-static/resources/view/ebpf/status.js
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/status/include
+	$(INSTALL_DATA) ./files/htdocs/luci-static/resources/view/status/include/15_ebpf.js $(1)/www/luci-static/resources/view/status/include/15_ebpf.js
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/99-luci-ebpf-trim $(1)/etc/uci-defaults/99-luci-ebpf-trim
 	$(INSTALL_DIR) $(1)/etc/init.d
