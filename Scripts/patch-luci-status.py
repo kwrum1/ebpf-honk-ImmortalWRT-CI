@@ -17,10 +17,11 @@ MARK = "/* ebpf-status-row */"
 
 HELPER = """
 %s
-/* One line for the status card, next to CPU usage, with both numbers laid out
- * horizontally and split by address family: active flows, and the share of
- * traffic the fastpath took over (bytes, not packets: a packet ratio
- * overstates the few large segments of a bulk flow). Each share is a share of
+/* One line for the status card, next to CPU usage, with the engine and both
+ * numbers laid out horizontally: the engine mode (stateful/stateless/observe),
+ * active flows, and the share of traffic the fastpath took over (bytes, not
+ * packets: a packet ratio overstates the few large segments of a bulk flow).
+ * The two counters are split by address family and each share is a share of
  * that family's own traffic, so a v6-heavy or v4-heavy box does not look
  * wrong. Reads the snapshot the gate watchdog writes, so the status page needs
  * no exec rights. */
@@ -33,6 +34,7 @@ function ebpf_status(raw) {
 	var out = '\\u2014';
 	try {
 		var st = JSON.parse(raw), s = st.stats || {}, f = (st.maps || {}).flows || {};
+		var mode = (st.cfg || {}).mode || '?';
 		var n4 = Number(f.v4) || 0, n6 = Number(f.v6) || 0;
 		var b4 = Number(s.bytes_v4) || 0, b6 = Number(s.bytes_v6) || 0;
 		var h4 = Number(s.bytes_hit_v4) || 0, h6 = Number(s.bytes_hit_v6) || 0;
@@ -44,7 +46,9 @@ function ebpf_status(raw) {
 			return '[v4: ' + v4 + ' | v6: ' + v6 + ']';
 		}
 
-		out = '\\u52a0\\u901f\\u6d41\\uff1a' + pair(n4.toLocaleString(), n6.toLocaleString())
+		out = '\\u52a0\\u901f\\u5f15\\u64ce\\uff1a' + mode
+			+ '  |  \\u52a0\\u901f\\u6d41\\uff1a'
+			+ pair(n4.toLocaleString(), n6.toLocaleString())
 			+ '  |  \\u52a0\\u901f\\u5360\\u6bd4\\uff1a'
 			+ pair(pct(h4, b4), pct(h6, b6));
 	}
