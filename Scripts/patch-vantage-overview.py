@@ -142,6 +142,22 @@ def main():
     except FileNotFoundError:
         pass
 
+    # 3) let the dashboard read the status file. /var/run is a symlink to
+    #    /tmp/run and rpcd matches the canonical path, so grant both.
+    acl = (root.rstrip("/") + "/luci-app-vantage/root/usr/share/rpcd/"
+           "acl.d/luci-app-vantage.json")
+    try:
+        import json
+        d = json.load(io.open(acl, encoding="utf-8"))
+        file_acl = d["luci-app-vantage"]["read"].setdefault("file", {})
+        for p in ("/var/run/ebpf/status.json", "/tmp/run/ebpf/status.json"):
+            file_acl[p] = ["read"]
+        io.open(acl, "w", encoding="utf-8", newline="\n").write(
+            json.dumps(d, ensure_ascii=False, indent="\t") + "\n")
+        print("patch-vantage-overview: status.json readable by the dashboard")
+    except (FileNotFoundError, KeyError):
+        pass
+
     return 0
 
 
