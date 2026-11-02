@@ -54,4 +54,4 @@ jobs:
       WRT_BRANCH: ${{ matrix.BRANCH }}
       WRT_SOURCE: ${{ matrix.SOURCE }}
       WRT_PACKAGE: ${{ inputs.PACKAGE }}
-      WRT_TEST: ${{ inputs.TEST }}
+      WRT_TEST: ${{ inputs.TEST || false }}
