@@ -49,6 +49,15 @@ if [ -d *"luci-app-aurora-config"* ]; then
 	cd $PKG_PATH && echo "theme-aurora has been fixed!"
 fi
 
+# Add the eBPF acceleration line to the Vantage dashboard's System tile (the
+# theme's own overview page). Only when this image really uses that theme.
+if [[ "${WRT_THEME}" == "vantage" && -d ./luci-app-vantage ]]; then
+	if ! python3 "$GITHUB_WORKSPACE/Scripts/patch-vantage-overview.py" "$PKG_PATH"; then
+		echo "!! vantage: could not add the eBPF line (overview.js anchors drifted?)" >&2
+		exit 1
+	fi
+fi
+
 #修改mini-diskmanager菜单位置
 if [ -d *"luci-app-mini-diskmanager"* ]; then
 	echo " " && cd ./luci-app-mini-diskmanager/
