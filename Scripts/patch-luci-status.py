@@ -41,11 +41,11 @@ function ebpf_status(raw) {
 			return all > 0 ? (hit * 100 / all).toFixed(1) + '%%' : '0.0%%';
 		}
 		function pair(v4, v6) {
-			return 'v4 ' + v4 + ' \\u00b7 v6 ' + v6;
+			return '[v4: ' + v4 + ' | v6: ' + v6 + ']';
 		}
 
-		out = '\\u52a0\\u901f\\u6d41 ' + pair(n4.toLocaleString(), n6.toLocaleString())
-			+ '\\u3000|\\u3000\\u52a0\\u901f\\u5360\\u6bd4 '
+		out = '\\u52a0\\u901f\\u6d41\\uff1a' + pair(n4.toLocaleString(), n6.toLocaleString())
+			+ '  |  \\u52a0\\u901f\\u5360\\u6bd4\\uff1a'
 			+ pair(pct(h4, b4), pct(h6, b6));
 	}
 	catch (e) { /* datapath not loaded yet: keep the placeholder */ }
