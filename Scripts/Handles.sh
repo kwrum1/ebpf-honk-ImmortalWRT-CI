@@ -3,6 +3,11 @@
 # Copyright (C) 2026 kwrum1
 
 PKG_PATH="$GITHUB_WORKSPACE/wrt/package/"
+# The build core calls this from the wrt root (Packages.sh needs that); every
+# block below uses package/-relative paths. Anchor the cwd here once, otherwise
+# every edit is silently skipped (that is how the aurora nav fell back to
+# mega-menu after the upstream merge changed the caller's cwd).
+cd "$PKG_PATH" || exit 1
 
 #预置HomeProxy数据
 if [ -d *"homeproxy"* ]; then
@@ -511,3 +516,7 @@ if [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
 		exit 1
 	fi
 fi
+
+# Leave the caller where it was: the next step (prepare-i2c-tools.sh) expects
+# to run from the wrt root.
+cd "$GITHUB_WORKSPACE/wrt"
