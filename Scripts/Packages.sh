@@ -72,6 +72,8 @@ UPDATE_PACKAGE() {
 # 默认主题：aurora（Settings.sh 里的 WRT_THEME=aurora 要与之对应）
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
+# Default UI: the same theme the upstream firmware now ships (vantage).
+UPDATE_PACKAGE "vantage" "anothaDev/luci-theme-vantage" "main"
 
 # Honk core + LuCI/Doona UI. One branch for every target: `main` carries the
 # ebpf datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +

@@ -140,7 +140,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('端口控制') ]),
-				table,
+				E('div', { 'style': 'overflow-x:auto;-webkit-overflow-scrolling:touch' }, [ table ]),
 				E('div', { 'class': 'cbi-section-create' }, [
 					E('button', {
 						'class': 'cbi-button cbi-button-add',

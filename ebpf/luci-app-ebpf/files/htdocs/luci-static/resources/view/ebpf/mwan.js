@@ -216,7 +216,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('WAN 接口') ]),
-				table,
+				E('div', { 'style': 'overflow-x:auto;-webkit-overflow-scrolling:touch' }, [ table ]),
 				E('div', { 'class': 'cbi-section-create' }, [
 					E('button', {
 						'class': 'cbi-button cbi-button-add',
@@ -304,7 +304,7 @@ return view.extend({
 
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td' }, [
-				ifn ? label : E('em', { style: 'color:#c44' }, [ label ])
+				ifn ? label : E('em', { 'class': 'label danger' }, [ label ])
 			]),
 			E('td', { 'class': 'td' }, [ sec.bandwidth || '—' ]),
 			E('td', { 'class': 'td' }, [ sec.weight || '1' ]),
