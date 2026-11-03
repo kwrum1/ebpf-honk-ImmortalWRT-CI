@@ -52,9 +52,9 @@ fi
 # Add the eBPF acceleration chip to the Vantage dashboard's health row (the
 # theme's own overview page). X86/ROCKCHIP only: the other targets have no dpd
 # and use the theme exactly as upstream ships it.
-if [[ "${WRT_THEME}" == "vantage" && -d ./luci-app-vantage ]] &&
+if [[ "${WRT_THEME}" == "vantage" && -d ./luci-theme-vantage/luci-app-vantage ]] &&
    [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
-	if ! python3 "$GITHUB_WORKSPACE/Scripts/patch-vantage-overview.py" "$PKG_PATH"; then
+	if ! python3 "$GITHUB_WORKSPACE/Scripts/patch-vantage-overview.py" "$PKG_PATH/luci-theme-vantage"; then
 		echo "!! vantage: could not add the eBPF line (overview.js anchors drifted?)" >&2
 		exit 1
 	fi
