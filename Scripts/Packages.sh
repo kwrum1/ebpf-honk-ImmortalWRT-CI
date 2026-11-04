@@ -73,7 +73,9 @@ UPDATE_PACKAGE() {
 UPDATE_PACKAGE "aurora" "eamonxg/luci-theme-aurora" "master"
 UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
 # Default UI: the same theme the upstream firmware now ships (vantage).
-UPDATE_PACKAGE "vantage" "anothaDev/luci-theme-vantage" "main"
+# Pinned to the tag our dashboard patch is verified against: `main` gained
+# new health fields (c.list) and the patch anchors moved, which broke CI.
+UPDATE_PACKAGE "vantage" "anothaDev/luci-theme-vantage" "v1.0.12"
 
 # Honk core + LuCI/Doona UI. One branch for every target: `main` carries the
 # ebpf datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +
