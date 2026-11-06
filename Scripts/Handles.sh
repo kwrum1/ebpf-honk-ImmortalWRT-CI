@@ -183,6 +183,17 @@ if [ -f "$F4_PATCH" ]; then
 	sed -i -E '/^\+[[:space:]]*option[[:space:]]+flow_offloading(_hw)?[[:space:]]+1$/ s/1$/0/' "$F4_PATCH"
 	echo "firewall4 默认配置: flow_offloading / flow_offloading_hw -> 0"
 	grep -n 'flow_offloading' "$F4_PATCH" | sed 's/^/  /'
+	# LuCI router-tool has its own first-boot defaults (auto.json) and applies
+	# them *after* the uci-defaults: every profile there sets flow_offloading=1,
+	# which undoes 95-firewall-no-offload and breaks fw4 on these images.
+	RT_JSON="$GITHUB_WORKSPACE/wrt/package/emortal/luci-app-router-tool/root/usr/share/router-tool/auto.json"
+	if [ -f "$RT_JSON" ]; then
+		sed -i 's/"flow_offloading": "1"/"flow_offloading": "0"/g; s/"flow_offloading_hw": "1"/"flow_offloading_hw": "0"/g' "$RT_JSON"
+		echo "router-tool: auto.json offload defaults -> 0"
+		grep -c '"flow_offloading": "0"' "$RT_JSON"
+	else
+		echo "!! router-tool: auto.json not found; offload defaults may come back" >&2
+	fi
 	# 兜底：如果还留着 1，就是上游换了写法、这条 sed 没生效。静默跳过是
 	# 最坏的结果（offload 开着，einat/dpd 的数据面被绕过），所以必须报出来。
 	if grep -qE '^\+[[:space:]]*option[[:space:]]+flow_offloading(_hw)?[[:space:]]+1$' "$F4_PATCH"; then
