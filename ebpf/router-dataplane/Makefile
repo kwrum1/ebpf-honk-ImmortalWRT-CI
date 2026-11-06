@@ -108,10 +108,12 @@ define Package/dpd-fastpath/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
+	$(INSTALL_DIR) $(1)/etc/sysctl.d
 
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dpdctl $(1)/usr/sbin/dpdctl
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/dpd_fastpath.bpf.o $(1)/lib/bpf/
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/abi $(1)/usr/lib/dpd/abi
+	$(INSTALL_DATA) ./files/99-ebpf-accel.conf $(1)/etc/sysctl.d/99-ebpf-accel.conf
 
 	$(INSTALL_BIN) ./files/dpd_fastpath.init $(1)/etc/init.d/dpd-fastpath
 

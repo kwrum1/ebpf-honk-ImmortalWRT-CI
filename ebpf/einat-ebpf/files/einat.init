@@ -207,6 +207,30 @@ einat_attached() {
 # Deliberately no uci write here: a transient failure (bpffs not mounted yet,
 # a race on a slow boot) must not disable the datapath permanently. The service
 # is only stopped for this boot and the next boot retries.
+# This fw4 reads per-network-interface data for package firewall rules, not
+# the service-level procd data that einat_fw_data() emits, so the "disable
+# masquerade" override never reached the rendered ruleset (verified on the
+# live PPPoE box: srcnat_wan still held the masquerade rule). Set the wan zone
+# directly instead. einat is the NAT: if fw4 also masquerades, the accelerated
+# downlink never sees einat's ingress DNAT and dpd cannot accelerate it.
+#
+# Only write when the value actually changes, so a normal boot does not
+# rewrite /etc/config/firewall.
+einat_set_masq() {
+	local v="$1" s cur changed=0
+
+	for s in $(uci -q show firewall 2>/dev/null |
+		sed -n 's/^firewall\.\(@zone\[[0-9]*\]\)=zone$/\1/p'); do
+		[ "$(uci -q get "firewall.$s.name")" = "wan" ] || continue
+		cur="$(uci -q get "firewall.$s.masq")"
+		[ "$cur" = "$v" ] && continue
+		uci -q set "firewall.$s.masq=$v"
+		changed=1
+	done
+	[ "$changed" = 1 ] && uci -q commit firewall
+	return 0
+}
+
 einat_verify() {
 	local dev="$1" timeout="${2:-15}" i=0 rc
 
@@ -231,9 +255,12 @@ einat_verify() {
 
 	logger -t einat "verify: FAILED -- no TCX link on $dev after ${timeout}s, the eBPF NAT is not running"
 	logger -t einat "verify: falling back to fw4 masquerade for this boot (einat stays enabled; next boot retries)"
-	# stop_service reloads fw4, which drops the injected nat/accept overrides
-	# and brings the zone masquerade rule back. procd respawn is not a problem:
-	# /etc/init.d/einat stop removes the instance properly.
+	# stop_service reloads fw4, which brings the zone masquerade rule back.
+	# procd respawn is not a problem: /etc/init.d/einat stop removes the
+	# instance properly. Put the uci value back too, or the next boot would
+	# start with masq=0 and no NAT if einat fails again before its own
+	# start_service had a chance to set it.
+	einat_set_masq 1
 	sleep 1
 	/etc/init.d/einat stop
 }
@@ -458,32 +485,31 @@ start_service() {
 		idx=$((idx + 1))
 	done
 
-	# fw4 only reads the overrides when IT reloads, and it is started well before
-	# us (START=19 vs 60). Reload in the background so procd is not held up, and
-	# let the hotplug hook handle the case where a WAN only appears later
-	# (pppoe-wan). One data block covers every uplink.
-	if einat_fw_data; then
-		( sleep 3; logger -t einat "reloading firewall so the nat/accept overrides are picked up"; fw4 -q reload ) &
-		for dev in $EINAT_DEVS; do
-			( einat_verify "$dev" "$verify_timeout" ) &
-		done
-	fi
+	# einat is the NAT: turn fw4's masquerade off before the reload below.
+	# (fw4 on this image ignores the service-level procd data, so writing the
+	# zone is what actually takes effect; the procd data is kept because older
+	# fw4 versions read it.)
+	einat_set_masq 0
+	einat_fw_data || true
+
+	# fw4 only reads the overrides when IT reloads, and it is started well
+	# before us (START=19 vs 60). Reload in the background so procd is not
+	# held up, and let the hotplug hook handle the case where a WAN only
+	# appears later (pppoe-wan).
+	( sleep 3; logger -t einat "reloading firewall so the nat/accept overrides are picked up"; fw4 -q reload ) &
+	for dev in $EINAT_DEVS; do
+		( einat_verify "$dev" "$verify_timeout" ) &
+	done
 }
 
 stop_service() {
 	logger -t einat "stopping"
 
-	# Symmetry with start_service: the masquerade suppression lives in fw4's
-	# *rendered ruleset*, and fw4 only re-reads the procd data when it reloads.
-	# So stopping the service without a reload would leave the accept rules in
-	# srcnat_wan with nothing doing NAT at all -- the LAN would simply lose the
-	# internet until the next reboot or a manual `fw4 reload`. That is exactly
-	# the kind of "I turned the eBPF NAT off and everything broke" trap worth
-	# closing here rather than in the documentation.
-	#
-	# Harmless when the service was never up (nothing to restore), and it does
-	# not loop: einat's reload triggers are `einat` and `network`, not
-	# `firewall`.
+	# Symmetry with start_service: put the zone masquerade back and reload so
+	# fw4 rebuilds srcnat_wan with it. Without this a stopped einat would
+	# leave masq=0 and no NAT at all -- the LAN would lose the internet until
+	# the next reboot or a manual `fw4 reload`.
+	einat_set_masq 1
 	( sleep 2; logger -t einat "reloading firewall so masquerade comes back"; fw4 -q reload ) &
 
 	# ... and the accelerator has to stop immediately: from this moment on fw4's

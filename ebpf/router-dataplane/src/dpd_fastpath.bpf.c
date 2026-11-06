@@ -767,16 +767,6 @@ static __always_inline __u16 dpd_emit_class(struct dpd_config *cfg,
 	return 0;
 }
 
-/* Per-ifindex flags taught by `dpdctl ifaces`. 0 when the device was never
- * taught, which is the safe answer: the callers only use it to decide whether
- * the egress is a ppp/tun (L3) device. */
-static __always_inline __u32 dpd_iface_flags(__u32 ifindex)
-{
-	struct dpd_iface_val *p = bpf_map_lookup_elem(&dpd_iface, &ifindex);
-
-	return p ? p->flags : 0;
-}
-
 /* Emit with a class that was already decided (hit path and stateless path). */
 static __always_inline int dpd_emit_cached(struct __sk_buff *skb, __u32 ifindex,
 					   __u16 fflags, const __u8 *dmac,
@@ -1103,16 +1093,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
-			/* Uplink on a ppp/tun egress is held on the slow path until
-			 * einat's egress SNAT is verified for TC-redirected packets
-			 * (on the live PPPoE box the accelerated ACKs are emitted
-			 * but the connection stalls, while everything is fine with
-			 * the same flows on the stack). Must run before the TTL
-			 * decrement, or the stack would decrement a second time. */
-#ifndef DPD_TEST_UPLINK
-			if (!l3in && (fval->flags & DPD_FLOW_F_L3OUT))
-				return TC_ACT_UNSPEC;
-#endif
+			/* NOTE: the uplink acceleration is safe only with
+			 * net.netfilter.nf_conntrack_tcp_be_liberal=1. The
+			 * accelerated ACKs never reach conntrack, so its TCP window
+			 * goes stale; the server's replies then arrive "out of
+			 * window" and fw4 would mark them INVALID and REJECT them
+			 * with a RST. The router-dataplane init and sysctl.d set it. */
 
 			/* ABI 13: this flow arrives tagged, so every packet
 			 * carries a tag that has to go before the L2 emit.
@@ -1310,15 +1296,6 @@ int dpd_fastpath(struct __sk_buff *skb)
 		if (cfg->mode != DPD_MODE_STATEFUL) {
 			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
 
-			/* ppp/tun egress uplink: keep it on the stack, see the
-			 * hit-path note. Before the TTL decrement. */
-#ifndef DPD_TEST_UPLINK
-			if (!l3in &&
-			    (dpd_iface_flags(fib.ifindex) &
-			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
-				return TC_ACT_UNSPEC;
-#endif
-
 			/* ABI 13: a tagged frame can only be taken over when the
 			 * egress is plain Ethernet (L2 class); then the tag has
 			 * to be popped before the header is rewritten. A stacked
@@ -1413,15 +1390,6 @@ int dpd_fastpath(struct __sk_buff *skb)
 			 */
 			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
 				return TC_ACT_UNSPEC;
-
-			/* ppp/tun egress uplink: do not learn it, see the
-			 * hit-path note. Downlink (l3in) is unaffected. */
-#ifndef DPD_TEST_UPLINK
-			if (!l3in &&
-			    (dpd_iface_flags(fib.ifindex) &
-			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
-				return TC_ACT_UNSPEC;
-#endif
 
 			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
 

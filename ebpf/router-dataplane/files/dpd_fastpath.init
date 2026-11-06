@@ -63,6 +63,13 @@ start_service() {
 		return 0
 	fi
 
+	# Established flows accelerated by dpd skip netfilter, so conntrack never
+	# sees the client's ACKs and its TCP window goes stale. The server's
+	# replies then look out-of-window and fw4 REJECTs them with a RST, which
+	# kills the flow after the first window. /etc/sysctl.d/99-ebpf-accel.conf
+	# covers boot; this covers an in-place upgrade and a service restart.
+	sysctl -w net.netfilter.nf_conntrack_tcp_be_liberal=1 >/dev/null 2>&1
+
 	# What the datapath is allowed to do. Everything else below may lower this,
 	# never raise it.
 	emode="$(dpd_gate_mode "$mode" "$enabled")"
