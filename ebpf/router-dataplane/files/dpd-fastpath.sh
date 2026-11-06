@@ -382,6 +382,10 @@ dpd_gate_mode() {
 			   why="cannot confirm einat on the uplinks (no bpftool or no uplink device)" ;;
 			esac
 		fi
+		if [ "$code" = "ok" ] && dpd_uplink_is_ppp; then
+			code=pppoe-unverified
+			why="point-to-point (PPPoE/PPTP/L2TP) uplink: the accelerated datapath is not validated there -- on a live PPPoE box it reset TLS handshakes and stalled transfers after ~56 KB, so the program only observes"
+		fi
 		if [ "$code" = "ok" ] && dpd_honk_owns && ! dpd_honk_passes_direct; then
 			code=honk-unpatched
 			why="honk owns the LAN TCX and its direct exit is terminal (unpatched core), so the classic chain never runs -- the proxy is the datapath, and claiming a fastpath the counters cannot back would be a lie"
@@ -425,6 +429,32 @@ dpd_has_uplink() {
 		down | lowerlayerdown | notpresent) continue ;;
 		esac
 		ip route show default 2>/dev/null | grep -q . && return 0
+	done
+	return 1
+}
+
+# Is the uplink a point-to-point (PPPoE/PPTP/L2TP) device? Its frames carry no
+# Ethernet destination MAC and the MTU is not 1500, and the accelerated
+# datapath has never been validated on it -- upstream's README lists "PPPoE
+# dial" under 未验证. On a live x86 PPPoE box (2026-11-06) stateful acceleration
+# broke exactly the way a bad fast path does: TLS handshakes were reset after
+# the client's Finished and downloads stalled after ~56 KB, while the same
+# traffic was perfect with dpd-fastpath stopped (einat still doing the NAT).
+# Refuse to take packets over on ppp until that is fixed and tested.
+#
+# The device may not exist yet when the init runs, so the gate is re-evaluated
+# on every ifup/hotplug; type 512 is ARPHRD_PPP, which also covers a ppp device
+# renamed to something that does not start with "ppp".
+dpd_uplink_is_ppp() {
+	local d t
+
+	for d in $(dpd_uplink_devs); do
+		[ -n "$d" ] || continue
+		case "$d" in
+		ppp*|pppoe*|pptp*|l2tp*) return 0 ;;
+		esac
+		t=$(cat "/sys/class/net/$d/type" 2>/dev/null)
+		[ "$t" = "512" ] && return 0
 	done
 	return 1
 }
