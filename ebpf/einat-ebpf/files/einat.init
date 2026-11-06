@@ -204,18 +204,21 @@ einat_attached() {
 # the LAN has no internet at all, and procd keeps respawning a program that
 # will never work. With it the box degrades to the stock fw4 path instead.
 #
-# Deliberately no uci write here: a transient failure (bpffs not mounted yet,
-# a race on a slow boot) must not disable the datapath permanently. The service
-# is only stopped for this boot and the next boot retries.
+# Deliberately no uci write for einat's own `enabled`: a transient failure
+# (bpffs not mounted yet, a race on a slow boot) must not disable the datapath
+# permanently. The service is only stopped for this boot and the next boot
+# retries.
+#
+# The wan-zone masq write below is the one exception: it is not a datapath
+# enable flag, it only says who owns NAT. It is written only when the value
+# actually changes, and the failure path puts it back to 1.
+#
 # This fw4 reads per-network-interface data for package firewall rules, not
 # the service-level procd data that einat_fw_data() emits, so the "disable
 # masquerade" override never reached the rendered ruleset (verified on the
 # live PPPoE box: srcnat_wan still held the masquerade rule). Set the wan zone
 # directly instead. einat is the NAT: if fw4 also masquerades, the accelerated
 # downlink never sees einat's ingress DNAT and dpd cannot accelerate it.
-#
-# Only write when the value actually changes, so a normal boot does not
-# rewrite /etc/config/firewall.
 einat_set_masq() {
 	local v="$1" s cur changed=0
 
