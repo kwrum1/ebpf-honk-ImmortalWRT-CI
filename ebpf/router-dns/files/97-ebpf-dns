@@ -46,56 +46,29 @@ uci -q set dhcp.@dnsmasq[0].noresolv='1'
 uci -q set dhcp.odhcpd.leasetrigger='/usr/libexec/router-dns-lease'
 uci -q commit dhcp
 
-# Upstreams, only when none are configured yet. These are DNS-over-TLS, not
-# plain UDP, and that is not a preference -- it is the only transport measured to
-# work while the transparent proxy is running.
-#
-# Measured 2026-10-18 (QEMU x86_64, honk 995a80cd, policy `dport(53) ->
-# direct(must)`): with honk owning the TC hooks, a *local* (router-originated) UDP
-# flow is not completed. A LAN client's COLD lookup failed ("Could not resolve
-# host"), `nslookup <name> 223.5.5.5` timed out, and `nslookup <name> 127.0.0.1`
-# (dnsmasq -> smartdns) timed out -- while a local TCP connection to the same
-# address answered normally (`curl http://223.5.5.5/` -> 404) and the client's
-# proxied flows worked. Forwarded traffic is fine, honk's own path is fine, the
-# router's own UDP is not. Proxying that UDP instead of letting it go direct did
-# not help either (policy B measured the same timeouts).
-#
-# A UDP upstream therefore leaves the box resolving nothing from cold: dnsmasq
-# and smartdns keep answering from cache until a TTL runs out, which is exactly
-# how a broken DNS plane looks healthy in any test that reuses a name.
-#
-# With DoT the same cold names resolve with honk running (www.smzdm.com /
-# www.dianping.com / www.zol.com.cn -> 200 through a LAN client), and DoT works
-# with honk stopped as well, so there is one transport for both states.
-#
-# smartdns races the two servers. To change them:
-#   uci show smartdns | grep @server
-#   uci delete smartdns.<section>
-#   uci commit smartdns && /etc/init.d/smartdns restart
-add_dot_upstream() {
-	section=$(uci -q add smartdns server) || return 0
-	# No quotes inside these values on purpose: uci stores them literally, so
-	# `uci set ...='1'` saves the string '1' (with quotes) and smartdns's init
-	# then compares `'tls'` against `tls`, falls back to udp, and the box only
-	# resolves from cache. Measured 2026-10-18 on the first image that shipped
-	# this block: `uci show` read smartdns.@server[0].type=''\''tls'\''' and
-	# smartdns.conf had no server-tls line at all.
-	uci -q set "smartdns.$section.enabled=1"
-	uci -q set "smartdns.$section.ip=$1"
-	uci -q set "smartdns.$section.type=tls"
-	uci -q set "smartdns.$section.port=853"
-	uci -q set "smartdns.$section.host_name=$2"
-}
-if [ -z "$(uci -q get smartdns.@server[0].ip)" ]; then
-	add_dot_upstream 223.5.5.5    dns.alidns.com	# AliDNS
-	add_dot_upstream 119.29.29.29 dot.pub		# DNSPod
-	# No plain-UDP entry is seeded here on purpose: plaintext upstreams are now
-	# derived at every boot/ifup from the resolvers netifd actually learned
-	# (see /usr/libexec/router-dns-sync). A hardcoded 223.5.5.5:53 was wrong on
-	# every network that filters public DNS -- the lab here only allows its own
-	# resolvers -- and it also hid the case where no upstream worked at all,
-	# because smartdns kept answering from cache until a TTL ran out.
+# Upstreams are shipped as custom.conf: Chinese domains over AliDNS/DNSPod
+# DoH, everything else over Cloudflare/Google DoH, with dual-stack IP
+# selection. Copy it over the package template (the file is a conffile, so a
+# kept config from an older image would otherwise survive forever).
+if [ -f /usr/share/router-dns/smartdns-custom.conf ]; then
+	cp -f /usr/share/router-dns/smartdns-custom.conf /etc/smartdns/custom.conf
 fi
+
+# Drop the server sections older images created (DoT and DHCP-derived): with
+# custom.conf carrying the DoH groups, any leftover default-group server would
+# race them, and the DHCP one may be a plaintext resolver.
+while :; do
+	s=$(uci -q show smartdns | sed -n 's/^smartdns\.\([^=]*\)=server$/\1/p' | head -1)
+	[ -n "$s" ] || break
+	uci -q delete "smartdns.$s"
+done
+# Let smartdns keep its default (yes) instead of writing "no".
+uci -q set smartdns.@smartdns[0].dualstack_ip_selection='1'
+
+# WAN must not inject plaintext resolvers into the upstream pool.
+uci -q set network.wan.peerdns='0'
+uci -q set network.wan6.peerdns='0'
+uci -q commit network
 
 # Retire the dnsmasq-front handover: a `/lan/` upstream on 127.0.0.1:6053 that
 # nothing listens on any more (dnsmasq has port 0). Kept out of every config
@@ -107,6 +80,13 @@ for s in $(uci -q get smartdns.@smartdns[0].server 2>/dev/null); do
 done
 
 uci -q commit smartdns
+
+# The image ships a snapshot of the CN domain list; refresh it weekly when the
+# device has a WAN (the updater keeps the old list on any failure).
+CRON=/etc/crontabs/root
+[ -f "$CRON" ] || : > "$CRON"
+grep -q router-dns-cn-update "$CRON" 2>/dev/null ||
+	echo '0 4 * * 1 /usr/libexec/router-dns-cn-update' >> "$CRON"
 
 # The package ships the init script but does not enable it.
 /etc/init.d/smartdns enable >/dev/null 2>&1

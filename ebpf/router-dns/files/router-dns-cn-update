@@ -1,0 +1,39 @@
+#!/bin/sh
+# Refresh the CN domain list used for the domestic/foreign split.
+#
+# Source: Loyalsoldier/v2ray-rules-dat, asset china-list.txt (geosite:cn as a
+# plain one-domain-per-line list). The image ships a snapshot, so a device with
+# no WAN still has a working split; this script only replaces it when the
+# download is plausible (non-empty and far more than a handful of lines).
+#
+# Runs weekly from /etc/crontabs/root (installed by 97-ebpf-dns) and can be run
+# by hand.
+
+URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/china-list.txt"
+DST=/etc/smartdns/domain-set/cn.list
+TMP=/tmp/cn.list.$$
+
+log() { logger -t router-dns "cn-list: $*"; }
+
+cleanup() { rm -f "$TMP"; }
+trap cleanup EXIT
+
+if command -v wget >/dev/null 2>&1; then
+	wget -q -T 20 -O "$TMP" "$URL" || { log "download failed"; exit 1; }
+elif command -v curl >/dev/null 2>&1; then
+	curl -fsSL --connect-timeout 20 -o "$TMP" "$URL" || { log "download failed"; exit 1; }
+else
+	log "no wget/curl"
+	exit 1
+fi
+
+lines=$(wc -l < "$TMP" 2>/dev/null || echo 0)
+if [ "${lines:-0}" -lt 10000 ]; then
+	log "refusing $lines lines (truncated or an error page)"
+	exit 1
+fi
+
+mv -f "$TMP" "$DST" || exit 1
+log "updated ($lines domains)"
+/etc/init.d/smartdns restart >/dev/null 2>&1
+exit 0

@@ -126,6 +126,11 @@ define Package/router-dns/install
 	$(INSTALL_BIN) ./files/honk-dns.sh $(1)/usr/libexec/router-honk-dns
 	$(INSTALL_BIN) ./files/router-dns-sync.sh $(1)/usr/libexec/router-dns-sync
 	$(INSTALL_BIN) ./files/router-dns-lease $(1)/usr/libexec/router-dns-lease
+	$(INSTALL_BIN) ./files/router-dns-cn-update $(1)/usr/libexec/router-dns-cn-update
+	$(INSTALL_DIR) $(1)/usr/share/router-dns
+	$(INSTALL_DATA) ./files/smartdns-custom.conf $(1)/usr/share/router-dns/smartdns-custom.conf
+	$(INSTALL_DIR) $(1)/etc/smartdns/domain-set
+	$(INSTALL_DATA) ./files/domain-set/cn.list $(1)/etc/smartdns/domain-set/cn.list
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/router_dns.config $(1)/etc/config/router_dns
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
