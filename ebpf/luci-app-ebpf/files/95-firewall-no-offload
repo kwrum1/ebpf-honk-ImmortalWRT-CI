@@ -1,0 +1,13 @@
+#!/bin/sh
+# The eBPF images do not use nft flow offload: the fast path is dpd/einat, and
+# this kernel ships no kmod-nft-offload. If firewall4's default patch still
+# enables it, fw4 aborts while loading the ruleset, the LAN input chain never
+# appears, and 192.168.10.1 stops answering (the front end is fine, the packets
+# are dropped).
+#
+# This runs at S10, before firewall (S19), so the very first boot is covered
+# even if the build-time patch edit was skipped.
+uci -q set firewall.@defaults[0].flow_offloading='0'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+uci -q commit firewall
+exit 0

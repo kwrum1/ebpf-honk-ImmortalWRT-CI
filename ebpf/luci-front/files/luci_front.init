@@ -55,7 +55,7 @@ front_make_cert() {
 		logger -t luci-front "no $crt and no openssl; cannot create a certificate"
 		return 1
 	}
-	cn=$(uci -q get network.lan.ipaddr)
+	cn=$(uci -q get network.lan.ipaddr | cut -d/ -f1)
 	[ -n "$cn" ] || cn=$(hostname)
 	mkdir -p "${crt%/*}" "${key%/*}"
 	umask 077
