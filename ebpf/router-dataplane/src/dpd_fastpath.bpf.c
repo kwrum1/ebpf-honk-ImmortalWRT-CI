@@ -1103,14 +1103,16 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
-			/* Uplink on a ppp/tun egress: keep it on the slow path
-			 * until einat's egress SNAT is verified to apply to
-			 * TC-redirected packets (it was not on the live PPPoE
-			 * box). Downlink is safe and stays accelerated. This must
-			 * run before the TTL decrement, otherwise the stack would
-			 * decrement it a second time. */
+			/* Uplink on a ppp/tun egress is held on the slow path until
+			 * einat's egress SNAT is verified for TC-redirected packets
+			 * (on the live PPPoE box the accelerated ACKs are emitted
+			 * but the connection stalls, while everything is fine with
+			 * the same flows on the stack). Must run before the TTL
+			 * decrement, or the stack would decrement a second time. */
+#ifndef DPD_TEST_UPLINK
 			if (!l3in && (fval->flags & DPD_FLOW_F_L3OUT))
 				return TC_ACT_UNSPEC;
+#endif
 
 			/* ABI 13: this flow arrives tagged, so every packet
 			 * carries a tag that has to go before the L2 emit.
@@ -1310,10 +1312,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 
 			/* ppp/tun egress uplink: keep it on the stack, see the
 			 * hit-path note. Before the TTL decrement. */
+#ifndef DPD_TEST_UPLINK
 			if (!l3in &&
 			    (dpd_iface_flags(fib.ifindex) &
 			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
 				return TC_ACT_UNSPEC;
+#endif
 
 			/* ABI 13: a tagged frame can only be taken over when the
 			 * egress is plain Ethernet (L2 class); then the tag has
@@ -1376,7 +1380,8 @@ int dpd_fastpath(struct __sk_buff *skb)
 
 				ep = bpf_map_lookup_elem(&dpd_iface, &eif);
 				if (ep && (ep->flags & (DPD_IF_F_NOARP |
-							DPD_IF_F_POINTOPOINT)))
+							DPD_IF_F_POINTOPOINT)) &&
+				    fkey.family == AF_INET)
 					nh4 = ep->gw4;
 				ret = dpd_emit_cached(skb, fib.ifindex, cls,
 						      fib.dmac, fib.smac, nh4, st);
@@ -1411,10 +1416,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 
 			/* ppp/tun egress uplink: do not learn it, see the
 			 * hit-path note. Downlink (l3in) is unaffected. */
+#ifndef DPD_TEST_UPLINK
 			if (!l3in &&
 			    (dpd_iface_flags(fib.ifindex) &
 			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
 				return TC_ACT_UNSPEC;
+#endif
 
 			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
 
@@ -1455,7 +1462,10 @@ int dpd_fastpath(struct __sk_buff *skb)
 				if (ep && (ep->flags & (DPD_IF_F_NOARP |
 							DPD_IF_F_POINTOPOINT))) {
 					nv.flags |= DPD_FLOW_F_L3OUT;
-					if (ep->gw4) {
+					/* nh4 is an IPv4 nexthop: a v6 packet
+					 * must not carry it, bpf_out_neigh_v6()
+					 * drops on a non-AF_INET6 nh. */
+					if (ep->gw4 && fkey.family == AF_INET) {
 						nv.nh4 = ep->gw4;
 						nv.flags |= DPD_FLOW_F_NH4;
 					}
@@ -1551,12 +1561,17 @@ int dpd_fastpath(struct __sk_buff *skb)
 			 * black-holed the session).
 			 *
 			 * Guards: untagged frame (a VLAN tag would have to be pushed
-			 * again), forward emit is the L2 class (we have both MACs), and
-			 * the egress really differs from the ingress. The reverse entry
-			 * starts with prime=0, so its first packet still walks the
-			 * stack -- conntrack sees the reply before we take over.
+			 * again), forward emit is the L2 class (we have both MACs),
+			 * the ingress is Ethernet (a ppp/tun L3 skb has no MAC pair
+			 * to swap -- reading one from the IP header produced a
+			 * reverse entry with garbage MACs, which is what broke
+			 * IPv6 the moment the WAN hook started accelerating), and
+			 * the egress really differs from the ingress. The reverse
+			 * entry starts with prime=0, so its first packet still
+			 * walks the stack -- conntrack sees the reply before we
+			 * take over.
 			 */
-			if (fkey.family == AF_INET6 && !tagged &&
+			if (fkey.family == AF_INET6 && !tagged && !l3in &&
 			    (nv.flags & DPD_FLOW_F_L2) &&
 			    nv.egress_ifindex != skb->ifindex) {
 				struct dpd_flow_key rk = fkey;
