@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 
 #include "dpd_common.h"
@@ -431,7 +432,8 @@ static int cmd_ifaces(int argc, char **argv)
 	for (int i = 0; i < argc; i++) {
 		char path[256];
 		uint32_t ifindex = if_nametoindex(argv[i]);
-		uint32_t v = 0, mtu = 0;
+		struct dpd_iface_val val = {};
+		uint32_t mtu = 0;
 		FILE *f;
 		unsigned long flags = 0;
 		unsigned long iflink = 0;
@@ -469,12 +471,22 @@ static int cmd_ifaces(int argc, char **argv)
 			fclose(f);
 		}
 
-		if (flags & IFF_UP)		v |= DPD_IF_F_UP;
-		if (flags & IFF_NOARP)		v |= DPD_IF_F_NOARP;
-		if (flags & IFF_POINTOPOINT)	v |= DPD_IF_F_POINTOPOINT;
-		if (iflink && iflink != ifindex) v |= DPD_IF_F_LOWER;
+		if (flags & IFF_UP)		val.flags |= DPD_IF_F_UP;
+		if (flags & IFF_NOARP)		val.flags |= DPD_IF_F_NOARP;
+		if (flags & IFF_POINTOPOINT)	val.flags |= DPD_IF_F_POINTOPOINT;
+		if (iflink && iflink != ifindex) val.flags |= DPD_IF_F_LOWER;
 
-		if (dpd_bpf_map_update_elem(fd, &ifindex, &v, BPF_ANY)) {
+		/* Preserve the nexthop another call may have taught; `dpdctl gw`
+		 * is a separate command because it runs after the interface
+		 * exists and the default route has been installed. */
+		{
+			struct dpd_iface_val old = {};
+
+			if (dpd_bpf_map_lookup_elem(fd, &ifindex, &old) == 0)
+				val.gw4 = old.gw4;
+		}
+
+		if (dpd_bpf_map_update_elem(fd, &ifindex, &val, BPF_ANY)) {
 			fprintf(stderr, "dpdctl: update dpd_iface[%s]: %s\n",
 				argv[i], strerror(errno));
 			return 1;
@@ -484,15 +496,58 @@ static int cmd_ifaces(int argc, char **argv)
 			fprintf(stderr, "dpdctl: update dpd_mtu[%s]: %s\n",
 				argv[i], strerror(errno));
 
-		printf("%-16s ifindex=%-4u mtu=%-5u flags=0x%08x%s%s%s%s\n",
-		       argv[i], ifindex, mtu, v,
-		       v & DPD_IF_F_UP ? " UP" : "",
-		       v & DPD_IF_F_NOARP ? " NOARP" : "",
-		       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
-		       v & DPD_IF_F_LOWER ? " LOWER" : "");
+		printf("%-16s ifindex=%-4u mtu=%-5u flags=0x%08x%s%s%s%s gw=%s\n",
+		       argv[i], ifindex, mtu, val.flags,
+		       val.flags & DPD_IF_F_UP ? " UP" : "",
+		       val.flags & DPD_IF_F_NOARP ? " NOARP" : "",
+		       val.flags & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
+		       val.flags & DPD_IF_F_LOWER ? " LOWER" : "",
+		       val.gw4 ? inet_ntoa(*(struct in_addr *)&val.gw4) : "-");
 	}
 	if (mfd >= 0)
 		close(mfd);
+	return 0;
+}
+
+/*
+ * Teach the IPv4 nexthop of one egress. The fast path hands it to
+ * bpf_redirect_neigh() so the helper does not have to run
+ * ip_route_output_flow() per packet -- on a router whose LAN source only
+ * resolves with iif set (policy routing), that lookup returns -ENETUNREACH and
+ * the packet is freed after the program already said "redirect".
+ */
+static int cmd_gw(int argc, char **argv)
+{
+	struct dpd_iface_val v = {};
+	struct in_addr a;
+	uint32_t ifindex;
+	int fd;
+
+	if (argc < 2) {
+		fprintf(stderr, "usage: dpdctl gw <ifname> <ipv4-next-hop>\n");
+		return 1;
+	}
+	ifindex = if_nametoindex(argv[0]);
+	if (!ifindex) {
+		fprintf(stderr, "dpdctl: no such iface '%s'\n", argv[0]);
+		return 1;
+	}
+	if (inet_pton(AF_INET, argv[1], &a) != 1) {
+		fprintf(stderr, "dpdctl: not an IPv4 address: '%s'\n", argv[1]);
+		return 1;
+	}
+	fd = map_open("dpd_iface");
+	if (fd < 0)
+		return 1;
+	/* preserve flags: no entry yet means "not taught", which is fine */
+	dpd_bpf_map_lookup_elem(fd, &ifindex, &v);
+	v.gw4 = a.s_addr;
+	if (dpd_bpf_map_update_elem(fd, &ifindex, &v, BPF_ANY)) {
+		fprintf(stderr, "dpdctl: update dpd_iface[%s].gw4: %s\n",
+			argv[0], strerror(errno));
+		return 1;
+	}
+	printf("%-16s gw=%s\n", argv[0], argv[1]);
 	return 0;
 }
 
@@ -902,7 +957,8 @@ static int status_json(void)
 
 		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
 			for (;;) {
-				uint32_t v = 0, mtu = 0;
+				struct dpd_iface_val v = {};
+				uint32_t mtu = 0;
 
 				if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
 					if (mfd >= 0)
@@ -912,7 +968,10 @@ static int status_json(void)
 					json_string(ifname(k.ifindex));
 					printf(", \"ifindex\": %u, \"mtu\": %u, \"flags\": ",
 					       k.ifindex, mtu);
-					json_iface_flags(v);
+					json_iface_flags(v.flags);
+					printf(", \"gw4\": \"%s\"",
+					       v.gw4 ? inet_ntoa(*(struct in_addr *)&v.gw4)
+						     : "");
 					printf(" }");
 					first = 0;
 				}
@@ -1137,6 +1196,7 @@ static void usage(const char *argv0)
 		"  vlan add <id>|del <id>|list|flush\n"
 		"  stats                   per-reason counters (all cpus summed)\n"
 		"  ifaces <ifname>...      learn IFF_* flags and MTU into the maps\n"
+	"  gw <ifname> <ipv4>      set the nexthop used by the neigh emit\n"
 		"  flows [-a]              dump dpd_flows\n",
 		argv0);
 }
@@ -1163,6 +1223,8 @@ int main(int argc, char **argv)
 		return cmd_abi();
 	if (!strcmp(argv[1], "ifaces"))
 		return cmd_ifaces(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "gw"))
+		return cmd_gw(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "flows"))
 		return cmd_flows(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "version")) {

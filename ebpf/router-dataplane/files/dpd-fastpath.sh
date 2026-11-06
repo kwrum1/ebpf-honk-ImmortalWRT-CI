@@ -83,11 +83,22 @@ dpd_qdisc_ready() {
 # before the filter add silently did nothing, so the iface table stayed empty
 # and auto had no input at all.
 dpd_teach_iface() {
-	local dev="$1"
+	local dev="$1" gw=""
 
 	[ -x "$DPD_CTL" ] || return 1
 	[ -e "/sys/class/net/$dev" ] || return 1
 	"$DPD_CTL" ifaces "$dev" >/dev/null 2>&1
+	# A ppp/tun egress has no neighbour table, so the neigh emit needs an
+	# explicit nexthop: with params==NULL bpf_redirect_neigh() redoes
+	# ip_route_output_flow() per packet with flowi4_iif=0, and on this box's
+	# policy routing that lookup is -ENETUNREACH, i.e. every accelerated
+	# packet is silently freed (see struct dpd_iface_val in dpd_common.h).
+	# Re-taught on every ifup/ifupdate, so a PPPoE redial picks up the new
+	# peer address.
+	gw="$(ip -4 route show default dev "$dev" 2>/dev/null |
+		sed -n 's/.* via \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
+	[ -n "$gw" ] && "$DPD_CTL" gw "$dev" "$gw" >/dev/null 2>&1
+	return 0
 }
 
 # attach the program to $1 at DPD_PREF. Idempotent.
@@ -382,10 +393,6 @@ dpd_gate_mode() {
 			   why="cannot confirm einat on the uplinks (no bpftool or no uplink device)" ;;
 			esac
 		fi
-		if [ "$code" = "ok" ] && dpd_uplink_is_ppp; then
-			code=pppoe-unverified
-			why="point-to-point (PPPoE/PPTP/L2TP) uplink: the accelerated datapath is not validated there -- on a live PPPoE box it reset TLS handshakes and stalled transfers after ~56 KB, so the program only observes"
-		fi
 		if [ "$code" = "ok" ] && dpd_honk_owns && ! dpd_honk_passes_direct; then
 			code=honk-unpatched
 			why="honk owns the LAN TCX and its direct exit is terminal (unpatched core), so the classic chain never runs -- the proxy is the datapath, and claiming a fastpath the counters cannot back would be a lie"
@@ -429,32 +436,6 @@ dpd_has_uplink() {
 		down | lowerlayerdown | notpresent) continue ;;
 		esac
 		ip route show default 2>/dev/null | grep -q . && return 0
-	done
-	return 1
-}
-
-# Is the uplink a point-to-point (PPPoE/PPTP/L2TP) device? Its frames carry no
-# Ethernet destination MAC and the MTU is not 1500, and the accelerated
-# datapath has never been validated on it -- upstream's README lists "PPPoE
-# dial" under 未验证. On a live x86 PPPoE box (2026-11-06) stateful acceleration
-# broke exactly the way a bad fast path does: TLS handshakes were reset after
-# the client's Finished and downloads stalled after ~56 KB, while the same
-# traffic was perfect with dpd-fastpath stopped (einat still doing the NAT).
-# Refuse to take packets over on ppp until that is fixed and tested.
-#
-# The device may not exist yet when the init runs, so the gate is re-evaluated
-# on every ifup/hotplug; type 512 is ARPHRD_PPP, which also covers a ppp device
-# renamed to something that does not start with "ppp".
-dpd_uplink_is_ppp() {
-	local d t
-
-	for d in $(dpd_uplink_devs); do
-		[ -n "$d" ] || continue
-		case "$d" in
-		ppp*|pppoe*|pptp*|l2tp*) return 0 ;;
-		esac
-		t=$(cat "/sys/class/net/$d/type" 2>/dev/null)
-		[ "$t" = "512" ] && return 0
 	done
 	return 1
 }

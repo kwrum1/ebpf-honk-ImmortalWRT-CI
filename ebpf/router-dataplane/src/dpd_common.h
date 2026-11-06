@@ -172,7 +172,7 @@
  *      address family (ST_*_V4 / ST_*_V6) and the L2 shortcut has its own pair,
  *      so the status card can show "v4 / v6" for each number.
  */
-#define DPD_ABI_VERSION		14
+#define DPD_ABI_VERSION		15
 
 /* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */
 #define DPD_BPF_SECTION		"classifier"
@@ -355,6 +355,22 @@ enum dpd_stat_idx {
  * they keep using bpf_redirect_neigh(). Taught by `dpdctl ifaces`. */
 #define DPD_IF_F_LOWER		0x0008
 
+/* Per-ifindex value of dpd_iface (ABI 15). flags are the IFF_* capabilities
+ * taught by `dpdctl ifaces`; gw4 is the IPv4 next hop taught by `dpdctl gw`
+ * (network byte order, 0 = none).
+ *
+ * Why the nexthop is kept here: bpf_redirect_neigh() with params==NULL re-runs
+ * ip_route_output_flow() per packet with flowi4_iif left at 0. On a box whose
+ * LAN source only resolves with iif set (policy rules, as on the PPPoE home
+ * router this was found on) that lookup returns -ENETUNREACH and the packet is
+ * silently freed after the helper said "redirect". Passing the nexthop skips
+ * the route lookup entirely (ip_neigh_gw4 -> neigh_direct_output), which is
+ * both correct and cheaper. */
+struct dpd_iface_val {
+	__u32	flags;
+	__u32	gw4;
+};
+
 /* dpd_flow_val.flags: the emit class (see dpd_emit_class()). L2 = write the
  * header and bpf_redirect(); DEV = bpf_redirect(ifindex, 0) for a device with no
  * neighbour table (ppp/tunnel/NOARP); neither = bpf_redirect_neigh(). Stored in
@@ -376,6 +392,8 @@ enum dpd_stat_idx {
  * popped before the L2 emit (ABI 13). Learned only for flows whose egress is a
  * plain Ethernet device; a stacked egress is never learned. */
 #define DPD_FLOW_F_TAG		0x0010
+#define DPD_FLOW_F_NH4		0x0020	/* emit with this nh4 (ABI 15)	*/
+#define DPD_FLOW_F_L3OUT	0x0040	/* egress is ppp/tun (ABI 15)	*/
 
 /* dpd_flow_val.flags bits 8..15: how many packets of this direction have been
  * let through netfilter since the entry was learned (saturating). A hit is only
@@ -403,10 +421,11 @@ struct dpd_flow_key {
 };
 
 /*
- * Mode B flow value -- 24 bytes, and that size is part of the pinned-map ABI: a
- * bpf_map_update_elem() value that changed size makes libbpf refuse to reuse
- * /sys/fs/bpf/dpd_flows, i.e. `tc filter add` fails after an in-place upgrade
- * until the pin is removed. Keep it at 24.
+ * Mode B flow value -- 28 bytes since ABI 15 (24 before nh4), and that size is
+ * part of the pinned-map ABI: a bpf_map_update_elem() value that changed size
+ * makes libbpf refuse to reuse /sys/fs/bpf/dpd_flows, i.e. `tc filter add`
+ * fails after an in-place upgrade until the pin is removed. dpd_pins_compat()
+ * in files/dpd-fastpath.sh drops the pins when /usr/lib/dpd/abi changed.
  *
  * dmac/smac are the pair bpf_fib_lookup() filled in for this flow. Caching them
  * is what lets the hit path emit with bpf_redirect() instead of
@@ -430,6 +449,7 @@ struct dpd_flow_val {
 	__u16	wan;		/* low byte: 1-based dpd_wans index, 0 =
 				 * none; high byte: the cfg epoch this entry
 				 * was learned in (ABI 9)			*/
+	__u32	nh4;		/* ABI 15: IPv4 next hop for an L3 emit	*/
 };
 
 /* The epoch occupies the high byte of dpd_flow_val.wan; the index itself can

@@ -91,12 +91,13 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_flows SEC(".maps");
 
-/* per-ifindex L2 capabilities, filled in from userspace (IFF_NOARP & co) */
+/* per-ifindex L2 capabilities + IPv4 next hop, filled in from userspace
+ * (`dpdctl ifaces` / `dpdctl gw`); see struct dpd_iface_val. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 64);
 	__type(key, __u32);
-	__type(value, __u32);
+	__type(value, struct dpd_iface_val);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_iface SEC(".maps");
 
@@ -725,8 +726,8 @@ static __always_inline __u16 dpd_emit_class(struct dpd_config *cfg,
 					    __u32 ifindex, int no_neigh,
 					    __u8 l2_ok)
 {
+	struct dpd_iface_val *p;
 	__u32 flags = 0;
-	__u32 *p;
 
 	if (cfg->redirect == DPD_REDIR_FORCE_NEIGH)
 		return 0;
@@ -735,12 +736,19 @@ static __always_inline __u16 dpd_emit_class(struct dpd_config *cfg,
 
 	p = bpf_map_lookup_elem(&dpd_iface, &ifindex);
 	if (p)
-		flags = *p;
+		flags = p->flags;
 
 	/* ppp / tunnels / NOARP devices: there is no neighbour table and no L2
-	 * header to write, so bpf_redirect(ifindex) is the only emit. */
+	 * header to write, but there is still an L2 header on the frame we
+	 * hold. bpf_redirect() keeps it, so ppp_start_xmit() prepends the PPP
+	 * protocol to an Ethernet header and the BRAS drops every accelerated
+	 * packet (live PPPoE box, 2026-11-06: TLS reset after the client's
+	 * Finished, downloads stalled at ~56 KB). bpf_redirect_neigh() is the
+	 * right emit here: __bpf_redirect_neigh() does skb_pull(ETH_HLEN) and
+	 * skb_reset_network_header() before the route/neighbour step, and a
+	 * device without header_ops resolves to neigh_direct_output(). */
 	if (flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT))
-		return DPD_FLOW_F_DEV;
+		return 0;
 
 	/* NO_NEIGH on an Ethernet egress is NOT the ppp case: it means the
 	 * neighbour entry is not resolved *yet* (cold cache, flushed ARP). The
@@ -759,10 +767,20 @@ static __always_inline __u16 dpd_emit_class(struct dpd_config *cfg,
 	return 0;
 }
 
+/* Per-ifindex flags taught by `dpdctl ifaces`. 0 when the device was never
+ * taught, which is the safe answer: the callers only use it to decide whether
+ * the egress is a ppp/tun (L3) device. */
+static __always_inline __u32 dpd_iface_flags(__u32 ifindex)
+{
+	struct dpd_iface_val *p = bpf_map_lookup_elem(&dpd_iface, &ifindex);
+
+	return p ? p->flags : 0;
+}
+
 /* Emit with a class that was already decided (hit path and stateless path). */
 static __always_inline int dpd_emit_cached(struct __sk_buff *skb, __u32 ifindex,
 					   __u16 fflags, const __u8 *dmac,
-					   const __u8 *smac,
+					   const __u8 *smac, __u32 nh4,
 					   struct dpd_stat_val *st)
 {
 	int r;
@@ -779,6 +797,28 @@ static __always_inline int dpd_emit_cached(struct __sk_buff *skb, __u32 ifindex,
 			DPD_INC(st, ST_REDIRECT_OK);
 			return TC_ACT_REDIRECT;
 		}
+		return TC_ACT_UNSPEC;
+	}
+
+	/* ABI 15: explicit IPv4 nexthop. Required on ppp/tun egresses: the
+	 * route-lookup variant below (params == NULL) calls
+	 * ip_route_output_flow() with flowi4_iif == 0, which on a router whose
+	 * LAN source only resolves with iif set returns -ENETUNREACH and frees
+	 * the packet after this program already said "redirect" (silent, the
+	 * only evidence is ST_NEIGH_OK growing with no traffic). With the
+	 * nexthop the helper goes straight to ip_neigh_gw4() ->
+	 * neigh_direct_output(), i.e. no route lookup at all. */
+	if ((fflags & DPD_FLOW_F_NH4) && nh4) {
+		struct bpf_redir_neigh nh = {};
+
+		nh.nh_family = AF_INET;
+		nh.ipv4_nh = nh4;
+		if (bpf_redirect_neigh(ifindex, &nh, sizeof(nh), 0) ==
+		    TC_ACT_REDIRECT) {
+			DPD_INC(st, ST_NEIGH_OK);
+			return TC_ACT_REDIRECT;
+		}
+		DPD_INC(st, ST_NEIGH_FAIL);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -829,6 +869,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 	__u16 vlan_id = 0;	/* the 802.1Q/802.1AD VID, if tagged	*/
 	__u8 tagged = 0;
 	__u8 tag_meta = 0;	/* tag lives in skb->vlan_tci, not in the frame */
+	__u8 l3in = 0;		/* ingress skb starts at L3 (ppp/tun)	*/
 	int ret;
 
 	cpu = dpd_cpu();
@@ -851,25 +892,55 @@ int dpd_fastpath(struct __sk_buff *skb)
 		vlan_id = skb->vlan_tci & 0x0fff;
 	}
 
+	/* A ppp/tun netdevice hands TC an L3 skb: there is no Ethernet header,
+	 * data starts at the IP header. The flags are taught by
+	 * `dpdctl ifaces <dev>` from /sys/class/net/<dev>/flags
+	 * (IFF_NOARP|IFF_POINTOPOINT), which the iface hotplug does for every
+	 * uplink. This is the download direction of a PPPoE WAN; parsing it as
+	 * Ethernet (the old behaviour) is what counted every such packet as
+	 * ST_NON_IP, i.e. the return half of a home line was never
+	 * accelerated at all. */
+	{
+		__u32 ifidx = skb->ifindex;
+		struct dpd_iface_val *ifp = bpf_map_lookup_elem(&dpd_iface, &ifidx);
+
+		if (ifp && (ifp->flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT))) {
+			l3in = 1;
+			l3_off = 0;
+		}
+	}
+
 	eth = data;
 	if ((void *)(eth + 1) > data_end) {
 		DPD_INC(st, ST_NON_IP);
 		return TC_ACT_UNSPEC;
 	}
-	h_proto = bpf_ntohs(eth->h_proto);
 
-	if (h_proto == ETH_P_8021Q || h_proto == ETH_P_8021AD) {
-		struct dpd_vlan_hdr *vh = data + l3_off;
+	if (l3in) {
+		__u8 ver = *(__u8 *)data >> 4;
 
-		if ((void *)(vh + 1) > data_end) {
-			DPD_INC(st, ST_NON_IP);
-			return TC_ACT_UNSPEC;
+		if (ver == 4)
+			h_proto = ETH_P_IP;
+		else if (ver == 6)
+			h_proto = ETH_P_IPV6;
+		else
+			goto non_ip;
+	} else {
+		h_proto = bpf_ntohs(eth->h_proto);
+
+		if (h_proto == ETH_P_8021Q || h_proto == ETH_P_8021AD) {
+			struct dpd_vlan_hdr *vh = data + l3_off;
+
+			if ((void *)(vh + 1) > data_end) {
+				DPD_INC(st, ST_NON_IP);
+				return TC_ACT_UNSPEC;
+			}
+			h_proto = bpf_ntohs(vh->h_vlan_encapsulated_proto);
+			vlan_id = bpf_ntohs(vh->h_vlan_TCI) & 0x0fff;
+			tagged = 1;
+			tag_meta = 0;
+			l3_off += sizeof(*vh);
 		}
-		h_proto = bpf_ntohs(vh->h_vlan_encapsulated_proto);
-		vlan_id = bpf_ntohs(vh->h_vlan_TCI) & 0x0fff;
-		tagged = 1;
-		tag_meta = 0;
-		l3_off += sizeof(*vh);
 	}
 
 	fkey.ifindex = skb->ifindex;
@@ -1032,6 +1103,15 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
+			/* Uplink on a ppp/tun egress: keep it on the slow path
+			 * until einat's egress SNAT is verified to apply to
+			 * TC-redirected packets (it was not on the live PPPoE
+			 * box). Downlink is safe and stays accelerated. This must
+			 * run before the TTL decrement, otherwise the stack would
+			 * decrement it a second time. */
+			if (!l3in && (fval->flags & DPD_FLOW_F_L3OUT))
+				return TC_ACT_UNSPEC;
+
 			/* ABI 13: this flow arrives tagged, so every packet
 			 * carries a tag that has to go before the L2 emit.
 			 * Only an in-band tag shifts L3/L4; a metadata tag
@@ -1076,9 +1156,28 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (fkey.family == AF_INET6)
 				DPD_INC(st, ST_V6_OK);
 
+			/* Downlink from a ppp/tun device: the skb is L3 and the
+			 * LAN is Ethernet, so push a zeroed Ethernet header
+			 * (bpf_skb_change_head is exactly "L3 skb -> L2
+			 * redirect": __skb_push + memset + reset mac header).
+			 * dpd_emit_l2() fills in the two MACs, we set the
+			 * ethertype, which the pushed header does not have. */
+			if (l3in) {
+				if (!(fval->flags & DPD_FLOW_F_L2) ||
+				    bpf_skb_change_head(skb, ETH_HLEN, 0) < 0)
+					return TC_ACT_UNSPEC;
+				data = (void *)(long)skb->data;
+				data_end = (void *)(long)skb->data_end;
+				eth = data;
+				if ((void *)(eth + 1) > data_end)
+					return TC_ACT_UNSPEC;
+				eth->h_proto = bpf_htons(fkey.family == AF_INET ?
+							 ETH_P_IP : ETH_P_IPV6);
+			}
+
 			ret = dpd_emit_cached(skb, fval->egress_ifindex,
 					      fval->flags, fval->dmac,
-					      fval->smac, st);
+					      fval->smac, fval->nh4, st);
 			if (ret == TC_ACT_REDIRECT) {
 				if (fkey.family == AF_INET) {
 					DPD_ADD(st, ST_BYTES_HIT_V4, skb->len);
@@ -1209,6 +1308,13 @@ int dpd_fastpath(struct __sk_buff *skb)
 		if (cfg->mode != DPD_MODE_STATEFUL) {
 			__u16 cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
 
+			/* ppp/tun egress uplink: keep it on the stack, see the
+			 * hit-path note. Before the TTL decrement. */
+			if (!l3in &&
+			    (dpd_iface_flags(fib.ifindex) &
+			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
+				return TC_ACT_UNSPEC;
+
 			/* ABI 13: a tagged frame can only be taken over when the
 			 * egress is plain Ethernet (L2 class); then the tag has
 			 * to be popped before the header is rewritten. A stacked
@@ -1248,8 +1354,33 @@ int dpd_fastpath(struct __sk_buff *skb)
 					      fib.ifindex,
 					      fkey.family == AF_INET6, st);
 
-			ret = dpd_emit_cached(skb, fib.ifindex, cls, fib.dmac,
-					      fib.smac, st);
+			/* Downlink from a ppp/tun device: see the hit-path
+			 * equivalent; only an Ethernet egress is possible. */
+			if (l3in) {
+				if (!(cls & DPD_FLOW_F_L2) ||
+				    bpf_skb_change_head(skb, ETH_HLEN, 0) < 0)
+					return TC_ACT_UNSPEC;
+				data = (void *)(long)skb->data;
+				data_end = (void *)(long)skb->data_end;
+				eth = data;
+				if ((void *)(eth + 1) > data_end)
+					return TC_ACT_UNSPEC;
+				eth->h_proto = bpf_htons(fkey.family == AF_INET ?
+							 ETH_P_IP : ETH_P_IPV6);
+			}
+
+			{
+				struct dpd_iface_val *ep;
+				__u32 eif = fib.ifindex;
+				__u32 nh4 = 0;
+
+				ep = bpf_map_lookup_elem(&dpd_iface, &eif);
+				if (ep && (ep->flags & (DPD_IF_F_NOARP |
+							DPD_IF_F_POINTOPOINT)))
+					nh4 = ep->gw4;
+				ret = dpd_emit_cached(skb, fib.ifindex, cls,
+						      fib.dmac, fib.smac, nh4, st);
+			}
 			if (ret == TC_ACT_REDIRECT) {
 				if (fkey.family == AF_INET) {
 					DPD_ADD(st, ST_BYTES_HIT_V4, skb->len);
@@ -1278,7 +1409,21 @@ int dpd_fastpath(struct __sk_buff *skb)
 			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
 				return TC_ACT_UNSPEC;
 
+			/* ppp/tun egress uplink: do not learn it, see the
+			 * hit-path note. Downlink (l3in) is unaffected. */
+			if (!l3in &&
+			    (dpd_iface_flags(fib.ifindex) &
+			     (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)))
+				return TC_ACT_UNSPEC;
+
 			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
+
+			/* An L3 ingress can only be emitted to an Ethernet
+			 * egress, where the hit path pushes a new L2 header with
+			 * bpf_skb_change_head(). An L3->L3 hairpin would need
+			 * bpf_redirect() instead; leave it on the stack. */
+			if (l3in && !(cls & DPD_FLOW_F_L2))
+				return TC_ACT_UNSPEC;
 
 			/* ABI 13: only learn tagged flows whose egress is plain
 			 * Ethernet, where the hit path can pop the tag itself. */
@@ -1293,6 +1438,29 @@ int dpd_fastpath(struct __sk_buff *skb)
 			nv.wan = (__u16)((__u32)(cfg->epoch & 0xff) << 8);
 			__builtin_memcpy(nv.dmac, fib.dmac, ETH_ALEN);
 			__builtin_memcpy(nv.smac, fib.smac, ETH_ALEN);
+
+			/* ABI 15: remember that the egress is a ppp/tun device, and
+			 * its nexthop if we know one. The hit path uses L3OUT to
+			 * keep the *uplink* on the slow path until einat's egress
+			 * SNAT is verified for TC-redirected packets (on the live
+			 * PPPoE box of 2026-11-06 it was not applied: accelerated
+			 * packets left unNATed and died upstream). The downlink
+			 * needs no NAT here -- einat DNATed at its own TC ingress
+			 * hook before ours -- so it stays accelerated. */
+			{
+				struct dpd_iface_val *ep;
+				__u32 eif = fib.ifindex;
+
+				ep = bpf_map_lookup_elem(&dpd_iface, &eif);
+				if (ep && (ep->flags & (DPD_IF_F_NOARP |
+							DPD_IF_F_POINTOPOINT))) {
+					nv.flags |= DPD_FLOW_F_L3OUT;
+					if (ep->gw4) {
+						nv.nh4 = ep->gw4;
+						nv.flags |= DPD_FLOW_F_NH4;
+					}
+				}
+			}
 
 			/*
 			 * Multi-WAN: pick an uplink by weighted rendezvous and
@@ -1323,13 +1491,25 @@ int dpd_fastpath(struct __sk_buff *skb)
 						 * uplink cannot pop the tag. */
 						if (tagged && (w.flags & DPD_WAN_F_L3))
 							return TC_ACT_UNSPEC;
-						/* ppp/tun uplinks have no L2
-						 * header to write; everything else
-						 * gets the usual decision. */
-						nv.flags = (w.flags & DPD_WAN_F_L3)
-							? (DPD_FLOW_F_DEV | DPD_FLOW_F_WAN)
-							: (dpd_emit_class(cfg, w.ifindex, 0, 1) |
-							   DPD_FLOW_F_WAN);
+						/* L3 uplinks (ppp/tun) have no
+						 * neighbour table: the neigh
+						 * class pulls the Ethernet header
+						 * and emits through direct output. */
+						nv.flags = dpd_emit_class(cfg, w.ifindex,
+									  (w.flags & DPD_WAN_F_L3) ? 1 : 0,
+									  1) | DPD_FLOW_F_WAN;
+						if (w.flags & DPD_WAN_F_L3) {
+							struct dpd_iface_val *ep;
+							__u32 eif = w.ifindex;
+
+							nv.flags |= DPD_FLOW_F_L3OUT;
+							ep = bpf_map_lookup_elem(&dpd_iface,
+										 &eif);
+							if (ep && ep->gw4) {
+								nv.nh4 = ep->gw4;
+								nv.flags |= DPD_FLOW_F_NH4;
+							}
+						}
 						if (tagged)
 							nv.flags |= DPD_FLOW_F_TAG;
 						__builtin_memcpy(nv.dmac, w.gw_mac, ETH_ALEN);
