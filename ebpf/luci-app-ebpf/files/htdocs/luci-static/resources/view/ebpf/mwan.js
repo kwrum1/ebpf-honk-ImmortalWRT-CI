@@ -216,7 +216,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('WAN 接口') ]),
-				E('div', { 'style': 'overflow-x:auto;-webkit-overflow-scrolling:touch' }, [ table ]),
+				table,
 				E('div', { 'class': 'cbi-section-create' }, [
 					E('button', {
 						'class': 'cbi-button cbi-button-add',
