@@ -36,7 +36,8 @@
 # Every failure path now goes through dpd_log().
 
 DPD_OBJ=/lib/bpf/dpd_fastpath.bpf.o
-DPD_SEC=classifier
+DPD_SEC_L2=classifier/l2
+DPD_SEC_L3=classifier/l3
 DPD_PREF=100
 DPD_CTL=/usr/sbin/dpdctl
 
@@ -111,10 +112,17 @@ dpd_attach_if() {
 	dpd_bpffs_ensure || dpd_log "warning: /sys/fs/bpf is not a bpffs"
 	dpd_qdisc_ready "$dev" || { dpd_log "cannot create a tc hook on $dev"; return 1; }
 
+	# L3 devices (ppp/tun) get the variant that starts at the IP header;
+	# Ethernet/bridge/VLAN get the L2 parser. IFF_POINTOPOINT=0x10,
+	# IFF_NOARP=0x80. This replaces the per-packet dpd_iface lookup.
+	local sec flags
+	flags=$(cat "/sys/class/net/$dev/flags" 2>/dev/null) || flags=0
+	if [ $((flags & 0x90)) -ne 0 ]; then sec=$DPD_SEC_L3; else sec=$DPD_SEC_L2; fi
+
 	# replace, do not stack
 	tc filter del dev "$dev" ingress pref "$DPD_PREF" 2>/dev/null
 	if ! tc filter add dev "$dev" ingress pref "$DPD_PREF" handle "$DPD_PREF" \
-		bpf da obj "$DPD_OBJ" sec "$DPD_SEC"; then
+		bpf da obj "$DPD_OBJ" sec "$sec"; then
 		dpd_log "tc filter add failed on $dev (program not loaded)"
 		return 1
 	fi

@@ -40,9 +40,13 @@
 
 #include "dpd_common.h"
 
-/* must match DPD_BPF_SECTION in dpd_common.h; SEC() stringises so it cannot be
- * passed a macro. The init script uses the macro, so keep the two in sync. */
-#define DPD_SEC_NAME "classifier"
+/* Two program variants: L2 ingress (Ethernet, VLAN, bridge) and L3 ingress
+ * (ppp/tun, where skb->data starts at the IP header). The attach script picks
+ * the section from /sys/class/net/<dev>/flags instead of doing an iface map
+ * lookup on every packet. Keep these strings in sync with DPD_SEC_L2/L3 in
+ * dpd_common.h and files/dpd-fastpath.sh. */
+#define DPD_SEC_L2 "classifier/l2"
+#define DPD_SEC_L3 "classifier/l3"
 
 #ifndef DPD_MODE_DEFAULT
 #define DPD_MODE_DEFAULT 1 /* DPD_MODE_OBSERVE */
@@ -843,8 +847,8 @@ static __always_inline void dpd_touch(struct dpd_flow_val *fval, __u32 now,
 
 /* ------------------------------------------------------------------ program */
 
-SEC(DPD_SEC_NAME)
-int dpd_fastpath(struct __sk_buff *skb)
+static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
+					       const __u8 force_l3)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -859,7 +863,7 @@ int dpd_fastpath(struct __sk_buff *skb)
 	__u16 vlan_id = 0;	/* the 802.1Q/802.1AD VID, if tagged	*/
 	__u8 tagged = 0;
 	__u8 tag_meta = 0;	/* tag lives in skb->vlan_tci, not in the frame */
-	__u8 l3in = 0;		/* ingress skb starts at L3 (ppp/tun)	*/
+	__u8 l3in = force_l3;	/* set by the L2/L3 program variant	*/
 	int ret;
 
 	cpu = dpd_cpu();
@@ -882,23 +886,12 @@ int dpd_fastpath(struct __sk_buff *skb)
 		vlan_id = skb->vlan_tci & 0x0fff;
 	}
 
-	/* A ppp/tun netdevice hands TC an L3 skb: there is no Ethernet header,
-	 * data starts at the IP header. The flags are taught by
-	 * `dpdctl ifaces <dev>` from /sys/class/net/<dev>/flags
-	 * (IFF_NOARP|IFF_POINTOPOINT), which the iface hotplug does for every
-	 * uplink. This is the download direction of a PPPoE WAN; parsing it as
-	 * Ethernet (the old behaviour) is what counted every such packet as
-	 * ST_NON_IP, i.e. the return half of a home line was never
-	 * accelerated at all. */
-	{
-		__u32 ifidx = skb->ifindex;
-		struct dpd_iface_val *ifp = bpf_map_lookup_elem(&dpd_iface, &ifidx);
-
-		if (ifp && (ifp->flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT))) {
-			l3in = 1;
-			l3_off = 0;
-		}
-	}
+	/* The L3 variant is attached to ppp/tun devices: skb->data starts at the
+	 * IP header, so there is no Ethernet header to parse and no iface map
+	 * lookup on the hot path. The attach script chooses this section from
+	 * IFF_NOARP/IFF_POINTOPOINT. */
+	if (l3in)
+		l3_off = 0;
 
 	eth = data;
 	if ((void *)(eth + 1) > data_end) {
@@ -1588,6 +1581,21 @@ int dpd_fastpath(struct __sk_buff *skb)
 non_ip:
 	DPD_INC(st, ST_NON_IP);
 	return TC_ACT_UNSPEC;
+}
+
+/* The attach script selects the section by device type. Both wrappers inline
+ * the same body with a constant `force_l3`, so the verifier sees the fast path
+ * without the per-packet dpd_iface lookup. */
+SEC(DPD_SEC_L2)
+int dpd_fastpath_l2(struct __sk_buff *skb)
+{
+	return dpd_fastpath_common(skb, 0);
+}
+
+SEC(DPD_SEC_L3)
+int dpd_fastpath_l3(struct __sk_buff *skb)
+{
+	return dpd_fastpath_common(skb, 1);
 }
 
 char _license[] SEC("license") = "GPL";

@@ -174,8 +174,12 @@
  */
 #define DPD_ABI_VERSION		15
 
-/* name of the TC section in the BPF object; dpdctl/init pass this to tc(8) */
-#define DPD_BPF_SECTION		"classifier"
+/* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
+ * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
+ * parser; L3 starts at the IP header (ppp/tun). */
+#define DPD_BPF_SECTION		"classifier/l2"
+#define DPD_SEC_L2		"classifier/l2"
+#define DPD_SEC_L3		"classifier/l3"
 
 /* TC priority. The interception layer owns TCX (no pref at all), so this pref
  * only orders us among *classic* filters: router-acl owns 90 on the WAN, we own
