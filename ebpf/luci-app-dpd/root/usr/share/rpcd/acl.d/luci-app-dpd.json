@@ -1,0 +1,14 @@
+{
+	"luci-app-dpd": {
+		"description": "DPD-FW status",
+		"read": {
+			"ubus": {
+				"dpd": [ "status", "flows", "plugins" ]
+			},
+			"file": {
+				"/var/run/dpd/*": [ "read" ]
+			}
+		},
+		"write": {}
+	}
+}

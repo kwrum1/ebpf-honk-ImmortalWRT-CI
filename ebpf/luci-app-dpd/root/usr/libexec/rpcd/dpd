@@ -1,0 +1,42 @@
+#!/bin/sh
+# rpcd backend for luci-app-dpd. Read-only: the datapath is controlled by
+# dpdctl/UCI, not by the status page.
+. /usr/share/libubox/jshn.sh
+
+OUT=/var/run/dpd
+
+case "$1" in
+list)
+	cat <<'EOF'
+{
+  "status": {},
+  "flows": {},
+  "plugins": {}
+}
+EOF
+	;;
+call)
+	case "$2" in
+	status)
+		if [ -s "$OUT/observe.json" ]; then
+			cat "$OUT/observe.json"
+		else
+			echo '{}'
+		fi
+		;;
+	flows)
+		/usr/sbin/dpdctl status -j 2>/dev/null || echo '{}'
+		;;
+	plugins)
+		honk=$(cat "$OUT/honk.json" 2>/dev/null)
+		napi=$(cat "$OUT/napi.json" 2>/dev/null)
+		[ -n "$honk" ] || honk=null
+		[ -n "$napi" ] || napi=null
+		printf '{"honk":%s,"napi":%s}\n' "$honk" "$napi"
+		;;
+	*)
+		echo '{}'
+		;;
+	esac
+	;;
+esac

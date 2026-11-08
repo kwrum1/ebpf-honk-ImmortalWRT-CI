@@ -42,6 +42,12 @@ dpd-fastpath
 tc-bpf
 bpftool-minimal
 libbpf1
+# P5 插件与 UI：dpd-honk 是唯一的代理插件；dpd-observe 负责状态文档；
+# dpd-napi 负责 NAPI/队列；luci-app-dpd 只做插件页，不复制加速状态页。
+dpd-honk
+dpd-observe
+dpd-napi
+luci-app-dpd
 # einat-ebpf 是本基线的 NAT（eBPF 全锥 NAT，挂在 WAN 的 TCX 钩子上）。它是
 # dpd 加速的前置条件：接管一个流会绕过 netfilter，回程能被接受靠的就是 einat
 # 注入 fw4 的那条兜底 WAN→LAN accept。它不在镜像里，加速门禁会（正确地）把模式

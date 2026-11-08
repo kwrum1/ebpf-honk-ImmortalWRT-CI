@@ -1,0 +1,15 @@
+{
+	"admin/network/dpd": {
+		"title": "DPD \u63d2\u4ef6",
+		"order": 74,
+		"action": {
+			"type": "view",
+			"path": "dpd/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-dpd"
+			]
+		}
+	}
+}
