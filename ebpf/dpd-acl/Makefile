@@ -26,6 +26,7 @@ define Build/Compile
 endef
 
 define Package/dpd-acl/install
+	$(INSTALL_DIR) $(1)/usr/share/dpd
 endef
 
 $(eval $(call BuildPackage,dpd-acl))

@@ -26,6 +26,7 @@ define Build/Compile
 endef
 
 define Package/dpd-mwan/install
+	$(INSTALL_DIR) $(1)/usr/share/dpd
 endef
 
 $(eval $(call BuildPackage,dpd-mwan))
