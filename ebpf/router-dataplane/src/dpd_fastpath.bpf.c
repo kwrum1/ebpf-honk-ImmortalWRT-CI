@@ -1281,6 +1281,20 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			return TC_ACT_UNSPEC;
 		}
 
+		/* P2.0 safe mode: do not take over the LAN->WAN half when the
+		 * egress is a NAT uplink. The stack (fw4 or einat) must own the
+		 * first packets' SNAT; the return half is already reverse-NATed
+		 * before it reaches us and can still be accelerated. Full
+		 * bidirectional UFS+NAT is P2.1. A WAN iface is the one with a
+		 * learned IPv4 nexthop (dpdctl gw). */
+		{
+			struct dpd_iface_val *eg =
+				bpf_map_lookup_elem(&dpd_iface, &fib.ifindex);
+
+			if (eg && eg->gw4)
+				return TC_ACT_UNSPEC;
+		}
+
 		/* ---- Mode 0: observe only. never touch the packet. ---- */
 		if (cfg->mode == DPD_MODE_OBSERVE)
 			return TC_ACT_UNSPEC;
