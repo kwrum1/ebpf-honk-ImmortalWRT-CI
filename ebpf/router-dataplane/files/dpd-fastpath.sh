@@ -102,8 +102,8 @@ dpd_teach_iface() {
 	return 0
 }
 
-# attach the program to $1 at DPD_PREF. Idempotent.
-dpd_attach_if() {
+# Low-level attach to one device. No bridge recursion.
+dpd_attach_one() {
 	local dev="$1"
 
 	[ -n "$dev" ] || return 1
@@ -132,11 +132,40 @@ dpd_attach_if() {
 	return 0
 }
 
+# Attach to a device and, when it is a bridge master, to every bridge port.
+# A tc ingress filter on the bridge master does not see frames forwarded
+# between its ports: LAN clients enter on eth0, and without a filter there the
+# fast path never sees LAN->WAN traffic at all. Measured on the ESXi lab
+# 2026-11-08: pkt/hit stayed flat on br-lan until the filter was also attached
+# to eth0.
+dpd_attach_if() {
+	local dev="$1" p
+
+	dpd_attach_one "$dev" || return 1
+	if [ -d "/sys/class/net/$dev/brif" ]; then
+		for p in /sys/class/net/"$dev"/brif/*; do
+			[ -e "$p" ] || continue
+			p=${p##*/}
+			[ "$p" = "$dev" ] && continue
+			dpd_attach_one "$p" || dpd_log "bridge port $p attach failed"
+		done
+	fi
+	return 0
+}
+
 dpd_detach_if() {
-	local dev="$1"
+	local dev="$1" p
 
 	[ -e "/sys/class/net/$dev" ] || return 0
 	tc filter del dev "$dev" ingress pref "$DPD_PREF" 2>/dev/null
+	if [ -d "/sys/class/net/$dev/brif" ]; then
+		for p in /sys/class/net/"$dev"/brif/*; do
+			[ -e "$p" ] || continue
+			p=${p##*/}
+			[ "$p" = "$dev" ] && continue
+			tc filter del dev "$p" ingress pref "$DPD_PREF" 2>/dev/null
+		done
+	fi
 	return 0
 }
 
