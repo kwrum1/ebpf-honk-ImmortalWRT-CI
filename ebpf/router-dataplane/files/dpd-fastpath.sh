@@ -178,9 +178,11 @@ dpd_nat_egress_sync() {
 	for dev in $(dpd_uplink_devs | awk '!seen[$0]++'); do
 		[ -e "/sys/class/net/$dev" ] || continue
 		if [ "$attach" = 1 ]; then
-			dpd_teach_nat_addr "$dev"
+			# attach first: on a cold boot this loads the object and
+			# creates the pinned maps, and only then can nat_addr land
 			dpd_attach_egress "$dev" ||
 				dpd_log "nat_forward=dpd: egress SNAT not attached on $dev"
+			dpd_teach_nat_addr "$dev"
 		else
 			dpd_detach_egress "$dev"
 		fi
