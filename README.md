@@ -146,7 +146,7 @@ TCX 先于 classic `cls_bpf`：honk 判给代理的流到不了 dpd；classic �
 | **router-tuning** | `ebpf/router-tuning` | sysctl/BBR/ring/coalescing/XPS/governor；`mode=throughput/balanced/latency` | `profile=auto`，`mode=balanced` |
 | **router-dns** | `ebpf/router-dns` | SmartDNS 独占 :53，dnsmasq 端口 0；上游来自租约；honk DNS 交回本地 | 开启 |
 | **luci-front** | `ebpf/luci-front` | :80/:443（HTTP/2、TLS、安全头），`/cgi-bin`、`/ubus` 反代到 uhttpd | 两架构自动选 |
-| **luci-app-ebpf** | `ebpf/luci-app-ebpf` | 菜单（DNS/代理/防火墙/多 WAN 负载）、端口控制、多 WAN 页、`ebpf-posture` | `firewall.ebpf999` 默认开且不在 UI 显示 |
+| **luci-app-ebpf** | `ebpf/luci-app-ebpf` | 菜单（DNS/代理/防火墙/多 WAN 负载）、端口控制、多 WAN 页、`ebpf-posture` | 默认拒绝：WAN zone 与 defaults 都是 REJECT；端口放行由简易防火墙写 fw4 规则 |
 
 ### 5.4 ABI 9（2026-10-28）
 

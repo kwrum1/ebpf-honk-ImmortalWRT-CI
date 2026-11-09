@@ -3,10 +3,11 @@
 #
 #  1) No "Services" menu: SmartDNS and honk are network tools here and are
 #     re-registered under Network by zz-ebpf-network.json.
-#  2) Firewall posture: open by default. The WAN zone forwards, IPv4 is full-cone
-#     (fullcone + masq), and the catch-all "rule 999" (external source ->
-#     internal destination, v4+v6) exists and ships ENABLED. Port control is
-#     done from Network -> 防火墙, which writes stock fw4 redirects.
+#  2) Firewall posture: default deny on the WAN. The zone and the defaults
+#     both REJECT inbound/forward; port control is done from Network -> 防火墙,
+#     which writes stock fw4 redirects/rules. There is deliberately no
+#     catch-all "rule 999": a WAN->LAN REJECT sorts before fw4's own
+#     "ct status dnat accept" and silently breaks every port forward.
 #  3) DNS: SmartDNS owns :53 and is the only resolver. dnsmasq keeps no DNS role
 #     at all (port 0); odhcpd is the DHCP authority.
 #
@@ -20,16 +21,14 @@ rm -f /usr/share/luci/menu.d/luci-app-smartdns.json 2>/dev/null
 rm -f /usr/share/luci/menu.d/luci-app-honk.json 2>/dev/null
 
 # --- firewall posture -------------------------------------------------------
-uci -q set firewall.@zone[1].forward='ACCEPT'
+uci -q set firewall.@zone[1].forward='REJECT'
+uci -q set firewall.@zone[1].input='REJECT'
+uci -q set firewall.@defaults[0].forward='REJECT'
+uci -q set firewall.@defaults[0].input='REJECT'
 uci -q set firewall.@defaults[0].fullcone='1'
-if ! uci -q get firewall.ebpf999 >/dev/null 2>&1; then
-	uci -q set firewall.ebpf999='rule'
-	uci -q set firewall.ebpf999.name='999'
-	uci -q set firewall.ebpf999.src='wan'
-	uci -q set firewall.ebpf999.dest='lan'
-	uci -q set firewall.ebpf999.target='REJECT'
-fi
-uci -q set firewall.ebpf999.enabled='1'
+# Drop the old blanket WAN->LAN reject if a previous version created it: it
+# lands before "ct status dnat accept" and makes every port forward fail.
+uci -q delete firewall.ebpf999
 uci -q commit firewall
 
 # --- DNS ownership ----------------------------------------------------------
