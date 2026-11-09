@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=dpd-napi
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=5
+PKG_RELEASE:=7
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=kwrum1
 
@@ -20,7 +20,9 @@ define Package/dpd-napi/description
   Applies NAPI and queue settings: netdev_budget, dev_weight, RPS/XPS masks
   through sysfs, plus per-NAPI gro_flush_timeout / defer_hard_irqs /
   irq_suspend_timeout / threaded through the kernel's netdev generic netlink
-  family. No driver changes.
+  family. Optional helpers bind NAPI IRQs to CPUs, A/B GRO/GSO/TSO/checksums
+  with ethtool, and gate the root qdisc (noqueue/mq/cake/hybrid). No driver
+  changes.
 endef
 
 define Build/Prepare
@@ -37,6 +39,9 @@ endef
 define Package/dpd-napi/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config
 	$(INSTALL_BIN) ./files/dpd-napi.sh $(1)/usr/sbin/dpd-napi
+	$(INSTALL_BIN) ./files/dpd-napi-irq.sh $(1)/usr/sbin/dpd-napi-irq
+	$(INSTALL_BIN) ./files/dpd-napi-gro.sh $(1)/usr/sbin/dpd-napi-gro
+	$(INSTALL_BIN) ./files/dpd-napi-qdisc.sh $(1)/usr/sbin/dpd-napi-qdisc
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dpd-napi-netdev $(1)/usr/sbin/dpd-napi-netdev
 	$(INSTALL_BIN) ./files/dpd-napi.init $(1)/etc/init.d/dpd-napi
 	$(INSTALL_DATA) ./files/dpd_napi.config $(1)/etc/config/dpd_napi

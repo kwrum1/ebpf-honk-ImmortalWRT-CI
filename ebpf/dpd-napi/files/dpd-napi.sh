@@ -26,6 +26,9 @@ config_get threaded main threaded ''
 config_get_bool netdev_genl main netdev_genl 1
 config_get rps_cpus main rps_cpus ''
 config_get xps_cpus main xps_cpus ''
+config_get irq_cpus main irq_cpus ''
+config_get qdisc_mode main qdisc_mode keep
+config_get qdisc_cake_args main qdisc_cake_args ''
 
 write_sysctl() {
 	[ -w "$1" ] || return 0
@@ -90,5 +93,39 @@ json_add_string rps_cpus "$rps_cpus"
 json_add_string xps_cpus "$xps_cpus"
 json_add_string devices "$devices"
 json_dump > "$OUT/napi.json.tmp" && mv "$OUT/napi.json.tmp" "$OUT/napi.json"
+
+# ---- optional system tuning -------------------------------------------
+# These helpers are no-ops unless their UCI knob says otherwise, so the
+# default boot path is unchanged. A failure is logged and never aborts the
+# NAPI configuration. --dev is passed unquoted on purpose (the list is
+# already word-split by the enumeration above).
+devargs=
+for d in $devices; do devargs="$devargs --dev $d"; done
+if [ -n "$irq_cpus" ] && [ -x /usr/sbin/dpd-napi-irq ]; then
+	# shellcheck disable=SC2086
+	/usr/sbin/dpd-napi-irq --cpus "$irq_cpus" --json "$OUT/irq.json" $devargs ||
+		logger -t dpd-napi "irq affinity failed (irq_cpus=$irq_cpus)"
+fi
+
+# Record the current GRO/GSO/TSO state. No feature is changed here: the
+# default is "keep" and A/B runs call the helper by hand.
+if [ -x /usr/sbin/dpd-napi-gro ]; then
+	# shellcheck disable=SC2086
+	/usr/sbin/dpd-napi-gro --json "$OUT/gro.json" $devargs ||
+		logger -t dpd-napi "gro state dump failed"
+fi
+
+if [ -x /usr/sbin/dpd-napi-qdisc ]; then
+	# "keep" only records the current root qdiscs; the helper changes
+	# nothing. Failure to record is not fatal in that mode.
+	if [ "$qdisc_mode" = keep ]; then
+		/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
+			--cake-args "$qdisc_cake_args" --json "$OUT/qdisc.json" >/dev/null 2>&1 || true
+	else
+		/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
+			--cake-args "$qdisc_cake_args" --json "$OUT/qdisc.json" ||
+			logger -t dpd-napi "qdisc mode '$qdisc_mode' not applied (see $OUT/qdisc.json)"
+	fi
+fi
 
 while true; do sleep 3600; done
