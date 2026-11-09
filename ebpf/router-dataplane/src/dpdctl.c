@@ -259,7 +259,16 @@ static int cmd_set(int argc, char **argv)
 	} else if (!strcmp(argv[0], "udp_unidir_ttl")) {
 		cfg.udp_unidir_ttl_ms = strtoul(argv[1], NULL, 0);
 	} else if (!strcmp(argv[0], "counters")) {
-		cfg.flow_counters = strtoul(argv[1], NULL, 0) ? 1 : 0;
+		char *end;
+		unsigned long v = strtoul(argv[1], &end, 0);
+
+		if (!*argv[1] || *end || v > 2) {
+			fprintf(stderr,
+				"dpdctl: bad counters '%s' (0, 1 or 2)\n",
+				argv[1]);
+			return 1;
+		}
+		cfg.flow_counters = (__u32)v;
 	} else if (!strcmp(argv[0], "class")) {
 		cfg.class_enable = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "nat_ingress")) {
@@ -1878,7 +1887,8 @@ static void usage(const char *argv0)
 		"  set tcp_ttl <ms>        TCP flow idle timeout (0 = flow_ttl_ms)\n"
 		"  set udp_ttl <ms>        UDP timeout once the flow is bidirectional\n"
 		"  set udp_unidir_ttl <ms> UDP timeout while still one-way\n"
-		"  set counters <0|1>      per-flow packets/bytes in the UFS entry\n"
+		"  set counters <0|1|2>    per-flow packets/bytes in the UFS entry\n"
+		"                          (0 off, 1 every hit, 2 one hit in 16)\n"
 		"  set class <0|1>         consult the dpd_class policy cache\n"
 		"  set nat_ingress <0|1>   1 = DPD does return-path DNAT from\n"
 		"                          dpd_nat_rev (einat ingress must be off)\n"

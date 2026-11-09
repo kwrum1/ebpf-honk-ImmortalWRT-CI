@@ -1442,7 +1442,17 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				DPD_INC(st, ST_FLOW_SKIP);
 				return TC_ACT_UNSPEC;
 			}
-			if (cfg->flow_counters) {
+			/* ABI 20: 1 = update the per-flow counters on every hit,
+			 * 2 = only when (packets & 0xf) == 0, i.e. one hit in
+			 * 16. Mode 2 trades telemetry precision for the two
+			 * 64-bit RMWs a hit would otherwise pay: packets/bytes
+			 * read as a sampled rate (the bytes/packets ratio stays
+			 * right), and a flow that ends before its first sample
+			 * is not counted at all. 0 keeps both stores off the
+			 * hit path; the added test is one compare and a mask. */
+			if (cfg->flow_counters == 1 ||
+			    (cfg->flow_counters == 2 &&
+			     (fval->packets & 0xf) == 0)) {
 				fval->packets++;
 				fval->bytes += skb->len;
 			}

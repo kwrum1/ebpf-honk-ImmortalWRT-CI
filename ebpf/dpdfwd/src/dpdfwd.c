@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <net/if.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -74,6 +75,7 @@
 /* ctnetlink attribute numbers (linux/netfilter/nfnetlink_conntrack.h). */
 #define CTA_TUPLE_ORIG 1
 #define CTA_TUPLE_REPLY 2
+#define CTA_STATUS 3
 #define CTA_TUPLE_IP 1
 #define CTA_TUPLE_PROTO 2
 #define CTA_IP_V4_SRC 1
@@ -83,6 +85,10 @@
 #define CTA_PROTO_NUM 1
 #define CTA_PROTO_SRC_PORT 2
 #define CTA_PROTO_DST_PORT 3
+
+/* CTA_STATUS bits (linux/netfilter/nf_conntrack_common.h). */
+#define IPS_OFFLOAD (1U << 14)
+#define IPS_HW_OFFLOAD (1U << 15)
 
 struct nfgenmsg {
 	uint8_t nfgen_family;
@@ -103,12 +109,15 @@ struct ct_tuple {
 
 struct stats {
 	unsigned long link;
+	unsigned long link_port;	/* bridge-port link events, no bump */
 	unsigned long addr;
 	unsigned long route;
 	unsigned long neigh;
 	unsigned long ct_new;
 	unsigned long ct_update;
 	unsigned long ct_destroy;
+	unsigned long ct_offload;
+	unsigned long ct_hw_offload;
 	unsigned long bumps;
 	unsigned long unknown;
 	unsigned long errors;
@@ -969,8 +978,33 @@ static void tune_ct_msg(struct nlmsghdr *h, int ev)
 		tune_ct(ev, &t);
 }
 
-static void ct_event(struct nlmsghdr *h, int ev)
+/* Count conntrack events reporting the entry as offloaded. CTA_STATUS can be
+ * resent on several updates of the same connection, so these count events,
+ * not distinct flows. Observability only: acceleration is untouched. */
+static void ct_status(struct nlmsghdr *h, struct stats *st)
 {
+	struct nfgenmsg *nfg = NLMSG_DATA(h);
+	struct nlattr *attrs, *a;
+	uint32_t status;
+	int len;
+
+	if (h->nlmsg_len < NLMSG_HDRLEN + sizeof(*nfg))
+		return;
+	attrs = (struct nlattr *)((char *)nfg + sizeof(*nfg));
+	len = h->nlmsg_len - NLMSG_HDRLEN - sizeof(*nfg);
+	a = nla_find(attrs, len, CTA_STATUS);
+	if (!a || a->nla_len < NLA_ALIGN(sizeof(struct nlattr)) + 4)
+		return;
+	status = *(uint32_t *)nla_payload(a);
+	if (status & IPS_OFFLOAD)
+		st->ct_offload++;
+	if (status & IPS_HW_OFFLOAD)
+		st->ct_hw_offload++;
+}
+
+static void ct_event(struct nlmsghdr *h, int ev, struct stats *st)
+{
+	ct_status(h, st);
 	plugin_ct(h, ev);
 	tune_ct_msg(h, ev);
 }
@@ -997,6 +1031,22 @@ static int nl_open(int protocol, unsigned int groups)
 	return fd;
 }
 
+/* A link event on a bridge port does not change the bridge master's L2 path,
+ * so it must not invalidate the flows learned on the master. Uplink, LAN
+ * master and any non-port interface still bump. */
+static int link_is_bridge_port(struct nlmsghdr *h)
+{
+	struct ifinfomsg *ifi = NLMSG_DATA(h);
+	char name[IF_NAMESIZE], path[128];
+
+	if (h->nlmsg_len < NLMSG_HDRLEN + sizeof(*ifi))
+		return 0;
+	if (!if_indextoname(ifi->ifi_index, name))
+		return 0;
+	snprintf(path, sizeof(path), "/sys/class/net/%s/master", name);
+	return access(path, F_OK) == 0;
+}
+
 static void bump_epoch(int dry, struct stats *st)
 {
 	char cmd[128];
@@ -1021,9 +1071,11 @@ static void publish(struct stats *st)
 		return;
 	}
 	fprintf(f,
-		"{ \"uptime\": %ld, \"link\": %lu, \"addr\": %lu, \"route\": %lu,"
+		"{ \"uptime\": %ld, \"link\": %lu, \"link_port\": %lu,"
+		" \"addr\": %lu, \"route\": %lu,"
 		" \"neigh\": %lu, \"ct_new\": %lu, \"ct_update\": %lu,"
-		" \"ct_destroy\": %lu, \"epoch_bumps\": %lu,"
+		" \"ct_destroy\": %lu, \"ct_offload\": %lu,"
+		" \"ct_hw_offload\": %lu, \"epoch_bumps\": %lu,"
 		" \"unknown\": %lu, \"errors\": %lu, \"ct_delete_batches\": %lu,"
 		" \"class_rules\": %lu, \"class_bad\": %lu,"
 		" \"class_applied_at\": %ld, \"class_error\": %lu,"
@@ -1032,9 +1084,10 @@ static void publish(struct stats *st)
 		" \"udp_unidir_ttl_ms\": %u, \"samples\": %lu,"
 		" \"short_ratio\": %.3f },"
 		" \"last_event\": %ld }\n",
-		(long)(time(NULL) - st->started), st->link, st->addr,
-		st->route, st->neigh, st->ct_new, st->ct_update,
-		st->ct_destroy, st->bumps, st->unknown, st->errors,
+		(long)(time(NULL) - st->started), st->link, st->link_port,
+		st->addr, st->route, st->neigh, st->ct_new, st->ct_update,
+		st->ct_destroy, st->ct_offload, st->ct_hw_offload, st->bumps,
+		st->unknown, st->errors,
 		ct_delete_batches, st->class_rules, st->class_bad,
 		(long)st->class_applied_at, st->class_error,
 		auto_tune, tune_accel, tune_tcp_ttl, tune_udp_ttl,
@@ -1163,7 +1216,10 @@ int main(int argc, char **argv)
 						case RTM_DELLINK:
 							st.link++;
 							plugin_topology(DPD_EV_LINK, NULL);
-							hard = 1;
+							if (link_is_bridge_port(h))
+								st.link_port++;
+							else
+								hard = 1;
 							break;
 						case RTM_NEWADDR:
 						case RTM_DELADDR:
@@ -1211,18 +1267,21 @@ int main(int argc, char **argv)
 
 						if (msg == IPCTNL_MSG_CT_NEW) {
 							st.ct_new++;
-							ct_event(h, DPD_EV_CT_NEW);
+							ct_event(h, DPD_EV_CT_NEW,
+								 &st);
 						} else if (msg ==
 							   IPCTNL_MSG_CT_DELETE) {
 							st.ct_destroy++;
 							ct_event(h,
-								 DPD_EV_CT_DESTROY);
+								 DPD_EV_CT_DESTROY,
+								 &st);
 							if (ct_delete)
 								ct_queue(h);
 						} else {
 							st.ct_update++;
 							ct_event(h,
-								 DPD_EV_CT_UPDATE);
+								 DPD_EV_CT_UPDATE,
+								 &st);
 						}
 					}
 				}

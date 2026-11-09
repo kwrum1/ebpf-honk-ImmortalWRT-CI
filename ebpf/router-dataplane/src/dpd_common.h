@@ -225,6 +225,8 @@
  *      `classifier/nat` stage at pref 50, ahead of router-acl (90): at the
  *      main program's 100 an untranslated reply looks like WAN->router and
  *      the policy layer drops it (measured: ICMP 0/3 vs 3/3).
+ *      - cfg.flow_counters gains value 2 (sampled, 1/16 of hits). The field
+ *      stays a __u32 at the same offset, so no layout or ABI change.
  */
 #define DPD_ABI_VERSION		20
 
@@ -360,9 +362,14 @@ struct dpd_config {
 	__u32	tcp_ttl_ms;
 	__u32	udp_ttl_ms;
 	__u32	udp_unidir_ttl_ms;
-	/* ABI 18: 1 = update the per-flow packets/bytes counters on every hit
-	 * (useful for telemetry, costs two stores in a cache line that is
-	 * already hot); 0 = leave them to the datapath-wide counters only.
+	/* ABI 18/20: per-flow packets/bytes accounting on the UFS hit path.
+	 *   0 = off (datapath-wide counters only),
+	 *   1 = exact: update both counters on every hit (two 64-bit RMWs on
+	 *       an entry that is already hot),
+	 *   2 = sampled: update only when (packets & 0xf) == 0, i.e. one hit
+	 *       in 16. Cheaper on the hit path; the recorded rate is 1/16 of
+	 *       the real one, so read it as a rate, not a packet count.
+	 * The value fits in the ABI 18 __u32, so the layout is unchanged.
 	 * class_enable: 1 = consult dpd_class when a flow is learned. */
 	__u32	flow_counters;
 	__u32	class_enable;
