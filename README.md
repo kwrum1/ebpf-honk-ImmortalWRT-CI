@@ -72,6 +72,7 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 - 权限最小化：构建工作流 `contents: write`（只给 release）；`Auto-Clean` 额外 `actions: write`；`Cache-Clean` 用 `contents: read` + `actions: write`；检查类只读。
 - 每个构建工作流有独立 `concurrency`，手动与定时不会重叠；镜像任务 `timeout-minutes: 240`。
 - `Auto-Clean` 是唯一定时入口，完成后通过 `workflow_run` 触发四个构建；`einat-*` release 是构建输入，永不被清理。
+- 第三方 `ophub/delete-releases-workflows` 没有稳定 tag，只有它在跟 `@main`；其余全部固定大版本。
 
 ---
 
