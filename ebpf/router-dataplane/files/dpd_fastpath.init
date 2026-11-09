@@ -116,6 +116,11 @@ start_service() {
 	# at least one map may exist now
 	[ "$nok" -gt 0 ] && dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 
+	# ABI 20: teach the router's own addresses; the miss path can then skip
+	# bpf_fib_lookup() for packets that can only be delivered locally.
+	# dpdfwd re-syncs on RTM_NEWADDR/DELADDR (PPPoE redial).
+	[ "$nok" -gt 0 ] && "$DPD_CTL" local sync >/dev/null 2>&1
+
 	# An image upgraded in place can carry a stale uplink attachment: the older
 	# 90-dpd-fastpath attached the uplink for telemetry while observing, and a
 	# filter that only counted then starts *accelerating* as soon as einat

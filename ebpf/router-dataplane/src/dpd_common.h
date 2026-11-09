@@ -550,6 +550,16 @@ struct dpd_iface_val {
  * Mode B flow key. Kept at a fixed 48 bytes to keep the LRU hash cheap.
  * IPv4 addresses are stored right-aligned into the 16-byte v6 slots.
  */
+/* ABI 20: fast local-delivery judgement. One entry per address assigned to
+ * the router (IPv4/IPv6), filled from userspace by `dpdctl local sync`. The
+ * miss path checks it before bpf_fib_lookup(): a packet addressed to one of
+ * our own addresses can only answer NOT_FWDED and would bump fib_fail. */
+struct dpd_local_key {
+	__u8	family;
+	__u8	_pad[3];
+	__u8	addr[16];	/* v4 in addr[0..3], v6 in addr[0..15] */
+};
+
 struct dpd_flow_key {
 	__u32	ifindex;	/* ingress device			*/
 	__u8	family;		/* AF_INET / AF_INET6			*/

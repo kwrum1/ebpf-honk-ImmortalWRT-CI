@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <ifaddrs.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
@@ -850,6 +851,100 @@ static void class_print(const struct dpd_flow_key *k)
 	       ntohs(k->sport), da, ntohs(k->dport));
 }
 
+/* Router-owned addresses: one entry per IPv4/IPv6 address, so the BPF miss
+ * path can skip bpf_fib_lookup() for packets that can only be delivered
+ * locally. `sync` repopulates from getifaddrs(); dpdfwd calls it on address
+ * events and the init script calls it after attach. */
+static int cmd_local(int argc, char **argv)
+{
+	struct dpd_local_key k, nk;
+	__u8 one = 1;
+	int fd, n = 0;
+
+	if (argc < 1) {
+		fprintf(stderr, "usage: dpdctl local sync|flush|list\n");
+		return 1;
+	}
+	fd = map_open("dpd_local");
+	if (fd < 0) {
+		fprintf(stderr, "dpdctl: dpd_local map not found\n");
+		return 1;
+	}
+	if (!strcmp(argv[0], "flush")) {
+		while (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			if (dpd_bpf_map_delete_elem(fd, &k))
+				break;
+			n++;
+		}
+		printf("flushed %d local address(es)\n", n);
+		return 0;
+	}
+	if (!strcmp(argv[0], "list")) {
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			for (;;) {
+				char a[INET6_ADDRSTRLEN] = "-";
+
+				if (k.family == AF_INET)
+					inet_ntop(AF_INET, k.addr, a, sizeof(a));
+				else if (k.family == AF_INET6)
+					inet_ntop(AF_INET6, k.addr, a, sizeof(a));
+				printf("%-3s %s\n",
+				       k.family == AF_INET ? "v4" : "v6", a);
+				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+					break;
+				k = nk;
+			}
+		}
+		return 0;
+	}
+	if (strcmp(argv[0], "sync")) {
+		fprintf(stderr, "usage: dpdctl local sync|flush|list\n");
+		return 1;
+	}
+
+	while (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+		if (dpd_bpf_map_delete_elem(fd, &k))
+			break;
+	}
+	{
+		struct ifaddrs *ifa, *p;
+
+		if (getifaddrs(&ifa) < 0) {
+			fprintf(stderr, "dpdctl: getifaddrs: %s\n",
+				strerror(errno));
+			return 1;
+		}
+		for (p = ifa; p; p = p->ifa_next) {
+			struct dpd_local_key lk = {};
+
+			if (!p->ifa_addr || (p->ifa_flags & IFF_LOOPBACK))
+				continue;
+			if (p->ifa_addr->sa_family == AF_INET) {
+				struct sockaddr_in *s = (void *)p->ifa_addr;
+
+				if (!s->sin_addr.s_addr)
+					continue;
+				lk.family = AF_INET;
+				memcpy(lk.addr, &s->sin_addr, 4);
+			} else if (p->ifa_addr->sa_family == AF_INET6) {
+				struct sockaddr_in6 *s = (void *)p->ifa_addr;
+
+				if (IN6_IS_ADDR_UNSPECIFIED(&s->sin6_addr))
+					continue;
+				lk.family = AF_INET6;
+				memcpy(lk.addr, &s->sin6_addr, 16);
+			} else {
+				continue;
+			}
+			if (!dpd_bpf_map_update_elem(fd, &lk, &one, 0))
+				n++;
+		}
+		freeifaddrs(ifa);
+	}
+	printf("local addresses: %d\n", n);
+	return 0;
+}
+
 static int cmd_class(int argc, char **argv)
 {
 	struct dpd_flow_key k = {}, nk;
@@ -1617,6 +1712,9 @@ static int status_json(void)
 	map_limits("dpd_mtu", &max, &cnt);
 	printf("    \"mtu\": { \"max_entries\": %u, \"entries\": %d },\n",
 	       max, cnt);
+	map_limits("dpd_local", &max, &cnt);
+	printf("    \"local\": { \"max_entries\": %u, \"entries\": %d },\n",
+	       max, cnt);
 	map_limits("dpd_vlans", &max, &cnt);
 	printf("    \"vlans\": { \"max_entries\": %u, \"entries\": %d },\n",
 	       max, cnt);
@@ -1793,6 +1891,10 @@ static int status_text(void)
 	map_limits("dpd_mtu", &max, &cnt);
 	printf("  mtu table     %d/%u\n", cnt, max);
 
+	map_limits("dpd_local", &max, &cnt);
+	printf("  local table   %d/%u (router addresses skipped before FIB)\n",
+	       cnt, max);
+
 	printf("  ifaces\n");
 	fd = map_open("dpd_iface");
 	if (fd >= 0) {
@@ -1912,6 +2014,8 @@ static void usage(const char *argv0)
 		"  stats                   per-reason counters (all cpus summed)\n"
 		"  ifaces <ifname>...      learn IFF_* flags and MTU into the maps\n"
 	"  gw <ifname> <ipv4>      set the nexthop used by the neigh emit\n"
+		"  local sync|flush|list   router addresses skipped before the FIB\n"
+		"                          lookup (local delivery, never forwarded)\n"
 		"  flows [-a]              dump dpd_flows\n",
 		argv0);
 }
@@ -1940,6 +2044,8 @@ int main(int argc, char **argv)
 		return cmd_ifaces(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "gw"))
 		return cmd_gw(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "local"))
+		return cmd_local(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "nat_addr"))
 		return cmd_nat_addr(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "nat"))

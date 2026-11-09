@@ -136,6 +136,16 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_mtu SEC(".maps");
 
+/* ABI 20: addresses owned by the router, see struct dpd_local_key. Filled by
+ * `dpdctl local sync` and refreshed by dpdfwd on RTM_NEWADDR/DELADDR. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 128);
+	__type(key, struct dpd_local_key);
+	__type(value, __u8);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dpd_local SEC(".maps");
+
 /* dpd_vlans: optional segment allow-list, u16 VLAN id -> u8 1.
  * Only consulted when dpd_cfg.policy == DPD_POLICY_VLANS_ONLY. Managed with
  * `dpdctl vlan add|del|list`; the list is written by the init script from
@@ -1655,6 +1665,26 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 	 * paying for an acceleration it can never get. */
 	if (!dpd_may_accelerate(cfg, vlan_id, tagged, &fkey, st))
 		return TC_ACT_UNSPEC;
+
+	/* Fast local-delivery judgement: a packet addressed to one of the
+	 * router's own addresses is never forwarded, so bpf_fib_lookup() can
+	 * only answer NOT_FWDED and bump fib_fail. The list is small (one
+	 * entry per iface address) and refreshed by userspace on address
+	 * changes. This runs on the miss path only, before the expensive FIB
+	 * lookup; forwarded flows pay one small hash lookup. */
+	{
+		struct dpd_local_key lk = {};
+
+		lk.family = fkey.family;
+		if (fkey.family == AF_INET)
+			__builtin_memcpy(lk.addr, &fkey.daddr[3], 4);
+		else
+			__builtin_memcpy(lk.addr, fkey.daddr, sizeof(lk.addr));
+		if (bpf_map_lookup_elem(&dpd_local, &lk)) {
+			DPD_INC(st, ST_LOCAL);
+			return TC_ACT_UNSPEC;
+		}
+	}
 
 	/* ---- FIB lookup, shared by every mode ---- */
 	{

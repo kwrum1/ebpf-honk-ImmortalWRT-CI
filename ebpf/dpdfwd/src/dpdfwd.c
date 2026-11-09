@@ -1225,6 +1225,11 @@ int main(int argc, char **argv)
 						case RTM_DELADDR:
 							st.addr++;
 							plugin_topology(DPD_EV_ADDR, NULL);
+							/* Router addresses feed the
+							 * local-delivery map; a PPPoE
+							 * redial changes them. */
+							system(DPD_CTL " local sync "
+							       ">/dev/null 2>&1");
 							hard = 1;
 							break;
 						case RTM_NEWROUTE:
