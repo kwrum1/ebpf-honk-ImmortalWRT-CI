@@ -27,18 +27,21 @@ CPUS=
 DEVS=
 DRY=0
 ALL=0
+SPREAD=0
 NETDEV=/usr/sbin/dpd-napi-netdev
 
 usage() {
 	cat <<'EOF'
 usage: dpd-napi-irq [--cpus LIST] [--dev DEV]... [--all] [--dry-run]
-                    [--json FILE]
+                    [--spread] [--json FILE]
 
   --cpus LIST   CPU list for /proc/irq/<irq>/smp_affinity_list
                 (for example "2-3" or "4"). Defaults to UCI irq_cpus.
   --dev DEV     netdev to handle; repeatable. Default: every device that has
                 a /sys/class/net/<dev>/device symlink (physical NICs).
   --all         also include devices without a device symlink (bridges, veth).
+  --spread      assign one CPU per IRQ round-robin over LIST instead of
+                writing the whole list to every IRQ (better distribution).
   --dry-run     read and report, do not write the affinity mask.
   --json FILE   summary path (default /var/run/dpd/irq.json).
 EOF
@@ -58,6 +61,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--all)
 		ALL=1
+		shift
+		;;
+	--spread)
+		SPREAD=1
 		shift
 		;;
 	--dry-run)
@@ -140,6 +147,22 @@ if [ -z "$DEVS" ]; then
 	exit 0
 fi
 
+# Expand the list for --spread: one CPU per IRQ round-robin spreads the
+# queues over cores instead of writing the same mask to every IRQ (which the
+# kernel resolves to the first CPU in the mask for all of them).
+CPU_ONE=$(printf '%s\n' "$CPUS" | awk -F, '{
+	for (i = 1; i <= NF; i++) {
+		n = split($i, r, "-")
+		if (n == 2) {
+			for (c = r[1] + 0; c <= r[2] + 0; c++)
+				print c
+		} else {
+			print r[1]
+		}
+	}
+}')
+CPU_N=$(printf '%s\n' "$CPU_ONE" | awk 'NF { n++ } END { print n + 0 }')
+
 napi_irqs() {
 	[ -x "$NETDEV" ] || return 0
 	"$NETDEV" list "$1" 2>/dev/null | awk '
@@ -218,8 +241,10 @@ esac
 FAILED=0
 json_init
 json_add_string cpus "$CPUS"
+json_add_boolean spread "$SPREAD"
 json_add_boolean dry_run "$DRY"
 json_add_array devices
+IRQ_IDX=0
 for dev in $DEVS; do
 	[ -d "/sys/class/net/$dev" ] || {
 		echo "dpd-napi-irq: no such netdev '$dev'" >&2
@@ -237,11 +262,16 @@ for dev in $DEVS; do
 	for irq in $irqs; do
 		[ -d "/proc/irq/$irq" ] || continue
 		prev=$(cat "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true)
+		target="$CPUS"
+		if [ "$SPREAD" = 1 ] && [ "$CPU_N" -gt 1 ]; then
+			sel=$((IRQ_IDX % CPU_N + 1))
+			target=$(printf '%s\n' "$CPU_ONE" | sed -n "${sel}p")
+		fi
 		ok=0
 		err=""
 		if [ "$DRY" = 1 ]; then
-			echo "would bind irq $irq ($dev) to $CPUS" >&2
-		elif printf '%s\n' "$CPUS" >"/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
+			echo "would bind irq $irq ($dev) to $target" >&2
+		elif printf '%s\n' "$target" >"/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
 			ok=1
 		else
 			err="write /proc/irq/$irq/smp_affinity_list failed"
@@ -252,10 +282,12 @@ for dev in $DEVS; do
 		json_add_object
 		json_add_int irq "$irq"
 		json_add_string previous "$prev"
+		json_add_string target "$target"
 		json_add_boolean applied "$ok"
 		json_add_string error "$err"
 		json_close_object
 		count=$((count + 1))
+		IRQ_IDX=$((IRQ_IDX + 1))
 	done
 
 	json_close_array

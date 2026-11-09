@@ -33,6 +33,9 @@ config_get_bool netdev_genl main netdev_genl 1
 config_get rps_cpus main rps_cpus ''
 config_get xps_cpus main xps_cpus ''
 config_get irq_cpus main irq_cpus ''
+config_get_bool irq_spread main irq_spread 1
+config_get busy_poll main busy_poll 0
+config_get busy_read main busy_read 0
 config_get qdisc_mode main qdisc_mode keep
 config_get qdisc_cake_args main qdisc_cake_args ''
 
@@ -82,6 +85,9 @@ write_json() {
 	json_add_string rps_cpus "$cur_rps"
 	json_add_string xps_cpus "$cur_xps"
 	json_add_string devices "$devices"
+	json_add_boolean irq_spread "$irq_spread"
+	json_add_string busy_poll "$busy_poll"
+	json_add_string busy_read "$busy_read"
 	json_dump > "$OUT/napi.json.tmp" && mv "$OUT/napi.json.tmp" "$OUT/napi.json"
 }
 
@@ -155,10 +161,16 @@ apply_helpers() {
 
 	[ -n "$devices" ] || return 0
 	for d in $devices; do devargs="$devargs --dev $d"; done
+	# Socket busy-poll: only sockets that ask for it (SO_BUSY_POLL) are
+	# affected; forwarded packets do not use it. Default 0.
+	write_sysctl /proc/sys/net/core/busy_poll "$busy_poll"
+	write_sysctl /proc/sys/net/core/busy_read "$busy_read"
 	if [ -n "$irq_cpus" ] && [ -x /usr/sbin/dpd-napi-irq ]; then
+		spread_arg=
+		[ "$irq_spread" = 1 ] && spread_arg=--spread
 		# shellcheck disable=SC2086
-		/usr/sbin/dpd-napi-irq --cpus "$irq_cpus" --json "$OUT/irq.json" \
-			$devargs ||
+		/usr/sbin/dpd-napi-irq --cpus "$irq_cpus" $spread_arg \
+			--json "$OUT/irq.json" $devargs ||
 			logger -t dpd-napi "irq affinity failed (irq_cpus=$irq_cpus)"
 	fi
 	if [ -x /usr/sbin/dpd-napi-gro ]; then

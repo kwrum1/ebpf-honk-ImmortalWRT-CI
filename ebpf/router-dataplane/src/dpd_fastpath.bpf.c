@@ -1812,12 +1812,31 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				 * for here. ICMP and other protocols still stay
 				 * on the stack: DPD has no SNAT for them. */
 				if (!cfg->nat_forward) {
+					struct dpd_nat_rev_key rk = {};
+					struct dpd_nat_rev_val *rv;
+
 					nk.saddr = fkey.saddr[3];
 					nk.sport = fkey.sport;
 					nk.proto = fkey.proto;
 					nv = bpf_map_lookup_elem(&dpd_nat, &nk);
 					if (!nv || !nv->to_addr)
 						return TC_ACT_UNSPEC;
+					/* The reverse entry must point back at this
+					 * internal tuple. A forward/reverse mismatch
+					 * means the binding was recycled or
+					 * overwritten (a long-lived flow outliving
+					 * its NAT binding); accelerating would emit
+					 * with the wrong external port. Keep such a
+					 * flow on the stack. */
+					rk.daddr = nv->to_addr;
+					rk.dport = nv->to_port;
+					rk.proto = fkey.proto;
+					rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+					if (!rv || rv->saddr != fkey.saddr[3] ||
+					    rv->sport != fkey.sport) {
+						DPD_INC(st, ST_NAT_GONE);
+						return TC_ACT_UNSPEC;
+					}
 				}
 			}
 		}
