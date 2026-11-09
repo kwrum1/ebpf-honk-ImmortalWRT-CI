@@ -200,7 +200,7 @@ return view.extend({
 				secType: 'rule',
 				legacy: false,
 				name: displayName(sec.name),
-				target: '',
+				target: uciVal(sec.dest_ip),
 				public_port: '',
 				dest_port: uciVal(sec.dest_port),
 				proto: uciProto(sec.proto),
@@ -308,7 +308,8 @@ return view.extend({
 				E('br'),
 				_('端口支持单个、范围（8000-8010）和空格分隔的多个值；' +
 				  '“目标端口”是内网主机上的服务端口，“公网端口”是 WAN 侧暴露的端口；' +
-				  '公网端口留空时默认与目标端口一致。')
+				  '公网端口留空时默认与目标端口一致。目标是 IPv6 且两个端口相同时，' +
+				  '只加转发放行，不做地址转换。')
 			]),
 
 			self.warnBox,
@@ -618,6 +619,16 @@ return view.extend({
 
 			var wantType = target ? 'redirect' : 'rule';
 			var port = dp || pub;	/* effective WAN/service port */
+			var fam = target ? ipFamily(target) : 0;
+
+			/* IPv6 target without port translation: the packet is
+			 * already addressed to the host, so DNAT would be a
+			 * no-op. nf_nat then does not mark the conntrack as dnat
+			 * and fw4's "ct status dnat accept" never matches; the
+			 * packet falls through to the WAN reject. A plain
+			 * forward accept is the correct rule here. */
+			var fwd = (wantType == 'redirect' && fam == 6 &&
+				(pub == '' || pub == dp));
 
 			if (!self.validPortRange(pub) || !self.validPortRange(dp)) {
 				return ui.addNotification(null, E('p', {}, [
@@ -632,8 +643,6 @@ return view.extend({
 			}
 
 			if (wantType == 'redirect') {
-				var fam = ipFamily(target);
-
 				if (!fam) {
 					return ui.addNotification(null, E('p', {}, [
 						_('“目标”必须是 IPv4/IPv6 地址，或留空/填“路由器”表示放行到路由器。')
@@ -654,7 +663,7 @@ return view.extend({
 			}
 
 			plan.push({ row: r, target: target, pub: pub, dp: dp,
-				port: port, type: wantType });
+				port: port, type: wantType, fwd: fwd });
 		}
 
 		if (ops.length == 0 && plan.length == 0) {
@@ -713,6 +722,15 @@ return view.extend({
 				setOpt(sid, 'dest_port', p.dp || p.pub);
 				setOpt(sid, 'src_dport', '');
 				setOpt(sid, 'dest_ip', '');
+				setOpt(sid, 'target', 'ACCEPT');
+			}
+			else if (p.fwd) {
+				/* IPv6, same public and internal port: forward the
+				 * packet to the host unchanged. */
+				setOpt(sid, 'dest', 'lan');
+				setOpt(sid, 'src_dport', '');
+				setOpt(sid, 'dest_ip', p.target);
+				setOpt(sid, 'dest_port', p.dp || p.pub);
 				setOpt(sid, 'target', 'ACCEPT');
 			}
 			else {

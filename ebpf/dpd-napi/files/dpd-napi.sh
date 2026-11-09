@@ -110,6 +110,13 @@ apply_profile() {
 	write_sysctl /proc/sys/net/core/netdev_budget_usecs "$cur_budget_us"
 	write_sysctl /proc/sys/net/core/dev_weight "$cur_weight"
 
+	# Report what the kernel actually accepted. Some kernels reject low
+	# values of netdev_budget_usecs (EINVAL, e.g. a 20000 us floor), and
+	# publishing the requested value would hide that.
+	[ -r /proc/sys/net/core/netdev_budget_usecs ] &&
+		cur_budget_us=$(cat /proc/sys/net/core/netdev_budget_usecs 2>/dev/null ||
+			echo "$cur_budget_us")
+
 	devices=""
 	for d in /sys/class/net/*; do
 		[ -d "$d/queues" ] || continue
