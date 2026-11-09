@@ -2199,6 +2199,135 @@ int dpd_fastpath_l3(struct __sk_buff *skb)
  * accelerates, never drops, and the main program still makes every forwarding
  * decision after the policy layer.
  */
+/* ABI 20: ICMP error translation (type 3/11/12). The quirks:
+ *
+ *  - the error is addressed to the external address; the inner IPv4 header
+ *    (after the 8-byte ICMP header) carries the SNATed tuple we sent;
+ *  - look the inner (saddr, sport, proto) up in dpd_nat_rev, then restore the
+ *    outer destination AND the inner source address/port, so the client can
+ *    match the error to its socket (PMTUD, traceroute);
+ *  - the outer ICMP checksum covers the inner header, so every inner change
+ *    is applied to it as well; the inner IP checksum is updated in place;
+ *  - the inner TCP checksum field is not among the 8 captured transport
+ *    bytes (UDP's is, but Linux does not validate it when demuxing an ICMP
+ *    error), so it is left alone.
+ *
+ * Always returns 0 (the caller yields); a packet that cannot be translated
+ * is simply left alone. */
+static __always_inline int
+dpd_dnat_icmp_err(struct __sk_buff *skb, void *data, void *data_end,
+		  __u32 l3_off, __u32 l4_off, struct dpd_stat_val *st)
+{
+	struct iphdr *oip = data + l3_off;
+	struct icmphdr *oic = data + l4_off;
+	__u32 inner = l4_off + sizeof(*oic);
+	struct iphdr *iip = data + inner;
+	struct dpd_nat_rev_key rk = {};
+	struct dpd_nat_rev_val *rv;
+	__u32 il4, sport_off = 0;
+	__be32 old_saddr, new_saddr;
+	__be16 old_sport, new_sport;
+	__u8 proto;
+
+	if ((void *)(oic + 1) > data_end)
+		return 0;
+	if ((void *)(iip + 1) > data_end)
+		return 0;
+	if (iip->version != 4 || iip->ihl < 5)
+		return 0;
+	if (iip->frag_off & bpf_htons(DPD_IP_MF | DPD_IP_OFFMASK))
+		return 0;
+	il4 = inner + (__u32)iip->ihl * 4;
+	proto = iip->protocol;
+
+	if (proto == IPPROTO_TCP) {
+		struct tcphdr *th = data + il4;
+
+		if ((void *)(th + 1) > data_end)
+			return 0;
+		old_sport = th->source;
+		sport_off = il4 + __builtin_offsetof(struct tcphdr, source);
+	} else if (proto == IPPROTO_UDP) {
+		struct udphdr *uh = data + il4;
+
+		if ((void *)(uh + 1) > data_end)
+			return 0;
+		old_sport = uh->source;
+		sport_off = il4 + __builtin_offsetof(struct udphdr, source);
+	} else if (proto == IPPROTO_ICMP) {
+		struct icmphdr *iic = data + il4;
+
+		if ((void *)(iic + 1) > data_end)
+			return 0;
+		if (iic->type != ICMP_ECHO)
+			return 0;
+		old_sport = iic->un.echo.id;
+		sport_off = il4 +
+			__builtin_offsetof(struct icmphdr, un.echo.id);
+	} else {
+		return 0;
+	}
+
+	old_saddr = iip->saddr;
+	if (oip->daddr != old_saddr)
+		return 0;
+
+	rk.daddr = old_saddr;
+	rk.dport = old_sport;
+	rk.proto = proto;
+	rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+	if (!rv || !rv->saddr)
+		return 0;
+	new_saddr = rv->saddr;
+	new_sport = rv->sport;
+
+	/* outer destination: ext -> client */
+	if (bpf_skb_store_bytes(skb,
+			l3_off + __builtin_offsetof(struct iphdr, daddr),
+			&new_saddr, sizeof(new_saddr), 0) < 0)
+		return 0;
+	if (bpf_l3_csum_replace(skb,
+			l3_off + __builtin_offsetof(struct iphdr, check),
+			(__u64)old_saddr, (__u64)new_saddr,
+			sizeof(new_saddr)) < 0)
+		return 0;
+
+	/* inner source: ext -> client */
+	if (bpf_skb_store_bytes(skb,
+			inner + __builtin_offsetof(struct iphdr, saddr),
+			&new_saddr, sizeof(new_saddr), 0) < 0)
+		return 0;
+	if (bpf_l3_csum_replace(skb,
+			inner + __builtin_offsetof(struct iphdr, check),
+			(__u64)old_saddr, (__u64)new_saddr,
+			sizeof(new_saddr)) < 0)
+		return 0;
+
+	/* inner source port / echo id: ext port -> client port */
+	if (old_sport != new_sport) {
+		if (bpf_skb_store_bytes(skb, sport_off, &new_sport,
+					sizeof(new_sport), 0) < 0)
+			return 0;
+	}
+
+	/* the outer ICMP checksum covers the inner header */
+	if (bpf_l4_csum_replace(skb,
+			l4_off + __builtin_offsetof(struct icmphdr, checksum),
+			(__u64)old_saddr, (__u64)new_saddr,
+			sizeof(new_saddr)) < 0)
+		return 0;
+	if (old_sport != new_sport) {
+		if (bpf_l4_csum_replace(skb,
+				l4_off + __builtin_offsetof(struct icmphdr, checksum),
+				(__u64)old_sport, (__u64)new_sport,
+				sizeof(new_sport)) < 0)
+			return 0;
+	}
+
+	DPD_INC(st, ST_NAT_DNAT);
+	return 1;
+}
+
 SEC(DPD_SEC_NAT)
 int dpd_fastpath_nat(struct __sk_buff *skb)
 {
@@ -2284,9 +2413,19 @@ int dpd_fastpath_nat(struct __sk_buff *skb)
 
 		if ((void *)(ic + 1) > data_end)
 			return TC_ACT_UNSPEC;
-		if (ic->type != ICMP_ECHOREPLY)
+		if (ic->type == ICMP_ECHOREPLY) {
+			k.dport = ic->un.echo.id;
+		} else if (ic->type == ICMP_DEST_UNREACH ||
+			   ic->type == ICMP_TIME_EXCEEDED ||
+			   ic->type == ICMP_PARAMETERPROB) {
+			/* ABI 20: PMTUD / traceroute errors. The inner packet
+			 * carries the SNATed tuple; translate it back. */
+			dpd_dnat_icmp_err(skb, data, data_end, l3_off, l4_off,
+					  st);
 			return TC_ACT_UNSPEC;
-		k.dport = ic->un.echo.id;
+		} else {
+			return TC_ACT_UNSPEC;
+		}
 	}
 
 	rk.daddr = k.daddr[3];
