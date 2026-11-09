@@ -1040,6 +1040,54 @@ static int match_key(const struct flow_match *m, const struct dpd_flow_key *k)
 
 #define DPD_DELETE_PATTERNS 256
 
+/*
+ * ABI 20: release the NAT binding that belongs to a destroyed flow. dpdfwd
+ * feeds the same file to this command, and its first line per connection is
+ * the original (pre-SNAT) tuple, which is exactly the dpd_nat key. The
+ * reverse entry is found through the value and removed too. A missing NAT
+ * map (einat mode with an older object) is not an error.
+ */
+static int nat_release(const struct flow_match *m, int nm)
+{
+	struct dpd_nat_key nk;
+	struct dpd_nat_rev_key rk;
+	struct dpd_nat_val nv;
+	int nfd, rfd, i, released = 0;
+
+	nfd = map_open("dpd_nat");
+	if (nfd < 0)
+		return 0;
+	rfd = map_open("dpd_nat_rev");
+	for (i = 0; i < nm; i++) {
+		if (!m[i].has_s || !m[i].sport || !m[i].proto ||
+		    m[i].family != AF_INET)
+			continue;
+		memset(&nk, 0, sizeof(nk));
+		nk.saddr = m[i].saddr[3];
+		nk.sport = htons(m[i].sport);
+		nk.proto = m[i].proto;
+		memset(&nv, 0, sizeof(nv));
+		if (dpd_bpf_map_lookup_elem(nfd, &nk, &nv) || !nv.to_addr)
+			continue;
+		if (dpd_bpf_map_delete_elem(nfd, &nk))
+			continue;
+		released++;
+		if (rfd >= 0) {
+			memset(&rk, 0, sizeof(rk));
+			rk.daddr = nv.to_addr;
+			rk.dport = nv.to_port;
+			rk.proto = nk.proto;
+			dpd_bpf_map_delete_elem(rfd, &rk);
+		}
+	}
+	if (rfd >= 0)
+		close(rfd);
+	close(nfd);
+	if (released)
+		printf("released %d nat binding(s)\n", released);
+	return released;
+}
+
 static int delete_patterns(struct flow_match *m, int nm)
 {
 	struct dpd_flow_key k, nk, *hits = NULL;
@@ -1091,7 +1139,9 @@ static int delete_patterns(struct flow_match *m, int nm)
 /* delete <if|any> <proto|any> <saddr|any> <sport|0> <daddr|any> <dport|0>
  * delete -f <file>   lines: <proto> <saddr> <sport> <daddr> <dport>
  * The -f mode is what dpdfwd uses: it batches conntrack destroys into one
- * scan per second instead of forking one process per event. */
+ * scan per second instead of forking one process per event. It also releases
+ * the dpd_nat binding keyed by each line's (saddr,sport,proto), so a destroyed
+ * connection hands its external port back immediately (ABI 20). */
 static int cmd_delete(int argc, char **argv)
 {
 	struct flow_match m[DPD_DELETE_PATTERNS];
@@ -1123,6 +1173,10 @@ static int cmd_delete(int argc, char **argv)
 			printf("deleted 0 flows\n");
 			return 0;
 		}
+		/* A destroyed conntrack also frees its external port; otherwise
+		 * a client that reuses the same source port would keep a stale
+		 * binding until the TTL. */
+		nat_release(m, nm);
 		return delete_patterns(m, nm);
 	}
 	if (argc < 6) {
