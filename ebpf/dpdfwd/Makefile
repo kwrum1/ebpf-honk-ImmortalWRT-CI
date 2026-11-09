@@ -33,10 +33,15 @@ define Build/Compile
 		-o $(PKG_BUILD_DIR)/dpdfwd $(PKG_BUILD_DIR)/dpdfwd.c
 endef
 
+define Package/dpdfwd/conffiles
+/etc/dpd/class.conf
+endef
+
 define Package/dpdfwd/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/dpd
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dpdfwd $(1)/usr/sbin/dpdfwd
 	$(INSTALL_BIN) ./files/dpdfwd.init $(1)/etc/init.d/dpdfwd
+	$(INSTALL_CONF) ./files/class.conf $(1)/etc/dpd/class.conf
 	$(INSTALL_DIR) $(1)/etc/rc.d
 	ln -sf ../init.d/dpdfwd $(1)/etc/rc.d/S96dpdfwd
 endef
