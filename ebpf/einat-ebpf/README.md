@@ -23,15 +23,16 @@ Endpoint-Independent Filtering（也就是 full cone NAT），不依赖 conntrac
 | 内核需要 BPF + BTF + BPF-to-BPF calls | einat docs/guide/openwrt.md | x86_64 / aarch64 都满足；`DEBUG_INFO_BTF=y`、`BPF_SYSCALL=y`、`BPF_JIT=y`、`NET_ACT_BPF=m`、`NET_SCH_INGRESS=m` |
 | 需要 `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` | einat README | 按 root 运行；`files/capabilities.json` 也装好了（不需要授权直接运行那一行） |
 
-## 二进制来源：本仓库自己构建（p1 / p2 补丁）
+## 二进制来源：DPD 仓库构建（p1 / p2 补丁）
 
-以前这里直接下载上游 release 的 `einat-static-*`。现在改成**本仓库构建**：
+einat 属于 DPD 数据面，源码构建放在 **[kwrum1/dpd-fw](https://github.com/kwrum1/dpd-fw)**
+的 `einat/` 与 `.github/workflows/einat.yml`；本仓库只下载产物。
 
-* 工作流 `EINAT-BUILD`，上游源码 pin 到 `ba647ce6`（不 fork 仓库）；
-* 应用 `patches/einat-perf.py`（p1）与 `patches/einat-perf-p2.py`（p2），两者都按锚点打，上游漂移会直接报错；
+* 上游源码 pin 到 `ba647ce6`（不 fork 仓库）；
+* 应用 `einat/patches/einat-perf.py`（p1）与 `einat/patches/einat-perf-p2.py`（p2），两者都按锚点打，上游漂移会直接报错；
 * Nix 用上游的 `static` 预设（不带 `ipv6` feature，程序里没有 NAT66 代码），`build.rs` 原本就是 `-O2 -mcpu=v3`；
 * 产物是静态 musl 二进制 + `aya` loader，运行时不需要 libbpf/elf/zlib；
-* 发布在固定 tag `einat-p2`，sha256 写在 `Makefile` 的 `EINAT_HASH`。
+* 发布在 `kwrum1/dpd-fw` 的固定 tag `einat-p2`，sha256 写在 `Makefile` 的 `EINAT_HASH`。
 
 ### 每包收益
 
@@ -52,7 +53,7 @@ Endpoint-Independent Filtering（也就是 full cone NAT），不依赖 conntrac
 
 按 1 Mpps 粗算（只是算术）：出向普通流量每秒少 100 万次 LPM 查表；已建立 TCP 每秒少 100 万次 hash 查表，定时器重排从「每包一次」降到「每流每秒最多一次」。
 
-发布前 `EINAT-BUILD` 的 `e2e (netns)` 作业会跑 `patches/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF/full cone（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
+发布前 dpd-fw 的 `e2e (netns)` 作业会跑 `einat/tests/einat-e2e-nat.sh`：EIM（同一本地端口对两个 peer 只有一种外部端口）、EIF/full cone（没通信过的 peer 仍能打到映射端口）、ICMP、20MB TCP 传输（全程走 CT 快路径）。任一失败就不发布。
 
 为什么不把 einat 编进固件：上游 OpenWrt 打包（`muink/openwrt-einat-ebpf`）声明
 
@@ -104,7 +105,7 @@ uci commit einat
 
 ## 已验证 / 未验证
 
-* **CI（每次补丁变更）**：`EINAT-BUILD` 的 `e2e (netns)` 在 network namespace 里
+* **CI（每次补丁变更）**：`kwrum1/dpd-fw` 的 `einat` 工作流在 network namespace 里
   跑 EIM/EIF/ICMP/20MB TCP，通过后才发布二进制。
 * **实验机（x86_64，p2 二进制）**：TCX 双向挂载正常；`.data` 的
   `g_ipv4_dest_config_mode = 1`（单个 WAN 地址，走 32 位比较快路径）；已建立

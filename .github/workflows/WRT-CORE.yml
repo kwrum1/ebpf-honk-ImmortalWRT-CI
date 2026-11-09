@@ -203,6 +203,37 @@ jobs:
           $GITHUB_WORKSPACE/Scripts/Handles.sh
           $GITHUB_WORKSPACE/.github/scripts/prepare-i2c-tools.sh
 
+      # Small, stable inputs fetched from GitHub releases: the p1 honk core,
+      # the doona tarball and the einat binary. They get their own cache so a
+      # re-run does not depend on GitHub at all; the big build cache below holds
+      # the toolchain, not these. The key is the set of asset names, so bumping
+      # a pin (new commit, new asset name) misses the old cache instead of
+      # restoring a stale binary.
+      - name: Custom dl cache key
+        if: ${{ !inputs.WRT_TEST }}
+        run: |
+          cd ./wrt/
+          KEY=$(
+            {
+              sed -n 's/^HONK_ASSET_[A-Z0-9_]*:=//p' package/honk/generated-stage.mk 2>/dev/null
+              sed -n 's/^PKG_SOURCE:=//p' package/luci-app-honk/Makefile 2>/dev/null
+              sed -n 's/^[[:space:]]*EINAT_ASSET:=//p' package/ebpf/einat-ebpf/Makefile 2>/dev/null
+            } | sha256sum | cut -d' ' -f1
+          )
+          echo "DPD_DL_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "custom dl key: $KEY"
+
+      - name: Restore custom dl assets
+        id: dl-restore
+        if: ${{ !inputs.WRT_TEST }}
+        uses: actions/cache/restore@v4
+        with:
+          key: dpd-dl-${{env.DPD_DL_KEY}}
+          path: |
+            ./wrt/dl/honk-core-*
+            ./wrt/dl/doona-*
+            ./wrt/dl/einat-*
+
       - name: Custom Settings
         run: |
           cd ./wrt/
@@ -249,7 +280,24 @@ jobs:
         run: |
           cd ./wrt/
 
-          make download -j$(nproc)
+          # One retry pass: a single unreachable mirror should not kill a build
+          # that has already spent an hour on toolchain and packages. Files that
+          # did arrive are kept, so the second run only fetches what is missing.
+          make download -j$(nproc) || {
+            echo "== download failed, retrying once =="
+            sleep 15
+            make download -j$(nproc)
+          }
+
+      - name: Save custom dl assets
+        if: ${{ !inputs.WRT_TEST && success() && steps.dl-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          key: dpd-dl-${{env.DPD_DL_KEY}}
+          path: |
+            ./wrt/dl/honk-core-*
+            ./wrt/dl/doona-*
+            ./wrt/dl/einat-*
 
       - name: Compile Firmware
         if: ${{ !inputs.WRT_TEST }}
@@ -323,7 +371,7 @@ jobs:
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
               NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
-              NEW_FILE="$NAME"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE"."$EXT"
+              NEW_FILE="dpd-fw-wrt-$NAME-${WRT_WIFI#WIFI-}-$WRT_DATE.$EXT"
               mv -f $FILE ./upload/$NEW_FILE
             done
 
@@ -386,10 +434,11 @@ jobs:
         if: ${{ !inputs.WRT_TEST }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
+          tag_name: dpd-fw-wrt-${{env.WRT_CONFIG}}-${{env.WRT_DATE}}
+          name: DPD-FW-WRT ${{env.WRT_CONFIG}} ${{env.WRT_DATE}}
           files: ./wrt/upload/*
           body: |
-            平台固件包，内含多个设备，请选择需要的设备固件。
+            **DPD-FW-WRT** 固件包，内含多个设备，请选择需要的设备固件。
 
             源码：${{env.WRT_REPO}}
             分支：${{env.WRT_BRANCH}}

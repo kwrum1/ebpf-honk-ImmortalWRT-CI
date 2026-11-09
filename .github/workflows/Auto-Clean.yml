@@ -3,26 +3,25 @@
 #
 # Auto-Clean: the daily housekeeping run, and the thing that starts the builds.
 #
-# Upstream's model, kept on purpose: one nightly run deletes yesterday's
-# releases/tags/workflow history, and every build pipeline is triggered by its
-# completion (`workflow_run`). That keeps exactly one day of artifacts and gives
-# the whole matrix a single start time, instead of six independent crons that
-# can overlap on a shared runner quota.
+# Upstream's model, kept on purpose: one nightly run removes the previous
+# images, tags, artifacts and run history, and every build pipeline is
+# triggered by its completion (`workflow_run`). That keeps exactly one day of
+# output and gives the whole matrix a single start time, instead of six
+# independent crons that can overlap on a shared runner quota.
 #
-# Retention is upstream's: all firmware releases and runs are removed each
-# night. Set `releases_keep_latest` to N if a few days of images should survive.
+# Start time: 20:00 UTC = 04:00 Asia/Shanghai. Images are ready by ~06:00.
 #
-# EXCEPTION: `einat-*` releases/tags are kept. They are not firmware output --
-# they are the *input* the image builds download (`ebpf/einat-ebpf/Makefile`
-# pins `releases/download/einat-p2`). Deleting them made every X86/ROCKCHIP
-# build fail at the einat download with a 404; the keyword filter runs before
-# the retention count, so firmware releases still go away every night.
+# EXCEPTION: the `core-p1` release is kept. It is not firmware output -- it is
+# the patched honk core the X86/ROCKCHIP image builds download
+# (`patches/honk/apply-makefile.sh` pins `releases/download/core-p1`). The
+# keyword filter runs before the retention count, so firmware releases still go
+# away every night.
 
 name: Auto-Clean
 
 on:
   schedule:
-    - cron: 0 22 * * *
+    - cron: 0 20 * * *
   workflow_dispatch:
 
 permissions:
@@ -38,16 +37,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Delete old Releases and Workflows
+      - name: Delete old Releases, Tags and Workflow runs
         uses: ophub/delete-releases-workflows@main
         with:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           delete_releases: true
           releases_keep_latest: 0
-          # einat binaries are build inputs, never delete them (see header).
-          releases_keep_keyword: "einat-"
+          # core-p1 is a build input, never delete it (see header).
+          releases_keep_keyword: "core-p1"
           delete_tags: true
           delete_workflows: true
           # Keep one day of runs: with 0 the job also wipes runs that are still
           # queued/in progress, which makes a CI failure impossible to inspect.
           workflows_keep_day: 1
+
+      # The action above does not touch artifacts. They are the largest thing
+      # an image build leaves behind (build reports, provenance, per-target
+      # uploads), so a nightly full wipe keeps the repository clean.
+      - name: Delete all workflow artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.id, .name] | @tsv' > /tmp/artifacts.tsv || true
+
+          total=$(wc -l < /tmp/artifacts.tsv)
+          echo "artifacts to delete: $total"
+          while IFS=$'\t' read -r id name; do
+            [ -n "${id:-}" ] || continue
+            echo "  delete $id  $name"
+            gh api -X DELETE "/repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null || \
+              echo "  warning: could not delete $id"
+          done < /tmp/artifacts.tsv

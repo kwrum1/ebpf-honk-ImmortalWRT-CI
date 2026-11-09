@@ -2,18 +2,18 @@
 #
 # ebpf: einat-ebpf as a PREBUILT-BINARY package.
 #
-# The binary is built by this repository's EINAT-BUILD workflow from upstream
-# source (pinned commit) with two patches applied, and published at the fixed
-# release tag `einat-p2`:
+# The binary is built and published by the DPD repository
+# (kwrum1/dpd-fw, `.github/workflows/einat.yml`) from upstream source (pinned
+# commit) with two patches applied, under the fixed release tag `einat-p2`:
 #
-#   patches/einat-perf.py (p1)
+#   einat/patches/einat-perf.py (p1)
 #     * upstream `static` preset: v4-only, no NAT66 code in the BPF program
 #       (this firmware never NATs v6; v6 is routed and accelerated by dpd);
 #     * one less full L2/L3 parse per packet per direction: the v4-only build
 #       still called get_is_ipv4() at the top of both TC programs even though
 #       parse_packet() immediately parses the same header again.
 #
-#   patches/einat-perf-p2.py (p2)
+#   einat/patches/einat-perf-p2.py (p2)
 #     * dest_config fast path: with a single dest entry (the WAN address) the
 #       egress hook compares the packet destination instead of doing an LPM
 #       lookup on every packet;
@@ -22,11 +22,11 @@
 #       up to CT_FAST_PATH_MS after the last real lookup. SYN/FIN/RST, ICMP
 #       errors, UDP/ICMP and any other CT state still take the slow path.
 #
-# The same EINAT-BUILD run executes patches/einat-e2e-nat.sh in network
+# The same workflow run executes einat/tests/einat-e2e-nat.sh in network
 # namespaces (EIM, EIF/full cone, ICMP, 20 MB TCP) before publishing, so the
 # assets below are known to load and forward. Hashes are the sha256 of those
-# assets: re-running EINAT-BUILD on a newer upstream commit means updating the
-# version, the four hash lines and PKG_RELEASE.
+# assets: re-running that workflow on a newer upstream commit means updating
+# the version, the four hash lines and PKG_RELEASE.
 #
 # PKG_VERSION stays 0.1.11: the apk package format rejects a version string
 # containing a dash (`0.1.11-p2-r1` -> "info field 'version' has invalid
@@ -74,7 +74,7 @@ else
 endif
 
 PKG_SOURCE:=$(EINAT_ASSET)
-PKG_SOURCE_URL:=https://github.com/kwrum1/ebpf-honk-ImmortalWRT-CI/releases/download/einat-p2
+PKG_SOURCE_URL:=https://github.com/kwrum1/dpd-fw/releases/download/einat-p2
 PKG_HASH:=$(EINAT_HASH)
 
 include $(INCLUDE_DIR)/package.mk
@@ -95,7 +95,7 @@ define Package/einat-ebpf/description
   netfilter conntrack masquerading. Installed from upstream's prebuilt static
   binary (aya loader, no runtime library dependencies).
 
-  This build ships the einat-p2 asset from the EINAT-BUILD workflow.
+  This build ships the einat-p2 asset built by the DPD repository (kwrum1/dpd-fw).
 endef
 
 define Package/einat-ebpf/conffiles

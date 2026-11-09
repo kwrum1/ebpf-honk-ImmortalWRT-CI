@@ -40,13 +40,15 @@ working and - with `UPSTREAM-CHECK` - fails loudly when the anchor itself is
 gone. That is the property that makes "follow upstream" cheap: bump the branch,
 run `UPSTREAM-CHECK`, and only look at the anchors that changed.
 
-The one binary we ship that is not built from our own sources is `einat`,
-and it follows the same rule: `EINAT-BUILD` clones `EHfive/einat-ebpf` at a
-pinned commit, applies `patches/einat-perf.py` (p1) and
-`patches/einat-perf-p2.py` (p2) -- both anchored, both fail loudly on drift --
-runs the netns e2e (`patches/einat-e2e-nat.sh`), and only then publishes the
-`einat-p2` release the package downloads. Upstream drift is handled the same
-way as `UPSTREAM-CHECK`: bump the pin, fix the anchor, run the job.
+The one binary we ship that is not built from our own sources is `einat`.
+It is part of the DPD dataplane, so its source build lives in **kwrum1/dpd-fw**
+(`einat/`): that workflow clones `EHfive/einat-ebpf` at a pinned commit, applies
+`einat/patches/einat-perf.py` (p1) and `einat/patches/einat-perf-p2.py` (p2) --
+both anchored, both fail loudly on drift -- runs the netns e2e
+(`einat/tests/einat-e2e-nat.sh`), and only then publishes the `einat-p2`
+release. This repository only pins the URL and the two sha256 values in
+`ebpf/einat-ebpf/Makefile`. Upstream drift is handled in dpd-fw the same way:
+bump the pin, fix the anchor, run the job.
 
 ## Following upstream
 

@@ -237,31 +237,39 @@ X86|ROCKCHIP)
 	fi
 
 	# einat is not built here: the package downloads a prebuilt binary from the
-	# release that EINAT-BUILD publishes at a fixed tag (einat-p2). If that
-	# release is missing, the failure used to surface ~30 minutes later as a bare
-	# 404 from the OpenWrt download helper. Check the asset now (seconds) and say
-	# what to do about it. Only a definite 404 is fatal; a network hiccup is not.
+	# release that kwrum1/dpd-fw's `einat` workflow publishes at the fixed tag
+	# einat-p2. If that release is missing, the failure used to surface ~30
+	# minutes later as a bare 404 from the OpenWrt download helper. Check the
+	# asset now (seconds) and say what to do about it. Only a definite 404 is
+	# fatal; a network hiccup is not.
+	#
+	# Offline: if the tarball is already in dl/ (warm cache or copied by hand)
+	# OpenWrt never downloads it, so skip the check instead of requiring network.
 	EINAT_URL=$(sed -n 's|^PKG_SOURCE_URL:=\(.*\)|\1|p' ./package/ebpf/einat-ebpf/Makefile | head -n 1)
 	EINAT_ASSET=$(sed -n 's|^[[:space:]]*EINAT_ASSET:=\(einat-[^[:space:]]*\)|\1|p' ./package/ebpf/einat-ebpf/Makefile | head -n 1)
 	if [ -n "$EINAT_URL" ] && [ -n "$EINAT_ASSET" ]; then
-		EINAT_CODE=$(curl -s -o /dev/null -w '%{http_code}' -L --connect-timeout 10 --retry 2 \
-			"$EINAT_URL/$EINAT_ASSET" 2>/dev/null || echo 000)
-		echo "einat asset: $EINAT_URL/$EINAT_ASSET -> HTTP $EINAT_CODE"
-		case "$EINAT_CODE" in
-		200) ;;
-		404)
-			echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-			echo "!! FATAL: the einat-* release the package downloads is missing."
-			echo "!! $EINAT_URL/$EINAT_ASSET"
-			echo "!! einat-* releases are build INPUTS, not images: run the EINAT-BUILD"
-			echo "!! workflow to publish them again (Auto-Clean keeps the tag)."
-			echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-			exit 1
-			;;
-		*)
-			echo "warning: could not verify the einat asset (HTTP $EINAT_CODE), continuing"
-			;;
-		esac
+		if [ -f "./dl/$EINAT_ASSET" ]; then
+			echo "einat asset: dl/$EINAT_ASSET is present, skipping the network check"
+		else
+			EINAT_CODE=$(curl -s -o /dev/null -w '%{http_code}' -L --connect-timeout 10 --retry 2 \
+				"$EINAT_URL/$EINAT_ASSET" 2>/dev/null || echo 000)
+			echo "einat asset: $EINAT_URL/$EINAT_ASSET -> HTTP $EINAT_CODE"
+			case "$EINAT_CODE" in
+			200) ;;
+			404)
+				echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+				echo "!! FATAL: the einat release the package downloads is missing."
+				echo "!! $EINAT_URL/$EINAT_ASSET"
+				echo "!! einat is a build INPUT, not an image: run the `einat` workflow"
+				echo "!! in kwrum1/dpd-fw to publish it again (its tag is fixed)."
+				echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+				exit 1
+				;;
+			*)
+				echo "warning: could not verify the einat asset (HTTP $EINAT_CODE), continuing"
+				;;
+			esac
+		fi
 	fi
 	;;
 *)

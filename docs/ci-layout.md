@@ -15,11 +15,12 @@ upstream, and `ebpf/` here is the only place a `dpd_fastpath.bpf.c` change can
 live. `BPF-CHECK` compiles it on every change (~1 minute) instead of finding out
 at the end of a 90-minute image build.
 
-`einat-ebpf` is the same idea one step removed: upstream source, built here
-with `patches/einat-perf.py` (p1) and `patches/einat-perf-p2.py` (p2)
-against a pinned commit. `EINAT-BUILD` runs `patches/einat-e2e-nat.sh` in
-network namespaces (EIM, EIF/full cone, ICMP, a 20 MB TCP transfer) and only
-then publishes the `einat-p2` release that the package downloads.
+`einat-ebpf` is different: it is part of the DPD dataplane, so it is built and
+published by **kwrum1/dpd-fw** (`einat/` + `.github/workflows/einat.yml`). That
+workflow applies the p1/p2 datapath patches to a pinned `EHfive/einat-ebpf`
+commit, runs the netns e2e (EIM, EIF/full cone, ICMP, 20 MB TCP), and only then
+publishes the `einat-p2` release. This repository only downloads the binary
+(`ebpf/einat-ebpf/Makefile` pins the URL and both sha256 values).
 
 ## Branches and what they mean
 
@@ -38,7 +39,6 @@ then publishes the `einat-p2` release that the package downloads.
 | `MTK-ALL` | MEDIATEK-WIFI-YES/NO | `@owrt` | MediaTek |
 | `WRT-TEST` | one config, by hand | `owrt` or `main` | reproduce a single build |
 | `BPF-CHECK` | — | `ebpf/` | compile the datapath + dpdctl in ~1 min |
-| `EINAT-BUILD` | x86_64, aarch64 | `patches/` + upstream `EHfive/einat-ebpf` (pinned commit) | einat binaries with the p1/p2 datapath patches; publishes the `einat-p2` release only after the netns e2e passes |
 
 Automation, restored to the upstream shape:
 
@@ -50,7 +50,6 @@ Automation, restored to the upstream shape:
 | `WRT-TEST` | manual only | one config |
 | `BPF-CHECK` | weekly + manual | compile the datapath in ~1 min |
 | `UPSTREAM-CHECK` | daily 18:15 UTC + manual | verify the build-time anchors on both branches |
-| `EINAT-BUILD` | on `patches/einat-*` change, or manual | netns e2e (EIM/EIF/ICMP/TCP), then build and publish einat |
 
 A push alone never starts a build: a nightly build always pins the source commit
 it cloned, and the release records it.
