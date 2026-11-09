@@ -99,10 +99,14 @@ for cfg in "$ROOT"/ebpf/*/files/*.config; do
 	pkgdir=$(dirname "$(dirname "$cfg")")
 	while IFS= read -r opt; do
 		[ -n "$opt" ] || continue
-		if grep -rqs --exclude="$(basename "$cfg")" -- "$opt" "$pkgdir"; then
+		# Some knobs are declared by the datapath package but consumed by the
+		# flow manager (auto_tune, the TTL knobs): dpd_fastpath.config is the
+		# single place the UI writes them, dpdfwd is what reads them.
+		if grep -rqs --exclude="$(basename "$cfg")" -- "$opt" "$pkgdir" ||
+			grep -rqs -- "$opt" "$ROOT/ebpf/dpdfwd"; then
 			ok "${cfg#$ROOT/}: $opt"
 		else
-			bad "${cfg#$ROOT/} 定义了 '$opt'，但 ${pkgdir#$ROOT/} 里没有任何脚本引用它"
+			bad "${cfg#$ROOT/} 定义了 '$opt'，但 ${pkgdir#$ROOT/} 和 ebpf/dpdfwd 里都没有引用"
 		fi
 	done < <(grep -oE '^[[:space:]]*(option|list)[[:space:]]+[A-Za-z0-9_]+' "$cfg" |
 		awk '{print $2}' | sort -u)
