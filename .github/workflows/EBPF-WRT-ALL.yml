@@ -34,7 +34,8 @@ on:
         required: false
         type: boolean
 
-permissions: write-all
+permissions:
+  contents: write
 
 concurrency:
   group: ebpf-wrt-all

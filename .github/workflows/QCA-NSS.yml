@@ -36,7 +36,12 @@ on:
         required: false
         type: boolean
 
-permissions: write-all
+permissions:
+  contents: write
+
+concurrency:
+  group: qca-nss
+  cancel-in-progress: false
 
 jobs:
   config:

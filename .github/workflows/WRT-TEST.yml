@@ -4,6 +4,9 @@
 #CI项目
 name: WRT-TEST
 
+# IPQ53XX / IPQ95XX 的 Config 保留，但上游 kmod-ath12k 依赖未满足（镜像组装
+# 会报 no such package），暂不从手动测试里构建；上游放开设限后再加回 options。
+
 #CI计划
 on:
   #手动编译
@@ -16,12 +19,10 @@ on:
         options:
           - AIROHA-AN7581
           - AIROHA-AN7583
-          - IPQ53XX
           - IPQ60XX-WIFI-NO
           - IPQ60XX-WIFI-YES
           - IPQ807X-WIFI-NO
           - IPQ807X-WIFI-YES
-          - IPQ95XX
           - MEDIATEK-WIFI-NO
           - MEDIATEK-WIFI-YES
           - ROCKCHIP
@@ -48,7 +49,13 @@ on:
         type: boolean
 
 #CI权限
-permissions: write-all
+permissions:
+  contents: write
+
+#同一分支只保留一个手动测试任务
+concurrency:
+  group: wrt-test
+  cancel-in-progress: true
 
 #CI任务
 jobs:

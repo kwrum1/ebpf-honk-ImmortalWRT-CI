@@ -5,8 +5,7 @@
 
 - **X86 / ROCKCHIP**：上游 `@owrt` + 本仓库 `ebpf/` 数据面（einat + dpd + ACL + QoS + DNS + luci-front + LuCI 页）。
 - **IPQ60XX / IPQ807X**：同一批设备出两版 —— `QCA-PPE`（`@owrt`，内核 flowtable/PPE）和 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）。
-- **IPQ53XX**：走 `QCA-PPE`（`@owrt`）。`target/linux/qualcommbe` 的 `SUBTARGETS:=ipq53xx ipq95xx` 只在 `owrt` 上存在，`main` 只有 `ipq95xx`（以前把 IPQ53XX 放到 `QCA-NSS`/`main` 会静默解析成 `ipq95xx`，白跑一次构建）。
-- **IPQ95XX**：走 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）——`main` 上的 `qualcommbe` 只有这一个子目标。
+- **IPQ53XX / IPQ95XX**：配置保留，但**暂不构建**。上游 `qualcommbe` 的 `kmod-ath12k` 依赖在 `owrt`/`main` 上都未满足（`depends on !(TARGET_qualcommbe) || TARGET_qualcommax`），镜像组装会报 `kmod-ath12k (no such package)`；等上游放开设限后再加回矩阵。
 - **MEDIATEK**：上游 `@owrt`，原版包集。
 
 ### 我该刷哪个？
@@ -17,7 +16,7 @@
 | RK3399 / RK3568 等 ARM64 | `EBPF-WRT-ALL` → `ROCKCHIP` | 同上，aarch64 |
 | IPQ60xx / IPQ807x（要 PPE） | `QCA-PPE` | 内核 flowtable，兼容性最好 |
 | IPQ60xx / IPQ807x（要 NSS 固件） | `QCA-NSS` | 同型号，`@main`，NSS 驱动栈 |
-| IPQ53xx / IPQ95xx | `QCA-PPE`（IPQ53xx）/ `QCA-NSS`（IPQ95xx） | IPQ53xx 在 `owrt`，IPQ95xx 在 `main`；两边的 `qualcommbe` 子目标不同 |
+| IPQ53xx / IPQ95xx | 暂不构建 | 上游 `kmod-ath12k` 依赖未满足；配置保留，等上游放开 |
 | MediaTek | `MTK-ALL` | 原版 |
 
 ---
@@ -27,10 +26,13 @@
 | 工作流 | 配置 | 源码 | 分支 | 数据面 |
 |---|---|---|---|---|
 | `EBPF-WRT-ALL` | `X86`, `ROCKCHIP` | `VIKINGYFY/immortalwrt` | `owrt` | 本仓库 `ebpf/`（eBPF） |
-| `QCA-PPE` | `IPQ60XX-WIFI-YES/NO`, `IPQ807X-WIFI-YES/NO`, `IPQ53XX` | `VIKINGYFY/immortalwrt` | `owrt` | 内核 flowtable / PPE |
-| `QCA-NSS` | 同前四个 + `IPQ95XX` | `VIKINGYFY/immortalwrt` | `main` | `qca-nss-drv` / ECM |
+| `QCA-PPE` | `IPQ60XX-WIFI-YES/NO`, `IPQ807X-WIFI-YES/NO` | `VIKINGYFY/immortalwrt` | `owrt` | 内核 flowtable / PPE |
+| `QCA-NSS` | 同一批四个配置 | `VIKINGYFY/immortalwrt` | `main` | `qca-nss-drv` / ECM |
 | `MTK-ALL` | `MEDIATEK-WIFI-YES/NO` | `VIKINGYFY/immortalwrt` | `owrt` | 原版 |
 | `WRT-TEST` | 任选一个 | 任选 | `owrt` / `main` | 按配置 |
+
+`Config/IPQ53XX.txt` 和 `Config/IPQ95XX.txt` 保留，但暂不在矩阵里（上游
+`kmod-ath12k` 依赖未满足）。
 
 发布 tag：`<CONFIG>-<源码所有者>-<分支>-<构建时间>`，例如
 
@@ -62,7 +64,14 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 | 上游锚点检查 | `UPSTREAM-CHECK`：每天 18:15 UTC，对 `owrt` / `main` 各 clone 一次上游，核对构建期改动还匹配不匹配 |
 | 手动 | Actions → 选工作流 → Run workflow（`WRT-TEST` 默认只出 `.config`） |
 
-保留策略是上游的默认值（`releases_keep_latest: 0`、`workflows_keep_day: 0`）：只留当天产物。想留几天改 `Auto-Clean` 里那一行即可。
+保留策略是上游的默认值（`releases_keep_latest: 0`、`workflows_keep_day: 1`）：只留当天固件产物，运行记录留 1 天便于排错。想留几天改 `Auto-Clean` 里那一行即可。
+
+### 2.1 CI 维护约定
+
+- Actions 固定到稳定大版本：`checkout`/`upload-artifact`/`download-artifact`/`cache` 用 `@v4`，`action-gh-release` 用 `@v2`；不跟 `@main`。
+- 权限最小化：构建工作流 `contents: write`（只给 release）；`Auto-Clean` 额外 `actions: write`；`Cache-Clean` 用 `contents: read` + `actions: write`；检查类只读。
+- 每个构建工作流有独立 `concurrency`，手动与定时不会重叠；镜像任务 `timeout-minutes: 240`。
+- `Auto-Clean` 是唯一定时入口，完成后通过 `workflow_run` 触发四个构建；`einat-*` release 是构建输入，永不被清理。
 
 ---
 
@@ -83,7 +92,8 @@ ebpf/                数据面包（构建时拷进 package/ebpf/，只给 X86/R
 Config/              每个目标的 .config 片段
   GENERAL.txt          X86 / ROCKCHIP（eBPF 数据面那一套）
   GENERAL-STOCK.txt    IPQ / MTK（原版包集）
-  X86 / ROCKCHIP / IPQ60XX-* / IPQ807X-* / IPQ53XX / IPQ95XX / MEDIATEK-* / TEST
+  X86 / ROCKCHIP / IPQ60XX-* / IPQ807X-* / MEDIATEK-* / TEST
+  （IPQ53XX / IPQ95XX 配置保留，暂未进矩阵）
 Scripts/
   Packages.sh         第三方包 + 数据面拷贝（只 X86/ROCKCHIP）+ honk 资产
   Settings.sh         .config 生成、LAN IP/WiFi/主机名

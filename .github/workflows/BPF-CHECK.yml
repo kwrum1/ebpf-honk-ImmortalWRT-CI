@@ -22,11 +22,13 @@ on:
   schedule:
     - cron: 0 18 * * 0
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   compile:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Toolchain
         run: |
@@ -34,7 +36,7 @@ jobs:
           sudo apt-get -yqq install clang llvm libbpf-dev libelf-dev pkg-config
 
       - name: Fetch datapath source
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Locate sources
         run: |
@@ -69,7 +71,7 @@ jobs:
           ./dpdctl version
 
       - name: Upload objects
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v4
         with:
           name: datapath-objects
           path: |

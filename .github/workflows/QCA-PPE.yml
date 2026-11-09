@@ -40,7 +40,12 @@ on:
         required: false
         type: boolean
 
-permissions: write-all
+permissions:
+  contents: write
+
+concurrency:
+  group: qca-ppe
+  cancel-in-progress: false
 
 jobs:
   config:

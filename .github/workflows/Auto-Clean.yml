@@ -25,11 +25,18 @@ on:
     - cron: 0 22 * * *
   workflow_dispatch:
 
-permissions: write-all
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: maintenance-auto-clean
+  cancel-in-progress: false
 
 jobs:
   auto_clean:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Delete old Releases and Workflows
         uses: ophub/delete-releases-workflows@main

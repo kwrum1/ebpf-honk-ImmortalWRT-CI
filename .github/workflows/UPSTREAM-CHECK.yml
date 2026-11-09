@@ -19,19 +19,21 @@ on:
     - cron: 15 18 * * *
   workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   anchors:
     name: ${{ matrix.BRANCH }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         BRANCH: [owrt, main]
     steps:
       - name: Checkout this repo
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Clone upstream
         run: |

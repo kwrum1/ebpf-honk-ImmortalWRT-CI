@@ -64,12 +64,13 @@ jobs:
   core:
     name: ${{inputs.WRT_SOURCE}}
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     outputs:
       cache_prefix: ${{steps.initialize-values.outputs.cache_prefix}}
       cache_key: ${{steps.clone-code.outputs.cache_key}}
     steps:
       - name: Checkout Projects
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Initialization Environment
         env:
@@ -168,7 +169,7 @@ jobs:
       - name: Restore Build Cache
         id: cache-restore
         if: ${{ !inputs.WRT_TEST }}
-        uses: actions/cache/restore@main
+        uses: actions/cache/restore@v4
         with:
           key: ${{env.WRT_CACHE_KEY}}
           restore-keys: ${{env.WRT_CACHE_PREFIX}}-
@@ -278,7 +279,7 @@ jobs:
 
       - name: Save Build Cache
         if: ${{ !inputs.WRT_TEST && success() && steps.cache-restore.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@main
+        uses: actions/cache/save@v4
         with:
           key: ${{env.WRT_CACHE_KEY}}
           path: |
@@ -376,14 +377,14 @@ jobs:
 
       - name: Upload Provenance
         if: ${{ !inputs.WRT_TEST }}
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v4
         with:
           name: provenance-${{env.WRT_CONFIG}}
           path: ./wrt/upload/provenance-*.txt
 
       - name: Release Firmware
         if: ${{ !inputs.WRT_TEST }}
-        uses: softprops/action-gh-release@master
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
           files: ./wrt/upload/*

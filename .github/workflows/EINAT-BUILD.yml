@@ -30,7 +30,9 @@ on:
       - 'patches/einat-e2e-nat.sh'
       - '.github/workflows/EINAT-BUILD.yml'
 
-permissions: write-all
+permissions:
+  contents: write
+  actions: read
 
 concurrency:
   group: einat-build
@@ -51,9 +53,10 @@ jobs:
   test:
     name: e2e (netns)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout this repo
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Clone einat (pinned)
         run: |
@@ -88,9 +91,10 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout this repo
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Clone einat (pinned)
         run: |
@@ -129,7 +133,7 @@ jobs:
           ./${{ env.ASSET_PREFIX }}-x86_64-unknown-linux-musl --help | head -5
 
       - name: Upload
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v4
         with:
           name: einat-${{ matrix.arch }}
           path: ${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
@@ -137,8 +141,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@main
+      - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
@@ -150,7 +155,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Publish
-        uses: softprops/action-gh-release@master
+        uses: softprops/action-gh-release@v2
         with:
           # Fixed tag: the package pins this URL; the body records the run.
           tag_name: ${{ env.RELEASE_TAG }}
