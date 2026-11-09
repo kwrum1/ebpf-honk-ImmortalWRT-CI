@@ -94,8 +94,22 @@ fetch_honk_stage() {
 	[ -d ./package/honk ] || return 0
 	core=$(sed -n 's/^CORE_COMMIT:=//p' ./package/honk/Makefile 2>/dev/null | head -1)
 	[ -n "$core" ] || return 0
-	rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-		"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+	# The CI runner always has GITHUB_TOKEN. A local build may not, and the
+	# unauthenticated API is rate-limited (60/h): a failed lookup here used to
+	# leave the tree without generated-stage.mk and the image failed at the
+	# honk download step, minutes later and with a misleading message. Try
+	# both, and say so when neither produced a usable body.
+	if [ -n "${GITHUB_TOKEN:-}" ]; then
+		rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+			"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+	fi
+	if [ -z "${rel_json:-}" ]; then
+		rel_json=$(curl -fsSL \
+			"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+	fi
+	if [ -z "${rel_json:-}" ]; then
+		echo "!! honk: GitHub API returned no releases (set GITHUB_TOKEN to avoid the rate limit)" >&2
+	fi
 	# $1 = an asset name that identifies the release, $2 = the asset to fetch.
 	# The p1 release (core-p1) is the core built from ci/patches/
 	# honk-direct-unspec.py: direct flows come back as TC_ACT_UNSPEC so whatever
