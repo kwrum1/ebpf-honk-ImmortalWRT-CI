@@ -220,6 +220,11 @@
  *      `dpdctl nat_addr`. einat must not be attached on the uplink
  *      (double NAT) and fw4 needs a WAN->LAN accept for the untracked
  *      return path; the default (`nat_forward=einat`) is unchanged.
+ *      ICMP echo shares the allocator (the 16-bit echo id is the port)
+ *      but is never accelerated. The return DNAT lives in its own
+ *      `classifier/nat` stage at pref 50, ahead of router-acl (90): at the
+ *      main program's 100 an untranslated reply looks like WAN->router and
+ *      the policy layer drops it (measured: ICMP 0/3 vs 3/3).
  */
 #define DPD_ABI_VERSION		20
 
