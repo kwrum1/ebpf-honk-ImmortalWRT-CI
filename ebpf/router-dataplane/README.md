@@ -399,7 +399,7 @@ UDP: iph->ihl*4 + 8          + gso_size
 
 #### 2.6.5 已做的验证
 
-* CI `BPF-CHECK` 在 Ubuntu 上编译同一份源码（clang -target bpf），ABI 读出 9。
+CI 在 `kwrum1/dpd-fw` 的 `ci` 工作流里编译同一份源码（clang -target bpf）并校验 ABI。
 * 实验机（x86_64，内核 6.18）`:  新对象通过 verifier（`tc filter add` 成功），
   `bpftool map dump dpd_cfg` 显示新字段，`dpd_stats` 块结构与 20 个计数器对应。
 * 功能：172k 包命中、54 条流学习、`redirect_ok == flow_hit`；代际号 +1 后

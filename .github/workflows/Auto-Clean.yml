@@ -11,11 +11,9 @@
 #
 # Start time: 20:00 UTC = 04:00 Asia/Shanghai. Images are ready by ~06:00.
 #
-# EXCEPTION: the `core-p1` release is kept. It is not firmware output -- it is
-# the patched honk core the X86/ROCKCHIP image builds download
-# (`patches/honk/apply-makefile.sh` pins `releases/download/core-p1`). The
-# keyword filter runs before the retention count, so firmware releases still go
-# away every night.
+# This repository holds no build inputs any more: the patched honk core and the
+# einat binaries are published by kwrum1/dpd-fw, so everything here is
+# disposable firmware output.
 
 name: Auto-Clean
 
@@ -43,8 +41,6 @@ jobs:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           delete_releases: true
           releases_keep_latest: 0
-          # core-p1 is a build input, never delete it (see header).
-          releases_keep_keyword: "core-p1"
           delete_tags: true
           delete_workflows: true
           # Keep one day of runs: with 0 the job also wipes runs that are still

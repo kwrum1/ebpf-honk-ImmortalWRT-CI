@@ -391,6 +391,24 @@ jobs:
             make clean -j$(nproc)
           fi
 
+      # A compile that ends without an image (mirror died, image assembly
+      # skipped, runner killed) must never produce a release with only the
+      # Config/provenance files. Fail here instead.
+      - name: Verify firmware image
+        if: ${{ !inputs.WRT_TEST }}
+        run: |
+          cd ./wrt/upload
+          ls -lh
+          count=$(find . -maxdepth 1 -type f \
+            \( -name '*.img' -o -name '*.img.gz' -o -name '*.bin' -o -name '*.itb' \
+               -o -name '*.trx' -o -name '*.elf' -o -name '*.tar.gz' -o -name '*.squashfs' \) \
+            -size +1M | wc -l)
+          echo "images in upload/: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "!! the build finished without a firmware image -- refusing to publish" >&2
+            exit 1
+          fi
+
       - name: Build Provenance
         run: |
           cd ./wrt/

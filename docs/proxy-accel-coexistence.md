@@ -372,7 +372,7 @@ harness 自己的汇总：**PASS=12 FAIL=4**。
 
 ### 9.1 具体改动（构建期补丁，不改上游仓库）
 
-位置：`patches/honk/ci/patches/honk-direct-unspec.py`，打在 pinned upstream commit 上。
+位置：`kwrum1/dpd-fw` 的 `honk/patches/honk-direct-unspec.py`，打在 pinned upstream commit 上。
 
 - `crates/honk-ebpf-common/src/lib.rs`：新增 `DIRECT_UNSPEC_MARK = 0x2000_0000`
   （避开 TPROXY `0x0800_0000`、CLASSIFIED `0x4000_0000`、NFQUEUE `0x8000_0000`）。

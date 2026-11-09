@@ -1,7 +1,6 @@
-# honk: x86/RK source patch, IPQ/MTK stock
+# honk: x86/RK package patch, IPQ/MTK stock
 
-This directory removes the `kwrum1/openwrt-honk` fork from the build. The
-firmware always clones the latest **upstream** `kenzok8/openwrt-honk`; for
+The firmware always clones the latest **upstream** `kenzok8/openwrt-honk`; for
 `X86` / `ROCKCHIP` two things are applied on top of that clone:
 
 1. `honk-x86rk.patch` — a plain unified diff against the upstream package
@@ -26,9 +25,9 @@ luci-app-honk/.../rpcd/honk    auto-recover before taking the lock
 ```
 
 Why for x86/RK only: honk owns the LAN TCX hook. The p1 core returns direct
-flows as `TC_ACT_UNSPEC`, so the classic TC chain (dpd on x86/RK) still sees
-them. On IPQ/MTK the kernel flowtable/PPE does the acceleration and the stock
-core is correct.
+flows as `TC_ACT_UNSPEC`, so the classic TC chain (DPD) still sees them. On
+IPQ/MTK the kernel flowtable/PPE does the acceleration and the stock core is
+correct.
 
 ## Makefile
 
@@ -36,7 +35,7 @@ core is correct.
 rename fails the build):
 
 - pins `CORE_COMMIT` (the commit the p1 patch is written against);
-- points `HONK_SOURCE_TAG`/`HONK_SOURCE_URL` at this repository's `core-p1`
+- points `HONK_SOURCE_TAG`/`HONK_SOURCE_URL` at **kwrum1/dpd-fw**'s `core-p1`
   release instead of upstream's;
 - appends the `-p1` suffix to the per-arch asset names; hashes stay `SKIP` (the
   real hashes come from `generated-stage.mk`, fetched from the release);
@@ -44,30 +43,25 @@ rename fails the build):
 
 ## Patched core
 
-`ci/` is the source-build side, run by `.github/workflows/HONK-CORE.yml`:
+The core itself is **not built here**. `kwrum1/dpd-fw` owns it:
 
-- `pins.env` pins `daeuniverse/honk` and the release repo;
-- `build-core.sh` builds x86_64/aarch64/armv7 and publishes under `core-p1`;
-- `patches/honk-direct-unspec.py` hands direct-classified flows back to the
-  classic TC chain (`DIRECT_UNSPEC_MARK` + `TC_ACT_UNSPEC`);
-- `patches/honk-core-config-validate.patch` is the upstream config check.
+- `honk/pins.env` pins `daeuniverse/honk` and the release tag;
+- `honk/build-core.sh` builds x86_64/aarch64/armv7;
+- `honk/patches/honk-direct-unspec.py` hands direct-classified flows back to
+  the classic TC chain (`DIRECT_UNSPEC_MARK` + `TC_ACT_UNSPEC`);
+- `.github/workflows/honk-core.yml` publishes `core-p1`.
 
-Both patch scripts are anchor-based on purpose: if upstream moves, HONK-CORE or
-the image build fails loudly and the pin/patch must be bumped together. That is
-the whole maintenance cost — no branch to merge.
+`Scripts/Packages.sh` (`fetch_honk_stage`) downloads `generated-stage.mk` and
+the provenance file from that release; `make download` then fetches the
+matching `honk-core-<commit>-p1-<arch>.tar.gz`.
 
 ## Keeping up with upstream
 
-`honk-x86rk.patch` carries only the ~180 lines this project actually changes.
-When `kenzok8/openwrt-honk` moves:
-
-1. refresh the clone, run `patch -p1 --dry-run`; a rejected hunk is the only
-   thing to rebase (usually a few lines);
-2. if the core commit changed, bump `CORE_COMMIT` in `ci/pins.env` **and** in
-   `apply-makefile.sh`, re-run `honk-direct-unspec.py` against the new commit
-   (it fails if the anchors moved), then run **HONK-CORE** to republish
-   `core-p1`;
-3. rebuild an X86 or ROCKCHIP image.
+When `kenzok8/openwrt-honk` moves, refresh the clone and run
+`patch -p1 --dry-run`; a rejected hunk is the only thing to rebase. If the core
+commit changes, bump `CORE_COMMIT` in **dpd-fw**'s `honk/pins.env` and in
+`apply-makefile.sh` here, re-run the patch script, then run **honk-core** there
+to republish `core-p1`.
 
 Regenerating the patch: clone upstream, copy the desired files, and
 `git diff --no-index` the two trees into `honk-x86rk.patch` (keep `a/` / `b/`

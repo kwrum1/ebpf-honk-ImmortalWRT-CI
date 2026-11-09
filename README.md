@@ -33,25 +33,24 @@ IPQ53XX / IPQ95XX 的配置保留但不在矩阵里：上游 `kmod-ath12k` 的�
 
 | 方式 | 行为 |
 |---|---|
-| 定时 | `Auto-Clean` 每天 04:00（北京时间）清理旧 release/tag/工作流产物（保留数据面输入 `core-p1`），完成后通过 `workflow_run` 同时触发四个构建 |
+| 定时 | `Auto-Clean` 每天 04:00（北京时间）清空旧 release/tag/artifacts/运行记录，完成后通过 `workflow_run` 同时触发四个构建 |
 | 手动 | Actions → 选工作流 → Run workflow；`WRT-TEST` 可只出配置（`TEST=true`） |
-| 上游检查 | `UPSTREAM-CHECK` 每天核对构建期改动是否还匹配上游 |
-| 编译自检 | `BPF-CHECK` 只编译 `ebpf/` 的 BPF 对象，1 分钟出结果 |
+| 检查类 CI | 全部在 `kwrum1/dpd-fw`：`ci`（编译 BPF/dpdctl）、`upstream`（补丁锚点）、`sdk`（出四个 apk）、`einat`、`honk-core` |
 
 ## 目录
 
 ```
 Config/              各型号的 defconfig 片段
 ebpf/                数据面包（X86/ROCKCHIP 专用）：router-dataplane、einat-ebpf、LuCI
-patches/honk/        X86/RK 的 honk 源码补丁 + p1 core 构建
+patches/honk/        X86/RK 的 honk 包源码补丁（core 由 dpd-fw 构建）
 Scripts/             Packages.sh / Handles.sh / Settings.sh
 .github/workflows/   薄工作流 + 公用核心 WRT-CORE.yml
 ```
 
 ## 维护
 
-- honk：`X86/ROCKCHIP` 用上游包 + `patches/honk/honk-x86rk.patch` + 自建 `core-p1`；
-  `IPQ/MTK` 用原版。补丁只带本项目改动的那部分，上游漂移会在 `Packages.sh` 直接报错。
+- honk：`X86/ROCKCHIP` 用上游包 + `patches/honk/honk-x86rk.patch` + `kwrum1/dpd-fw` 的
+  `core-p1`；`IPQ/MTK` 用原版。补丁只带本项目改动的那部分，上游漂移会在 `Packages.sh` 直接报错。
 - einat：二进制来自 `kwrum1/dpd-fw` 的 `einat-p2` release，哈希写死在
   `ebpf/einat-ebpf/Makefile`；返回码/回归由 dpd-fw 的 `einat` 工作流保证。
 - 构建缓存包含 `.ccache`、`staging_dir/host*`、`staging_dir/tool*`；离线/弱网环境

@@ -20,7 +20,7 @@ What this repository contributes is **additive**, plus a few scripted edits:
 |---|---|---|
 | eBPF datapath packages (8 dirs) | this repo, `ebpf/` | none - upstream has no such packages; copied into `package/` at build time |
 | Third-party packages (aurora, honk, v2ray-geodata, partexp) | cloned in `Scripts/Packages.sh` | none |
-| Edits to upstream files (x86 GPU trim, firewall4 offload default, target.mk, dnsmasq/odhcpd handover) | `Scripts/Handles.sh`, `Scripts/Settings.sh` | pattern-anchored `sed`, checked by `UPSTREAM-CHECK` |
+| Edits to upstream files (x86 GPU trim, firewall4 offload default, target.mk, dnsmasq/odhcpd handover) | `Scripts/Handles.sh`, `Scripts/Settings.sh` | pattern-anchored `sed`, checked by `Scripts/upstream-check.sh` |
 | Build config | `Config/{X86,ROCKCHIP,GENERAL,...}.txt` | none; they are `.config` fragments, not source |
 
 `kwrum1/immortalwrt@mydist` (the old dev mirror) is **not used by any
@@ -36,9 +36,9 @@ a fuzzily-applied hunk.
 The edits that *do* touch upstream files stay as anchored `sed` rather than
 `.patch` hunks on purpose: a unified diff breaks on every upstream context
 change (line numbers, neighbouring comments), while an anchored sed keeps
-working and - with `UPSTREAM-CHECK` - fails loudly when the anchor itself is
-gone. That is the property that makes "follow upstream" cheap: bump the branch,
-run `UPSTREAM-CHECK`, and only look at the anchors that changed.
+working and - with `Scripts/upstream-check.sh` - fails loudly when the anchor
+itself is gone. That is the property that makes "follow upstream" cheap: bump the branch,
+run `Scripts/upstream-check.sh`, and only look at the anchors that changed.
 
 The one binary we ship that is not built from our own sources is `einat`.
 It is part of the DPD dataplane, so its source build lives in **kwrum1/dpd-fw**
@@ -53,7 +53,7 @@ bump the pin, fix the anchor, run the job.
 ## Following upstream
 
 1. Upstream pushes to `owrt` / `main`; nothing to do.
-2. Nightly `UPSTREAM-CHECK` (both branches) re-verifies every anchor:
+2. `Scripts/upstream-check.sh` (both branches) re-verifies every anchor:
    ```
    sh Scripts/upstream-check.sh <fresh clone>
    ```
@@ -69,5 +69,5 @@ bump the pin, fix the anchor, run the job.
 |---|---|
 | Is the OS from my tree? | No. It is upstream `owrt`/`main`, cloned per build. |
 | Where does the eBPF code live? | this repo's `ebpf/` (copied to `package/ebpf/`), built only for X86/ROCKCHIP |
-| Do I have to merge upstream? | No. The only thing that can drift is the anchor list; `UPSTREAM-CHECK` watches it. |
+| Do I have to merge upstream? | No. The only thing that can drift is the anchor list; `Scripts/upstream-check.sh` watches it. |
 | How do I know which datapath a release has? | `provenance-<CONFIG>.txt`: firmware commit + `ebpf_abi` + `ebpf_object` sha256 + `ebpf_src_tree` sha256 |

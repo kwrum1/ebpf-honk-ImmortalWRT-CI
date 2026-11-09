@@ -38,7 +38,7 @@ grep -q '^HONK_SOURCE_URL?=' "$MK" || {
 	echo "honk: HONK_SOURCE_URL anchor missing" >&2
 	exit 1
 }
-sed -i 's|^HONK_SOURCE_URL?=.*|HONK_SOURCE_URL?=https://github.com/kwrum1/ebpf-honk-ImmortalWRT-CI/releases/download/$(HONK_SOURCE_TAG)|' "$MK"
+sed -i 's|^HONK_SOURCE_URL?=.*|HONK_SOURCE_URL?=https://github.com/kwrum1/dpd-fw/releases/download/$(HONK_SOURCE_TAG)|' "$MK"
 
 for pair in X86_64:x86_64 AARCH64:aarch64 ARMV7:armv7; do
 	var=${pair%%:*}

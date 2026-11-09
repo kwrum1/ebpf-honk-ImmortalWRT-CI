@@ -12,8 +12,8 @@ Last updated: 2026-10-28
 
 There is no second copy of the datapath anywhere: the firmware repo is
 upstream, and `ebpf/` here is the only place a `dpd_fastpath.bpf.c` change can
-live. `BPF-CHECK` compiles it on every change (~1 minute) instead of finding out
-at the end of a 90-minute image build.
+live. The `ci` workflow in **kwrum1/dpd-fw** compiles it on every change (~1 minute)
+instead of finding out at the end of a 90-minute image build.
 
 `einat-ebpf` is different: it is part of the DPD dataplane, so it is built and
 published by **kwrum1/dpd-fw** (`einat/` + `.github/workflows/einat.yml`). That
@@ -38,7 +38,6 @@ publishes the `einat-p2` release. This repository only downloads the binary
 | `QCA-NSS` | IPQ60XX / IPQ807X (same four configs) | `@main` | **NSS firmware** variant |
 | `MTK-ALL` | MEDIATEK-WIFI-YES/NO | `@owrt` | MediaTek |
 | `WRT-TEST` | one config, by hand | `owrt` or `main` | reproduce a single build |
-| `BPF-CHECK` | — | `ebpf/` | compile the datapath + dpdctl in ~1 min |
 
 Automation, restored to the upstream shape:
 
@@ -48,8 +47,6 @@ Automation, restored to the upstream shape:
 | `Cache-Clean` | Sundays 20:00 UTC, or manual | `gh cache delete --all` |
 | `EBPF-WRT-ALL` / `QCA-PPE` / `QCA-NSS` / `MTK-ALL` | on `Auto-Clean` completion, or manual | the images |
 | `WRT-TEST` | manual only | one config |
-| `BPF-CHECK` | weekly + manual | compile the datapath in ~1 min |
-| `UPSTREAM-CHECK` | daily 18:15 UTC + manual | verify the build-time anchors on both branches |
 
 A push alone never starts a build: a nightly build always pins the source commit
 it cloned, and the release records it.

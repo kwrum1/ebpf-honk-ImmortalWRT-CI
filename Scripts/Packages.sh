@@ -103,7 +103,7 @@ esac
 #   generated-provenance.json -> honk 的 install 阶段 cannot stat
 #   generated-doona-stage.mk  -> luci-app-honk 的 Doona 源地址/哈希
 # 按 package 里的 CORE_COMMIT 找到对应 release，把三个都取下来，并把里面写死的
-# kwrum1/ebpf-honk-ImmortalWRT-CI URL 改成实际的 release 目录（asset 发布在本仓库的 core-p1 release）。
+# kwrum1/ebpf-honk-ImmortalWRT-CI URL 改成实际的 release 目录（asset 发布在 kwrum1/dpd-fw 的 core-p1 release）。
 fetch_honk_stage() {
 	local core rel_json base stage prov doona
 	[ -d ./package/honk ] || return 0
@@ -116,11 +116,11 @@ fetch_honk_stage() {
 	# both, and say so when neither produced a usable body.
 	if [ -n "${GITHUB_TOKEN:-}" ]; then
 		rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-			"https://api.github.com/repos/kwrum1/ebpf-honk-ImmortalWRT-CI/releases?per_page=30" 2>/dev/null)
+			"https://api.github.com/repos/kwrum1/dpd-fw/releases?per_page=30" 2>/dev/null)
 	fi
 	if [ -z "${rel_json:-}" ]; then
 		rel_json=$(curl -fsSL \
-			"https://api.github.com/repos/kwrum1/ebpf-honk-ImmortalWRT-CI/releases?per_page=30" 2>/dev/null)
+			"https://api.github.com/repos/kwrum1/dpd-fw/releases?per_page=30" 2>/dev/null)
 	fi
 	if [ -z "${rel_json:-}" ]; then
 		echo "!! honk: GitHub API returned no releases (set GITHUB_TOKEN to avoid the rate limit)" >&2
