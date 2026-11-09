@@ -1297,6 +1297,57 @@ static int cmd_delete(int argc, char **argv)
 	return delete_patterns(m, 1);
 }
 
+/* Delete every flow whose last_seen is older than max_age_ms. Iteration and
+ * deletion cannot be interleaved safely (deleting the key the cursor sits on
+ * invalidates it), so collect the keys first and delete afterwards. */
+static int flow_prune(unsigned int max_age_ms)
+{
+	struct dpd_flow_key k, nk, *victims = NULL;
+	struct dpd_flow_val v;
+	size_t n = 0, cap = 4096;
+	int fd, i, rc = 0;
+
+	fd = map_open("dpd_flows");
+	if (fd < 0)
+		return 1;
+	victims = malloc(cap * sizeof(*victims));
+	if (!victims) {
+		close(fd);
+		return 1;
+	}
+
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k) == 0) {
+		for (;;) {
+			if (!dpd_bpf_map_lookup_elem(fd, &k, &v) &&
+			    flow_age_ms(v.last_seen_ms) > max_age_ms) {
+				if (n == cap) {
+					struct dpd_flow_key *grown;
+
+					cap *= 2;
+					grown = realloc(victims,
+							cap * sizeof(*victims));
+					if (!grown)
+						break;
+					victims = grown;
+				}
+				victims[n++] = k;
+			}
+			if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+				break;
+			k = nk;
+		}
+	}
+
+	for (i = 0; i < (int)n; i++) {
+		if (dpd_bpf_map_delete_elem(fd, &victims[i]))
+			rc = 1;
+	}
+	printf("pruned %zu entries older than %u ms\n", n, max_age_ms);
+	free(victims);
+	close(fd);
+	return rc;
+}
+
 static int cmd_flows(int argc, char **argv)
 {
 	struct dpd_flow_key k, nk;
@@ -1305,6 +1356,13 @@ static int cmd_flows(int argc, char **argv)
 
 	if (argc >= 1 && !strcmp(argv[0], "-a"))
 		max = 1 << 20;
+	if (argc >= 1 && !strcmp(argv[0], "prune")) {
+		unsigned int max_age = 600000;
+
+		if (argc >= 2)
+			max_age = (unsigned int)strtoul(argv[1], NULL, 0);
+		return flow_prune(max_age);
+	}
 	fd = map_open("dpd_flows");
 	if (fd < 0)
 		return 1;
@@ -2016,7 +2074,8 @@ static void usage(const char *argv0)
 	"  gw <ifname> <ipv4>      set the nexthop used by the neigh emit\n"
 		"  local sync|flush|list   router addresses skipped before the FIB\n"
 		"                          lookup (local delivery, never forwarded)\n"
-		"  flows [-a]              dump dpd_flows\n",
+		"  flows [-a]              dump dpd_flows\n"
+		"  flows prune [age_ms]    delete entries idle longer than age_ms\n",
 		argv0);
 }
 

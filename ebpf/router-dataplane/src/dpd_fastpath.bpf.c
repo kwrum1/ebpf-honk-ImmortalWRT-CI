@@ -1427,6 +1427,22 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			ttl = 86400000u;
 
 		age = fval ? (__s32)(now - fval->last_seen_ms) : 0;
+
+		/* A dead entry is removed on the spot instead of waiting for LRU
+		 * eviction: expired, epoch-stale (topology change), or never got
+		 * an egress. Measured on the N5000 2026-11-09: the map was 96%
+		 * older than the largest TTL after two hours online, because
+		 * nothing but LRU ever removed an entry. Deleting here is one
+		 * helper call on a lookup that was going to miss anyway. */
+		if (fval && (!fval->egress_ifindex || age < 0 ||
+			     age >= (__s32)ttl ||
+			     (fval->wan & DPD_FLOW_EPOCH_MASK) !=
+				((cfg->epoch & 0xff) << 8))) {
+			bpf_map_delete_elem(&dpd_flows, &fkey);
+			fval = NULL;
+			age = 0;
+		}
+
 		if (fval && fval->egress_ifindex && age >= 0 &&
 		    age < (__s32)ttl &&
 		    /* epoch: a topology change (link, address, route,
@@ -2132,6 +2148,16 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 							cv->skb_priority;
 				}
 			}
+
+			/* An L2 entry with an all-zero destination MAC is dead on
+			 * arrival: dpd_emit_l2() would write a zero dmac and the
+			 * frame is dropped by the first switch. It happens when the
+			 * neighbour was not resolved at learn time. Leave the flow
+			 * on the stack (redirect_neigh resolves it there). */
+			if ((nv.flags & DPD_FLOW_F_L2) &&
+			    !(nv.dmac[0] | nv.dmac[1] | nv.dmac[2] |
+			      nv.dmac[3] | nv.dmac[4] | nv.dmac[5]))
+				return TC_ACT_UNSPEC;
 
 			bpf_map_update_elem(&dpd_flows, &fkey, &nv, BPF_ANY);
 

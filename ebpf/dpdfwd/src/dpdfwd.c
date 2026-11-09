@@ -61,6 +61,12 @@
  * plenty. Link/address/route changes still bump immediately. */
 #define NEIGH_BUMP_MS 30000
 #define PUBLISH_MS 2000
+/* The datapath deletes an entry only when a packet looks it up again, so an
+ * idle flow that never returns stays in the map until LRU evicts it. Sweep the
+ * ones older than every TTL (TCP max 600 s) once a minute. */
+#define PRUNE_S 60
+#define PRUNE_AGE_MS 900000
+#define PRUNE_AGE_STR "900000"
 
 #define CLASS_FILE_DEFAULT "/etc/dpd/class.conf"
 /* libbpf's tc loader pins into /sys/fs/bpf/tc/globals; older releases used
@@ -1106,7 +1112,7 @@ int main(int argc, char **argv)
 	struct stats st = { 0 };
 	long long bump_at = 0;
 	long long last_neigh_bump = 0;
-	time_t next_publish = 0, last_ct_flush = 0;
+	time_t next_publish = 0, last_ct_flush = 0, next_prune = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--dry-run"))
@@ -1303,6 +1309,11 @@ int main(int argc, char **argv)
 		if (time(NULL) != last_ct_flush) {
 			ct_flush(dry);
 			last_ct_flush = time(NULL);
+		}
+		if (time(NULL) >= next_prune) {
+			system(DPD_CTL " flows prune " PRUNE_AGE_STR
+			       " >/dev/null 2>&1");
+			next_prune = time(NULL) + PRUNE_S;
 		}
 		if (time(NULL) >= next_publish) {
 			publish(&st);
