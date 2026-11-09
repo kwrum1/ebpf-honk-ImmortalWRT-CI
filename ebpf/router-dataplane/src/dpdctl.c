@@ -193,7 +193,7 @@ static const char *stat_name(int i)
 		"tag_pop", "tag_skip",
 		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
 		"l2_v4", "l2_v6", "nat_gone", "flow_fin",
-		"flow_bind", "flow_block", "flow_skip",
+		"flow_bind", "flow_block", "flow_skip", "nat_dnat",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -261,6 +261,8 @@ static int cmd_set(int argc, char **argv)
 		cfg.flow_counters = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "class")) {
 		cfg.class_enable = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "nat_ingress")) {
+		cfg.nat_ingress = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -314,6 +316,9 @@ static int cmd_show(void)
 	       cfg.tcp_ttl_ms, cfg.udp_ttl_ms, cfg.udp_unidir_ttl_ms);
 	printf("ufs          counters %u / class cache %u\n",
 	       cfg.flow_counters, cfg.class_enable);
+	printf("nat_ingress  %u%s\n", cfg.nat_ingress,
+	       cfg.nat_ingress ? " (DPD does return-path DNAT)"
+			       : " (einat ingress owns it)");
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -1382,6 +1387,7 @@ static int status_json(void)
 		       cfg.udp_unidir_ttl_ms);
 		printf(", \"flow_counters\": %u, \"class_enable\": %u",
 		       cfg.flow_counters, cfg.class_enable);
+		printf(", \"nat_ingress\": %u", cfg.nat_ingress);
 		printf(", \"policy\": ");
 		json_string(policy_name(cfg.policy));
 		printf(" },\n");
@@ -1662,6 +1668,8 @@ static void usage(const char *argv0)
 		"  set udp_unidir_ttl <ms> UDP timeout while still one-way\n"
 		"  set counters <0|1>      per-flow packets/bytes in the UFS entry\n"
 		"  set class <0|1>         consult the dpd_class policy cache\n"
+		"  set nat_ingress <0|1>   1 = DPD does return-path DNAT from\n"
+		"                          dpd_nat_rev (einat ingress must be off)\n"
 		"  class add|del <if> <tcp|udp> <saddr> <sport> <daddr> <dport>\n"
 		"        <forward|proxy|block|local> [skb_priority]\n"
 		"  class list|flush        inspect/clear the policy cache\n"

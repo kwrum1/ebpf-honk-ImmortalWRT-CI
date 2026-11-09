@@ -505,6 +505,7 @@ dpd_has_uplink() {
 dpd_gate_refresh_uci() {
 	local enabled mode redirect ttl policy vlans refresh ipv6 mss emode
 	local accel tcp_ttl udp_ttl udp_unidir_ttl flow_counters class_enable
+	local nat_ingress
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -522,12 +523,17 @@ dpd_gate_refresh_uci() {
 	config_get udp_unidir_ttl global udp_unidir_ttl_ms 30000
 	config_get_bool flow_counters global flow_counters 1
 	config_get_bool class_enable global class_enable 1
+	config_get nat_ingress global nat_ingress 'einat'
 
 	emode="$(dpd_gate_mode "$mode" "$enabled")"
 	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" \
 		"$ipv6" "$mss" "$accel" "$tcp_ttl" "$udp_ttl" "$udp_unidir_ttl"
 	"$DPD_CTL" set counters "$flow_counters" 2>/dev/null
 	"$DPD_CTL" set class "$class_enable" 2>/dev/null
+	case "$nat_ingress" in
+	dpd)	"$DPD_CTL" set nat_ingress 1 2>/dev/null ;;
+	*)	"$DPD_CTL" set nat_ingress 0 2>/dev/null ;;
+	esac
 	dpd_push_vlans "$policy" "$vlans"
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,

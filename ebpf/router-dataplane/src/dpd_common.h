@@ -200,8 +200,15 @@
  *        (FORWARD/PROXY/BLOCK/LOCAL + skb_priority); the learn path copies
  *        it into the UFS entry and the hit path obeys it. This is the
  *        "plugins are control-plane, one lookup in the hot path" contract.
+ *
+ * 19: optional DPD-owned return-path DNAT (`nat_ingress=dpd`). A new
+ *      dpd-nat-rev map is mirrored from einat's reverse bindings; when
+ *      einat's ingress TCX is detached, the WAN ingress packet is DNATed by
+ *      DPD before the UFS lookup. With einat's ingress attached (default) it
+ *      already DNATed the packet, the reverse key does not match and DPD
+ *      does nothing, so the mode is safe by default.
  */
-#define DPD_ABI_VERSION		18
+#define DPD_ABI_VERSION		19
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -333,6 +340,10 @@ struct dpd_config {
 	 * class_enable: 1 = consult dpd_class when a flow is learned. */
 	__u32	flow_counters;
 	__u32	class_enable;
+	/* ABI 19: 1 = DPD performs the return-path DNAT itself from
+	 * dpd_nat_rev (requires einat's ingress TCX to be detached; with it
+	 * attached this is a no-op because the packet is already DNATed). */
+	__u32	nat_ingress;
 };
 
 enum dpd_stat_idx {
@@ -403,6 +414,8 @@ enum dpd_stat_idx {
 	 *			 * dropped by the fast path		*/
 	ST_FLOW_SKIP,		/* ABI 18: cached PROXY/LOCAL action,
 	 *			 * packet handed back to the stack	*/
+	ST_NAT_DNAT,		/* ABI 19: return-path DNAT applied by DPD
+	 *			 * (einat ingress detached)		*/
 	ST__MAX,
 };
 

@@ -179,7 +179,102 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_nat SEC(".maps");
 
+/* ABI 19: return-path DNAT table, mirrored from einat's *reverse* bindings
+ * (external tuple -> internal tuple) by dpd-einat-sync. Used only when
+ * cfg.nat_ingress is set; with einat's ingress TCX attached the packet is
+ * already DNATed and the key does not match, so the mode is safe by default. */
+struct dpd_nat_rev_key {
+	__be32	daddr;
+	__be16	dport;
+	__u8	proto;
+	__u8	_pad;
+};
+
+struct dpd_nat_rev_val {
+	__be32	saddr;
+	__be16	sport;
+	__u16	_pad;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct dpd_nat_rev_key);
+	__type(value, struct dpd_nat_rev_val);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dpd_nat_rev SEC(".maps");
+
 /* ------------------------------------------------------------------ helpers */
+
+/* ABI 19: return-path DNAT. Rewrites the destination address/port and updates
+ * the IP and L4 checksums incrementally. Used only when cfg.nat_ingress is
+ * set and einat's ingress TCX is not attached. */
+static __always_inline int
+dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
+	       __u32 l3_off, __u32 l4_off, const struct dpd_flow_key *k,
+	       __be32 new_daddr, __be16 new_dport)
+{
+	struct iphdr *iph = data + l3_off;
+	__be32 old_daddr;
+	__be16 old_dport = k->dport;
+	__u32 dport_off = 0, csum_off = 0;
+	int csum_l4 = 1;
+
+	if (k->family != AF_INET)
+		return -1;
+	if (k->proto != IPPROTO_TCP && k->proto != IPPROTO_UDP)
+		return -1;
+	if ((void *)(iph + 1) > data_end)
+		return -1;
+
+	old_daddr = iph->daddr;
+	if (old_daddr == new_daddr && old_dport == new_dport)
+		return 0;
+
+	if (k->proto == IPPROTO_TCP) {
+		struct tcphdr *th = data + l4_off;
+
+		if ((void *)(th + 1) > data_end)
+			return -1;
+		dport_off = l4_off + __builtin_offsetof(struct tcphdr, dest);
+		csum_off = l4_off + __builtin_offsetof(struct tcphdr, check);
+	} else {
+		struct udphdr *uh = data + l4_off;
+
+		if ((void *)(uh + 1) > data_end)
+			return -1;
+		dport_off = l4_off + __builtin_offsetof(struct udphdr, dest);
+		csum_off = l4_off + __builtin_offsetof(struct udphdr, check);
+		if (uh->check == 0)
+			csum_l4 = 0;
+	}
+
+	if (bpf_skb_store_bytes(skb,
+				l3_off + __builtin_offsetof(struct iphdr, daddr),
+				&new_daddr, sizeof(new_daddr), 0) < 0)
+		return -1;
+	if (bpf_l3_csum_replace(skb,
+				l3_off + __builtin_offsetof(struct iphdr, check),
+				(__u64)old_daddr, (__u64)new_daddr,
+				sizeof(new_daddr)) < 0)
+		return -1;
+	if (csum_l4 &&
+	    bpf_l4_csum_replace(skb, csum_off, (__u64)old_daddr,
+				(__u64)new_daddr,
+				sizeof(new_daddr) | BPF_F_PSEUDO_HDR) < 0)
+		return -1;
+	if (old_dport != new_dport) {
+		if (bpf_skb_store_bytes(skb, dport_off, &new_dport,
+					sizeof(new_dport), 0) < 0)
+			return -1;
+		if (csum_l4 &&
+		    bpf_l4_csum_replace(skb, csum_off, (__u64)old_dport,
+					(__u64)new_dport,
+					sizeof(new_dport)) < 0)
+			return -1;
+	}
+	return 0;
+}
 
 /* ABI 18: learn-time policy lookup. Port 0 and ifindex 0 are wildcards, so
  * the eight combinations cover "any source port", "any destination port" and
@@ -1115,6 +1210,34 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				 sizeof(fkey.daddr));
 	} else {
 		goto non_ip;
+	}
+
+	/* ABI 19: optional DPD-owned return-path DNAT. With einat's ingress
+	 * TCX attached the packet already carries the internal destination and
+	 * the reverse key does not match, so this is a no-op by default. It is
+	 * only effective after the ingress TCX link is detached. */
+	if (cfg->nat_ingress && fkey.family == AF_INET &&
+	    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP)) {
+		struct dpd_nat_rev_key rk = {};
+		struct dpd_nat_rev_val *rv;
+
+		rk.daddr = fkey.daddr[3];
+		rk.dport = fkey.dport;
+		rk.proto = fkey.proto;
+		rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+		if (rv && rv->saddr) {
+			__be32 ndaddr = rv->saddr;
+			__be16 ndport = rv->sport;
+
+			if (dpd_dnat_apply(skb, data, data_end, l3_off, l4_off,
+					   &fkey, ndaddr, ndport) < 0)
+				return TC_ACT_UNSPEC;
+			data = (void *)(long)skb->data;
+			data_end = (void *)(long)skb->data_end;
+			fkey.daddr[3] = ndaddr;
+			fkey.dport = ndport;
+			DPD_INC(st, ST_NAT_DNAT);
+		}
 	}
 
 	/* ABI 14: IP bytes by family, the denominator of the homepage share.

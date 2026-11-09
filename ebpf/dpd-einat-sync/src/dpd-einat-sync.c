@@ -55,6 +55,20 @@ struct nat_val {
 	__u16 pad;
 } __attribute__((packed));
 
+/* ABI 19: reverse binding (external tuple -> internal tuple). */
+struct nat_rev_key {
+	__u32 daddr;
+	__u16 dport;
+	__u8 proto;
+	__u8 pad;
+} __attribute__((packed));
+
+struct nat_rev_val {
+	__u32 saddr;
+	__u16 sport;
+	__u16 pad;
+} __attribute__((packed));
+
 static int bpf_call(enum bpf_cmd cmd, union bpf_attr *attr)
 {
 	return (int)syscall(__NR_bpf, cmd, attr, sizeof(*attr));
@@ -226,6 +240,22 @@ static int nat_fd(void)
 	return fd;
 }
 
+static int rev_fd(void)
+{
+	int pfd = prog_fd_by_name("dpd_fastpath_l2");
+	int fd = -1;
+
+	if (pfd >= 0) {
+		fd = map_fd_in_prog(pfd, "dpd_nat_rev");
+		close(pfd);
+	}
+	if (fd < 0)
+		fd = pinned_fd("/sys/fs/bpf/tc/globals/dpd_nat_rev");
+	if (fd < 0)
+		fd = map_fd_by_name("dpd_nat_rev");
+	return fd;
+}
+
 static int binding_fd(void)
 {
 	static const char *const progs[] = { "egress_snat", "ingress_rev_snat" };
@@ -244,7 +274,7 @@ static int binding_fd(void)
 	return map_fd_by_name("map_binding");
 }
 
-static int sync_once(int bind_fd, int nat)
+static int sync_once(int bind_fd, int nat, int rev)
 {
 	struct binding_key key, next;
 	struct binding_val val;
@@ -265,30 +295,55 @@ static int sync_once(int bind_fd, int nat)
 		a.key = (uintptr_t)&next;
 		a.value = (uintptr_t)&val;
 		if (bpf_call(BPF_MAP_LOOKUP_ELEM, &a) == 0 &&
-		    (next.flags & BINDING_ORIG_DIR_FLAG) &&
 		    next.l4proto != 0 &&
 		    val.to_addr != 0 && val.to_port != 0 &&
 		    /* identity entries are the NAT host's own traffic */
 		    (val.to_addr != next.from_addr ||
 		     val.to_port != next.from_port)) {
-			struct nat_key nk;
-			struct nat_val nv;
+			if (next.flags & BINDING_ORIG_DIR_FLAG) {
+				/* internal -> external: forward SNAT gate */
+				struct nat_key nk;
+				struct nat_val nv;
 
-			memset(&nk, 0, sizeof(nk));
-			memset(&nv, 0, sizeof(nv));
-			nk.saddr = next.from_addr;
-			nk.sport = next.from_port;
-			nk.proto = next.l4proto;
-			nv.to_addr = val.to_addr;
-			nv.to_port = val.to_port;
+				memset(&nk, 0, sizeof(nk));
+				memset(&nv, 0, sizeof(nv));
+				nk.saddr = next.from_addr;
+				nk.sport = next.from_port;
+				nk.proto = next.l4proto;
+				nv.to_addr = val.to_addr;
+				nv.to_port = val.to_port;
 
-			memset(&a, 0, sizeof(a));
-			a.map_fd = nat;
-			a.key = (uintptr_t)&nk;
-			a.value = (uintptr_t)&nv;
-			a.flags = BPF_ANY;
-			if (bpf_call(BPF_MAP_UPDATE_ELEM, &a) == 0)
-				updated++;
+				if (nat >= 0) {
+					memset(&a, 0, sizeof(a));
+					a.map_fd = nat;
+					a.key = (uintptr_t)&nk;
+					a.value = (uintptr_t)&nv;
+					a.flags = BPF_ANY;
+					if (bpf_call(BPF_MAP_UPDATE_ELEM,
+						     &a) == 0)
+						updated++;
+				}
+			} else if (rev >= 0) {
+				/* external -> internal: return-path DNAT */
+				struct nat_rev_key rk;
+				struct nat_rev_val rv;
+
+				memset(&rk, 0, sizeof(rk));
+				memset(&rv, 0, sizeof(rv));
+				rk.daddr = next.from_addr;
+				rk.dport = next.from_port;
+				rk.proto = next.l4proto;
+				rv.saddr = val.to_addr;
+				rv.sport = val.to_port;
+
+				memset(&a, 0, sizeof(a));
+				a.map_fd = rev;
+				a.key = (uintptr_t)&rk;
+				a.value = (uintptr_t)&rv;
+				a.flags = BPF_ANY;
+				if (bpf_call(BPF_MAP_UPDATE_ELEM, &a) == 0)
+					updated++;
+			}
 		}
 		key = next;
 		have = 1;
@@ -298,25 +353,29 @@ static int sync_once(int bind_fd, int nat)
 
 int main(void)
 {
-	int bind_fd = -1, nat = -1;
+	int bind_fd = -1, nat = -1, rev = -1;
 	time_t last_log = 0;
 	time_t last_resolve = 0;
 
 	for (;;) {
 		time_t now = time(NULL);
 
-		if (bind_fd < 0 || nat < 0 || now - last_resolve >= 5) {
+		if (bind_fd < 0 || (nat < 0 && rev < 0) ||
+		    now - last_resolve >= 5) {
 			if (bind_fd >= 0)
 				close(bind_fd);
 			if (nat >= 0)
 				close(nat);
+			if (rev >= 0)
+				close(rev);
 			bind_fd = binding_fd();
 			nat = nat_fd();
+			rev = rev_fd();
 			last_resolve = now;
 		}
 
-		if (bind_fd >= 0 && nat >= 0) {
-			int n = sync_once(bind_fd, nat);
+		if (bind_fd >= 0 && (nat >= 0 || rev >= 0)) {
+			int n = sync_once(bind_fd, nat, rev);
 
 			if (now - last_log >= 60 || n) {
 				printf("dpd-einat-sync: mirrored %d binding(s)\n", n);
