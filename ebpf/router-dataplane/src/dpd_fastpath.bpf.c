@@ -362,8 +362,8 @@ dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
  * trusting the first address userspace happened to teach. `fallback` is
  * dpd_iface.addr4 for a box where the lookup fails. */
 static __always_inline __be32
-dpd_nat_ext_addr(struct __sk_buff *skb, __be32 daddr, __u8 proto,
-		 __be16 sport, __be16 dport, __be32 fallback)
+dpd_nat_ext_addr(struct __sk_buff *skb, __u32 ifindex, __be32 daddr,
+		 __u8 proto, __be16 sport, __be16 dport, __be32 fallback)
 {
 	struct bpf_fib_lookup fib = {};
 	int ret;
@@ -373,7 +373,7 @@ dpd_nat_ext_addr(struct __sk_buff *skb, __be32 daddr, __u8 proto,
 	fib.sport = sport;
 	fib.dport = dport;
 	fib.ipv4_dst = daddr;
-	fib.ifindex = skb->ifindex;
+	fib.ifindex = ifindex;
 	fib.mark = skb->mark;
 	/* tot_len stays 0: no MTU check, a too-big packet must not make the
 	 * source lookup fail. SKIP_NEIGH: the neighbour may still be
@@ -1161,6 +1161,12 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
+	/* Read the interface index once, before any pointer spills. On 6.18.55
+	 * a later `skb->ifindex` made clang spill the *ctx pointer* and the
+	 * verifier rejected the reload with "dereference of modified ctx ptr";
+	 * 6.18.60 happened to accept it. A plain scalar local avoids the
+	 * difference entirely. */
+	__u32 ifindex = skb->ifindex;
 	struct dpd_config *cfg;
 	struct dpd_cpu *cpu;
 	struct dpd_flow_key fkey = {};
@@ -1235,7 +1241,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 		}
 	}
 
-	fkey.ifindex = skb->ifindex;
+	fkey.ifindex = ifindex;
 
 	if (h_proto == ETH_P_IP) {
 		struct iphdr *iph = data + l3_off;
@@ -1586,7 +1592,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 * SYN/SYN-ACK parses; for every other packet this is one
 			 * proto compare. */
 			if (cfg->mss_clamp && fkey.proto == IPPROTO_TCP)
-				dpd_mss_clamp(skb, l4_off, skb->ifindex,
+				dpd_mss_clamp(skb, l4_off, ifindex,
 					      fval->egress_ifindex,
 					      fkey.family == AF_INET6, st);
 
@@ -1651,7 +1657,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			return TC_ACT_UNSPEC;
 		ihl = (__u32)iph->ihl * 4;
 
-		fib.ifindex = skb->ifindex;
+		fib.ifindex = ifindex;
 		fib.family = fkey.family;
 		fib.l4_protocol = fkey.proto;
 		fib.sport = fkey.sport;
@@ -1734,7 +1740,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 		DPD_INC(st, ST_FIB_OK);
 
 		/* never accelerate traffic that is local to this box */
-		if (!fib.ifindex || fib.ifindex == skb->ifindex) {
+		if (!fib.ifindex || fib.ifindex == ifindex) {
 			DPD_INC(st, ST_LOCAL);
 			return TC_ACT_UNSPEC;
 		}
@@ -1819,7 +1825,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 
 			/* same clamp as the hit path, using the FIB egress */
 			if (cfg->mss_clamp && fkey.proto == IPPROTO_TCP)
-				dpd_mss_clamp(skb, l4_off, skb->ifindex,
+				dpd_mss_clamp(skb, l4_off, ifindex,
 					      fib.ifindex,
 					      fkey.family == AF_INET6, st);
 
@@ -1876,7 +1882,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 * the unsolicited SYN before netfilter). Outbound flows seed
 			 * their own reverse entry below.
 			 */
-			if (fkey.family == AF_INET6 && dpd_is_uplink(skb->ifindex))
+			if (fkey.family == AF_INET6 && dpd_is_uplink(ifindex))
 				return TC_ACT_UNSPEC;
 
 			cls = dpd_emit_class(cfg, fib.ifindex, no_neigh, 1);
@@ -1946,7 +1952,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 * forwardable at all" (local/unreachable packets return
 			 * early), it just no longer decides *which* uplink.
 			 */
-			if (fkey.family == AF_INET && !dpd_is_uplink(skb->ifindex)) {
+			if (fkey.family == AF_INET && !dpd_is_uplink(ifindex)) {
 				int wi = dpd_pick_wan(&fkey);
 
 				if (wi >= 0 && wi < DPD_WAN_MAX) {
@@ -2101,7 +2107,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 */
 			if (fkey.family == AF_INET6 && !tagged && !l3in &&
 			    (nv.flags & DPD_FLOW_F_L2) &&
-			    nv.egress_ifindex != skb->ifindex) {
+			    nv.egress_ifindex != ifindex) {
 				struct dpd_flow_key rk = fkey;
 				struct dpd_flow_val rv = {};
 				struct ethhdr *eh = data;
@@ -2121,7 +2127,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 					rk.dport = p;
 					rk.ifindex = nv.egress_ifindex;
 
-					rv.egress_ifindex = skb->ifindex;
+					rv.egress_ifindex = ifindex;
 					rv.last_seen_ms = nv.last_seen_ms;
 					rv.flags = DPD_FLOW_F_L2;
 					rv.wan = nv.wan & DPD_FLOW_EPOCH_MASK;
@@ -2463,7 +2469,7 @@ int dpd_fastpath_egress(struct __sk_buff *skb)
 	/* Miss: allocate. The candidate is a pure function of the internal
 	 * 5-tuple, so retransmissions that race the allocation land on the
 	 * same first candidate; the probe only moves on a real collision. */
-	ext2 = dpd_nat_ext_addr(skb, daddr, proto, sport, dport, ext);
+	ext2 = dpd_nat_ext_addr(skb, ifindex, daddr, proto, sport, dport, ext);
 	/* the router's own traffic leaves with the selected source already:
 	 * never allocate a binding for it (it would rewrite the source port) */
 	if (ext2 == saddr)
