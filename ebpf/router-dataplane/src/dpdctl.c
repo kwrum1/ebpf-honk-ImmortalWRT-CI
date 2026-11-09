@@ -192,7 +192,7 @@ static const char *stat_name(int i)
 		"dhcp_skip", "bcast_skip", "v6_ok", "mss_clamp", "mss_skip",
 		"tag_pop", "tag_skip",
 		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
-		"l2_v4", "l2_v6",
+		"l2_v4", "l2_v6", "nat_gone",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -246,6 +246,8 @@ static int cmd_set(int argc, char **argv)
 		cfg.ipv6 = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "mss")) {
 		cfg.mss_clamp = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "nat")) {
+		cfg.nat_offload = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -291,6 +293,9 @@ static int cmd_show(void)
 	       cfg.flow_refresh_ms ? "" : " (every packet)");
 	printf("ipv6         %u%s\n", cfg.ipv6,
 	       cfg.ipv6 ? "" : " (IPv4 only)");
+	printf("nat_offload  %u%s\n", cfg.nat_offload,
+	       cfg.nat_offload ? " (einat owns SNAT)"
+			       : " (uplink half on the stack)");
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -918,6 +923,7 @@ static int status_json(void)
 		       cfg.flow_ttl_ms, cfg.flow_refresh_ms);
 		printf(", \"ipv6\": %u, \"mss_clamp\": %u, \"epoch\": %u",
 		       cfg.ipv6, cfg.mss_clamp, cfg.epoch);
+		printf(", \"nat_offload\": %u", cfg.nat_offload);
 		printf(", \"policy\": ");
 		json_string(policy_name(cfg.policy));
 		printf(" },\n");
@@ -1189,6 +1195,8 @@ static void usage(const char *argv0)
 		"  set refresh <ms>        0 = touch the flow timestamp on every packet\n"
 		"  set ipv6 <0|1>          accelerate IPv6 TCP/UDP too (default 0)\n"
 		"  set mss <0|1>           clamp TCP MSS to the egress MTU (default 1)\n"
+		"  set nat <0|1>           1 = einat owns uplink SNAT; take the\n"
+		"                          forward half over once a binding exists\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"

@@ -142,6 +142,32 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_wans SEC(".maps");
 
+/* P2.1: einat full-cone binding cache, mirrored into the DPD object by
+ * `dpd-einat`. Key = the LAN source (pre-SNAT) 3-tuple; value = the external
+ * address/port einat allocated. The hit path applies this SNAT before emit;
+ * the return path is already reverse-NATed by einat's TCX program. Keeping it
+ * in a separate map (instead of growing dpd_flow_val) keeps ABI 15 intact. */
+struct dpd_nat_key {
+	__be32	saddr;
+	__be16	sport;
+	__u8	proto;
+	__u8	_pad;
+};
+
+struct dpd_nat_val {
+	__be32	to_addr;
+	__be16	to_port;
+	__u16	_pad;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct dpd_nat_key);
+	__type(value, struct dpd_nat_val);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dpd_nat SEC(".maps");
+
 /* ------------------------------------------------------------------ helpers */
 
 /* One lookup gets this CPU's config *and* its counter block (ABI 12). The
@@ -836,6 +862,7 @@ static __always_inline int dpd_emit_cached(struct __sk_buff *skb, __u32 ifindex,
 	return TC_ACT_UNSPEC;
 }
 
+
 /* Flow timestamp maintenance: refresh at most once per cfg->flow_refresh_ms.
  * 0 keeps the exact "every packet" behaviour. */
 static __always_inline void dpd_touch(struct dpd_flow_val *fval, __u32 now,
@@ -1086,6 +1113,32 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			if (!dpd_policy_ok(cfg, vlan_id, tagged, st))
 				return TC_ACT_UNSPEC;
 
+			/* P2.1: the forward half is SNATed by einat's TCX egress
+			 * program, which still runs on an skb we redirect from
+			 * ingress (measured on 2026-11-09: einat's egress hook
+			 * allocated a second external port for an already
+			 * rewritten packet, so rewriting here double-NATs and
+			 * the server drops every ACK). dpd_nat is therefore a
+			 * *gate*, not a rewrite: it proves einat has a binding
+			 * for this flow, so the egress hook can SNAT it.
+			 * Return traffic is reverse-NATed by einat's TCX ingress
+			 * before this classic program sees it. */
+			if ((fval->flags & DPD_FLOW_F_NAT) &&
+			    fkey.family == AF_INET &&
+			    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP)) {
+				struct dpd_nat_key nk = {};
+				struct dpd_nat_val *nv;
+
+				nk.saddr = fkey.saddr[3];
+				nk.sport = fkey.sport;
+				nk.proto = fkey.proto;
+				nv = bpf_map_lookup_elem(&dpd_nat, &nk);
+				if (!nv || !nv->to_addr) {
+					DPD_INC(st, ST_NAT_GONE);
+					return TC_ACT_UNSPEC;
+				}
+			}
+
 			/* NOTE: the uplink acceleration is safe only with
 			 * net.netfilter.nf_conntrack_tcp_be_liberal=1. The
 			 * accelerated ACKs never reach conntrack, so its TCP window
@@ -1281,18 +1334,35 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			return TC_ACT_UNSPEC;
 		}
 
-		/* P2.0 safe mode: do not take over the LAN->WAN half when the
-		 * egress is a NAT uplink. The stack (fw4 or einat) must own the
-		 * first packets' SNAT; the return half is already reverse-NATed
-		 * before it reaches us and can still be accelerated. Full
-		 * bidirectional UFS+NAT is P2.1. A WAN iface is the one with a
-		 * learned IPv4 nexthop (dpdctl gw). */
+		/* P2.1: a WAN egress (learned IPv4 nexthop) may need SNAT.
+		 * With einat on the uplink (nat_offload) the packet may be taken
+		 * over once einat has allocated a binding -- the daemon mirrors
+		 * it into dpd_nat, and einat's TCX egress still does the actual
+		 * rewrite. Without one, stay on the slow path so einat can
+		 * create it. With no einat at all, never take the uplink half:
+		 * a redirected packet skips fw4's masquerade. The return half is
+		 * reverse-NATed before we see it and needs no entry here. */
 		{
 			struct dpd_iface_val *eg =
 				bpf_map_lookup_elem(&dpd_iface, &fib.ifindex);
 
-			if (eg && eg->gw4)
-				return TC_ACT_UNSPEC;
+			if (eg && eg->gw4) {
+				struct dpd_nat_key nk = {};
+				struct dpd_nat_val *nv;
+
+				if (!cfg->nat_offload)
+					return TC_ACT_UNSPEC;
+				if (fkey.family != AF_INET ||
+				    (fkey.proto != IPPROTO_TCP &&
+				     fkey.proto != IPPROTO_UDP))
+					return TC_ACT_UNSPEC;
+				nk.saddr = fkey.saddr[3];
+				nk.sport = fkey.sport;
+				nk.proto = fkey.proto;
+				nv = bpf_map_lookup_elem(&dpd_nat, &nk);
+				if (!nv || !nv->to_addr)
+					return TC_ACT_UNSPEC;
+			}
 		}
 
 		/* ---- Mode 0: observe only. never touch the packet. ---- */
@@ -1434,6 +1504,12 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				__u32 eif = fib.ifindex;
 
 				ep = bpf_map_lookup_elem(&dpd_iface, &eif);
+				/* ABI 16: with einat on the uplink, a flow whose
+				 * egress has a learned nexthop is NATed. Mark it so
+				 * the hit path keeps re-checking einat's binding;
+				 * the return half has no such mark and never pays. */
+				if (cfg->nat_offload && ep && ep->gw4)
+					nv.flags |= DPD_FLOW_F_NAT;
 				if (ep && (ep->flags & (DPD_IF_F_NOARP |
 							DPD_IF_F_POINTOPOINT))) {
 					nv.flags |= DPD_FLOW_F_L3OUT;
@@ -1483,6 +1559,19 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 						nv.flags = dpd_emit_class(cfg, w.ifindex,
 									  (w.flags & DPD_WAN_F_L3) ? 1 : 0,
 									  1) | DPD_FLOW_F_WAN;
+						/* ABI 16: same NAT gate as the FIB
+						 * egress above; the WAN table carries
+						 * the ifindex, not the nexthop. */
+						{
+							struct dpd_iface_val *ep;
+							__u32 eif = w.ifindex;
+
+							ep = bpf_map_lookup_elem(&dpd_iface,
+										 &eif);
+							if (cfg->nat_offload && ep &&
+							    ep->gw4)
+								nv.flags |= DPD_FLOW_F_NAT;
+						}
 						if (w.flags & DPD_WAN_F_L3) {
 							struct dpd_iface_val *ep;
 							__u32 eif = w.ifindex;

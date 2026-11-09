@@ -238,6 +238,18 @@ dpd_push_uci() {
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
+	# ABI 16: an accelerating gate guarantees einat is attached on the
+	# uplinks (dpd_gate_mode() refuses to accelerate otherwise), so the
+	# forward half may be taken over once a mirrored binding exists and
+	# einat's TCX egress does the SNAT. Any other effective mode leaves the
+	# uplink half to the stack, which is the only safe choice when fw4's
+	# masquerade owns NAT.
+	case "$mode" in
+	stateful | stateless)
+		"$DPD_CTL" set nat 1 2>/dev/null ;;
+	*)
+		"$DPD_CTL" set nat 0 2>/dev/null ;;
+	esac
 	"$DPD_CTL" set redirect "$redirect" 2>/dev/null
 	"$DPD_CTL" set ttl "$ttl" 2>/dev/null
 	[ -n "$refresh" ] && "$DPD_CTL" set refresh "$refresh" 2>/dev/null

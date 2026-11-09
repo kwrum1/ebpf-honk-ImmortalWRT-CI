@@ -171,8 +171,16 @@
  *      stateful hit, never on primed/slow packets. The counters are split by
  *      address family (ST_*_V4 / ST_*_V6) and the L2 shortcut has its own pair,
  *      so the status card can show "v4 / v6" for each number.
+ *
+ * 16: ST_NAT_GONE + dpd_nat gate. The forward half of a NATed flow is taken
+ *      over only when einat has an origin binding for it (mirrored into
+ *      dpd_nat by dpd-einat-sync); the rewrite itself stays in einat's TCX
+ *      egress, because rewriting at ingress and then letting einat's egress
+ *      hook run double-NATs the packet (measured 2026-11-09). The forward
+ *      entry is re-checked on every hit: a binding that is gone drops the
+ *      packet back to the stack instead of sending it un-NATed.
  */
-#define DPD_ABI_VERSION		15
+#define DPD_ABI_VERSION		16
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -283,6 +291,11 @@ struct dpd_config {
 	 * goes through netfilter's clamp. 0 = no rewrite (diagnostics only; on a
 	 * PPPoE WAN that brings back the PMTUD black hole). */
 	__u32	mss_clamp;
+	/* ABI 16: 1 = einat owns NAT on the uplinks, so the forward half may be
+	 * taken over once einat has a binding (the TCX egress hook does the
+	 * SNAT). 0 = no einat: never take the uplink half over, because the
+	 * redirected packet would skip fw4's masquerade. */
+	__u32	nat_offload;
 };
 
 enum dpd_stat_idx {
@@ -343,6 +356,9 @@ enum dpd_stat_idx {
 	ST_BYTES_HIT_V6,	/* IPv6 bytes taken over		*/
 	ST_L2_V4,		/* IPv4 packets emitted by the L2 shortcut */
 	ST_L2_V6,		/* IPv6 packets emitted by the L2 shortcut */
+	ST_NAT_GONE,		/* P2.1: forward flow whose einat binding
+	 *			 * disappeared; fall back to the stack so
+	 *			 * einat can re-create/route it. */
 	ST__MAX,
 };
 
@@ -398,6 +414,10 @@ struct dpd_iface_val {
 #define DPD_FLOW_F_TAG		0x0010
 #define DPD_FLOW_F_NH4		0x0020	/* emit with this nh4 (ABI 15)	*/
 #define DPD_FLOW_F_L3OUT	0x0040	/* egress is ppp/tun (ABI 15)	*/
+/* ABI 16: the egress is a NAT uplink (learned IPv4 nexthop), so the hit path
+ * must re-check dpd_nat on every packet. Only such flows are gated: the return
+ * half needs no binding and must never pay for the lookup. */
+#define DPD_FLOW_F_NAT		0x0080
 
 /* dpd_flow_val.flags bits 8..15: how many packets of this direction have been
  * let through netfilter since the entry was learned (saturating). A hit is only
