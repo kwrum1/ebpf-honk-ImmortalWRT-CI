@@ -35,17 +35,27 @@ var callApply = rpc.declare({
  *     delta and fires the config-change triggers (fw4 reload, and the ACL
  *     guard re-imports the port list).
  *
- * Ownership: every section this page creates carries dpd_simple=1. collect()
- * only manages sections with that marker, plus legacy WAN->LAN DNAT redirects
- * that predate the marker. The legacy rows are shown and get the marker on
- * the next save; unrelated rules are never touched.
+ * Ownership: every section this page creates gets the name prefix
+ * 'dpd-simple: '. The old dpd_simple option is accepted for migration but is
+ * removed on save -- fw4 logs unknown options and does not apply those
+ * sections, which is why an earlier version's rows silently never opened a
+ * port. collect() also shows legacy WAN->LAN DNAT redirects and adopts them.
  *
  * A default-deny WAN is required for "only these ports are open" to be true.
  * The page checks it but never changes it on its own: a visible warning and
  * an explicit "设为默认拒绝" button are supplied instead.
  */
 
-var MARKER = 'dpd_simple';
+var MARKER = 'dpd-simple: ';
+
+function isOwned(sec) {
+	return uciVal(sec.name).indexOf(MARKER) == 0 ||
+		uciVal(sec.dpd_simple) == '1';
+}
+
+function displayName(n) {
+	return uciVal(n).replace(/^dpd-simple:\s*/, '');
+}
 
 function uciVal(v) {
 	if (v == null)
@@ -182,17 +192,17 @@ return view.extend({
 		/* UCI sections created by this page. The marker is the contract:
 		 * a section without it is someone else's rule. */
 		uci.sections('firewall', 'rule', function(sec) {
-			if (uciVal(sec[MARKER]) != '1')
+			if (!isOwned(sec))
 				return;
 
 			self.rows.push({
 				sid: sec['.name'],
 				secType: 'rule',
 				legacy: false,
-				name: uciVal(sec.name),
+				name: displayName(sec.name),
 				target: '',
-				port: uciVal(sec.dest_port),
-				dest_port: '',
+				public_port: '',
+				dest_port: uciVal(sec.dest_port),
 				proto: uciProto(sec.proto),
 				family: uciFamily(sec.family),
 				enabled: uciVal(sec.enabled) != '0'
@@ -200,7 +210,7 @@ return view.extend({
 		});
 
 		uci.sections('firewall', 'redirect', function(sec) {
-			var owned = (uciVal(sec[MARKER]) == '1');
+			var owned = isOwned(sec);
 			var src = trim(sec.src);
 			var dest = trim(sec.dest);
 			var target = trim(sec.target);
@@ -219,9 +229,9 @@ return view.extend({
 				sid: sec['.name'],
 				secType: 'redirect',
 				legacy: !owned,
-				name: uciVal(sec.name),
+				name: displayName(sec.name),
 				target: uciVal(sec.dest_ip),
-				port: uciVal(sec.src_dport),
+				public_port: uciVal(sec.src_dport),
 				dest_port: uciVal(sec.dest_port),
 				proto: uciProto(sec.proto),
 				family: uciFamily(sec.family),
@@ -279,8 +289,8 @@ return view.extend({
 				E('tr', { 'class': 'tr table-titles' }, [
 					E('th', { 'class': 'th' }, [ _('名称') ]),
 					E('th', { 'class': 'th' }, [ _('目标') ]),
-					E('th', { 'class': 'th' }, [ _('端口') ]),
 					E('th', { 'class': 'th' }, [ _('目标端口') ]),
+					E('th', { 'class': 'th' }, [ _('公网端口') ]),
 					E('th', { 'class': 'th' }, [ _('协议') ]),
 					E('th', { 'class': 'th' }, [ _('地址族') ]),
 					E('th', { 'class': 'th' }, [ _('启用') ]),
@@ -297,7 +307,8 @@ return view.extend({
 				  '目标留空=放行到路由器，填 IP=转发到内网主机。'),
 				E('br'),
 				_('端口支持单个、范围（8000-8010）和空格分隔的多个值；' +
-				  '“目标端口”只在转发时使用，留空表示与“端口”相同。')
+				  '“目标端口”是内网主机上的服务端口，“公网端口”是 WAN 侧暴露的端口；' +
+				  '公网端口留空时默认与目标端口一致。')
 			]),
 
 			self.warnBox,
@@ -457,8 +468,8 @@ return view.extend({
 
 		row.elName = input(row.name, _('可选'), '8em');
 		row.elTarget = input(row.target, _('留空=路由器 / 填 IP=转发'), '13em');
-		row.elPort = input(row.port, '8080 / 8000-8010', '11em');
-		row.elDestPort = input(row.dest_port, _('同“端口”'), '8em');
+		row.elDestPort = input(row.dest_port, '8080 / 8000-8010', '10em');
+		row.elPublic = input(row.public_port, _('留空=同目标端口'), '10em');
 
 		var protos = [ 'tcp', 'udp', 'tcp udp' ];
 
@@ -487,8 +498,8 @@ return view.extend({
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td' }, [ row.elName ]),
 			E('td', { 'class': 'td' }, [ row.elTarget ]),
-			E('td', { 'class': 'td' }, [ row.elPort ]),
 			E('td', { 'class': 'td' }, [ row.elDestPort ]),
+			E('td', { 'class': 'td' }, [ row.elPublic ]),
 			E('td', { 'class': 'td' }, [ row.elProto ]),
 			E('td', { 'class': 'td' }, [ row.elFamily ]),
 			E('td', { 'class': 'td' }, [ row.elEnabled ]),
@@ -510,7 +521,7 @@ return view.extend({
 			legacy: false,
 			name: '',
 			target: '',
-			port: '',
+			public_port: '',
 			dest_port: '',
 			proto: 'tcp',
 			family: 'any',
@@ -550,7 +561,7 @@ return view.extend({
 	readRow: function(row) {
 		row.name = trim(row.elName.value);
 		row.target = trim(row.elTarget.value);
-		row.port = trim(row.elPort.value);
+		row.public_port = trim(row.elPublic.value);
 		row.dest_port = trim(row.elDestPort.value);
 		row.proto = row.elProto.value || 'tcp';
 		row.family = row.elFamily.value || 'any';
@@ -589,16 +600,16 @@ return view.extend({
 		for (var i = 0; i < self.rows.length; i++) {
 			var r = self.rows[i];
 			var target = trim(r.target);
-			var port = trim(r.port);
-			var destPort = trim(r.dest_port);
+			var pub = trim(r.public_port);
+			var dp = trim(r.dest_port);
 
 			if (target == '路由器')
 				target = '';
 
 			/* The only row this page drops is a truly empty one. A row
-			 * with a WAN port and no target is an INPUT allow, not a
+			 * with a port and no target is an INPUT allow, not a
 			 * half-filled forward. */
-			if (port == '' && target == '') {
+			if (pub == '' && dp == '' && target == '') {
 				dropped++;
 				if (r.sid)
 					ops.push({ op: 'remove', sid: r.sid });
@@ -606,16 +617,17 @@ return view.extend({
 			}
 
 			var wantType = target ? 'redirect' : 'rule';
+			var port = dp || pub;	/* effective WAN/service port */
 
-			if (!self.validPortRange(port)) {
+			if (!self.validPortRange(pub) || !self.validPortRange(dp)) {
 				return ui.addNotification(null, E('p', {}, [
-					_('端口格式不对：%s（支持 8080、8000-8010、以及空格分隔的多个值）').format(port)
+					_('目标端口/公网端口格式不对：%s（支持 8080、8000-8010、空格分隔）').format(pub || dp)
 				]), 'danger');
 			}
 
-			if (wantType == 'redirect' && !self.validPortRange(destPort)) {
+			if (port == '') {
 				return ui.addNotification(null, E('p', {}, [
-					_('目标端口格式不对：%s').format(destPort)
+					_('请至少填写目标端口或公网端口。')
 				]), 'danger');
 			}
 
@@ -641,8 +653,8 @@ return view.extend({
 				}
 			}
 
-			plan.push({ row: r, target: target, port: port,
-				destPort: destPort, type: wantType });
+			plan.push({ row: r, target: target, pub: pub, dp: dp,
+				port: port, type: wantType });
 		}
 
 		if (ops.length == 0 && plan.length == 0) {
@@ -682,11 +694,15 @@ return view.extend({
 				r.secType = p.type;
 			}
 
-			setOpt(sid, 'name', r.name);
+			setOpt(sid, 'name', MARKER + (r.name || 'rule'));
 			setOpt(sid, 'proto', r.proto);
 			setOpt(sid, 'family', r.family || 'any');
 			setOpt(sid, 'enabled', r.enabled ? '1' : '0');
-			setOpt(sid, MARKER, '1');
+			/* Older rows carry dpd_simple=1; it is not a fw4 option
+			 * (fw4 logs an unknown-option warning and the section is
+			 * not applied), so remove it on save. */
+			if (uci.get('firewall', sid, 'dpd_simple') !== undefined)
+				ops.push({ op: 'unset', sid: sid, opt: 'dpd_simple' });
 			setOpt(sid, 'src', 'wan');
 
 			if (p.type == 'rule') {
@@ -694,16 +710,16 @@ return view.extend({
 				 * zone: a rule with dest=lan would match forwarded
 				 * traffic instead. */
 				setOpt(sid, 'dest', '');
-				setOpt(sid, 'dest_port', p.port);
+				setOpt(sid, 'dest_port', p.dp || p.pub);
 				setOpt(sid, 'src_dport', '');
 				setOpt(sid, 'dest_ip', '');
 				setOpt(sid, 'target', 'ACCEPT');
 			}
 			else {
 				setOpt(sid, 'dest', 'lan');
-				setOpt(sid, 'src_dport', p.port);
+				setOpt(sid, 'src_dport', p.pub || p.dp);
 				setOpt(sid, 'dest_ip', p.target);
-				setOpt(sid, 'dest_port', p.destPort || p.port);
+				setOpt(sid, 'dest_port', p.dp || p.pub);
 				setOpt(sid, 'target', 'DNAT');
 			}
 		});

@@ -1,11 +1,17 @@
 #!/bin/sh
-# Apply DPD NAPI/queue settings.
-#   - sysfs/sysctl for the device-wide knobs (netdev_budget, dev_weight,
-#     RPS/XPS, and the legacy per-device gro_flush_timeout/defer_hard_irqs);
-#   - netdev generic netlink for the real per-NAPI instances (kernel >= 6.10):
-#     gro_flush_timeout, defer_hard_irqs, irq_suspend_timeout, threaded.
-# The genl path is optional: without the helper or the family, the sysfs path
-# still runs and napi.json says so.
+# Apply DPD NAPI/queue settings, with a low-latency default and an adaptive
+# throughput profile.
+#
+#   mode low          always low latency: gro_flush/defer = 0, budget 300,
+#                     dev_weight 64, no RPS/XPS
+#   mode throughput   always the UCI values below
+#   mode adaptive     start low, switch to throughput after 3 consecutive
+#                     10 s samples above 60% CPU, back to low after 6 samples
+#                     below 25% (hysteresis; never flaps on a single spike)
+#
+# The per-NAPI values go through netdev generic netlink (kernel >= 6.10) and
+# the legacy per-device sysfs files; the globals go through /proc/sys.
+# The profile is published in /var/run/dpd/napi.json.
 . /lib/functions.sh
 . /usr/share/libubox/jshn.sh
 
@@ -15,7 +21,7 @@ mkdir -p "$OUT"
 config_load dpd_napi
 config_get_bool enabled main enabled 0
 [ "$enabled" = 1 ] || exit 0
-
+config_get mode main mode adaptive
 config_get netdev_budget main netdev_budget 600
 config_get netdev_budget_usecs main netdev_budget_usecs 4000
 config_get dev_weight main dev_weight 64
@@ -30,102 +36,215 @@ config_get irq_cpus main irq_cpus ''
 config_get qdisc_mode main qdisc_mode keep
 config_get qdisc_cake_args main qdisc_cake_args ''
 
+# Low-latency profile: fixed, deliberately conservative.
+LOW_GRO=0
+LOW_DEFER=0
+LOW_BUDGET=300
+LOW_BUDGET_US=2000
+LOW_WEIGHT=64
+
+# Adaptive thresholds (percent of all CPUs, 10 s window).
+HIGH_PCT=60
+LOW_PCT=25
+HIGH_SAMPLES=3
+LOW_SAMPLES=6
+
+NETDEV=/usr/sbin/dpd-napi-netdev
+genl=0
+if [ "$netdev_genl" = 1 ] && [ -x "$NETDEV" ] &&
+   "$NETDEV" list >/dev/null 2>&1; then
+	genl=1
+fi
+
+profile=low
+busy=0
+switches=0
+devices=""
+
 write_sysctl() {
 	[ -w "$1" ] || return 0
 	printf '%s\n' "$2" > "$1" 2>/dev/null || return 0
 }
 
-write_sysctl /proc/sys/net/core/netdev_budget "$netdev_budget"
-write_sysctl /proc/sys/net/core/netdev_budget_usecs "$netdev_budget_usecs"
-write_sysctl /proc/sys/net/core/dev_weight "$dev_weight"
+write_json() {
+	json_init
+	json_add_boolean enabled 1
+	json_add_string mode "$mode"
+	json_add_string profile "$profile"
+	json_add_int cpu_busy "$busy"
+	json_add_int switches "$switches"
+	json_add_int netdev_budget "$cur_budget"
+	json_add_int netdev_budget_usecs "$cur_budget_us"
+	json_add_int dev_weight "$cur_weight"
+	json_add_int gro_flush_timeout "$cur_gro"
+	json_add_int napi_defer_hard_irqs "$cur_defer"
+	json_add_boolean netdev_genl "$genl"
+	json_add_string rps_cpus "$cur_rps"
+	json_add_string xps_cpus "$cur_xps"
+	json_add_string devices "$devices"
+	json_dump > "$OUT/napi.json.tmp" && mv "$OUT/napi.json.tmp" "$OUT/napi.json"
+}
 
-NETDEV=/usr/sbin/dpd-napi-netdev
-genl=0
-if [ "$netdev_genl" = 1 ] && [ -x "$NETDEV" ]; then
-	if "$NETDEV" list >/dev/null 2>&1; then
-		genl=1
+apply_profile() {
+	local p="$1" d name q
+
+	if [ "$p" = low ]; then
+		cur_gro=$LOW_GRO
+		cur_defer=$LOW_DEFER
+		cur_budget=$LOW_BUDGET
+		cur_budget_us=$LOW_BUDGET_US
+		cur_weight=$LOW_WEIGHT
+		cur_rps=0
+		cur_xps=0
 	else
-		logger -t dpd-napi "netdev family unavailable, sysfs only"
-	fi
-fi
-
-devices=""
-for d in /sys/class/net/*; do
-	[ -d "$d/queues" ] || continue
-	name=${d##*/}
-	[ "$name" = lo ] && continue
-	devices="$devices $name"
-
-	[ -w "$d/gro_flush_timeout" ] && printf '%s\n' "$gro_flush_timeout" > "$d/gro_flush_timeout" 2>/dev/null
-	[ -w "$d/napi_defer_hard_irqs" ] && printf '%s\n' "$napi_defer_hard_irqs" > "$d/napi_defer_hard_irqs" 2>/dev/null
-
-	if [ "$genl" = 1 ]; then
-		set -- gro_flush_timeout "$gro_flush_timeout" \
-			defer_hard_irqs "$napi_defer_hard_irqs"
-		[ -n "$irq_suspend_timeout" ] && set -- "$@" irq_suspend_timeout "$irq_suspend_timeout"
-		[ -n "$threaded" ] && set -- "$@" threaded "$threaded"
-		"$NETDEV" set "$name" "$@" 2>/dev/null
+		cur_gro=$gro_flush_timeout
+		cur_defer=$napi_defer_hard_irqs
+		cur_budget=$netdev_budget
+		cur_budget_us=$netdev_budget_usecs
+		cur_weight=$dev_weight
+		cur_rps=${rps_cpus:-0}
+		cur_xps=${xps_cpus:-0}
 	fi
 
-	if [ -n "$rps_cpus" ]; then
+	write_sysctl /proc/sys/net/core/netdev_budget "$cur_budget"
+	write_sysctl /proc/sys/net/core/netdev_budget_usecs "$cur_budget_us"
+	write_sysctl /proc/sys/net/core/dev_weight "$cur_weight"
+
+	devices=""
+	for d in /sys/class/net/*; do
+		[ -d "$d/queues" ] || continue
+		name=${d##*/}
+		[ "$name" = lo ] && continue
+		devices="$devices $name"
+
+		[ -w "$d/gro_flush_timeout" ] &&
+			printf '%s\n' "$cur_gro" > "$d/gro_flush_timeout" 2>/dev/null
+		[ -w "$d/napi_defer_hard_irqs" ] &&
+			printf '%s\n' "$cur_defer" > "$d/napi_defer_hard_irqs" 2>/dev/null
+
+		if [ "$genl" = 1 ]; then
+			set -- gro_flush_timeout "$cur_gro" \
+				defer_hard_irqs "$cur_defer"
+			[ -n "$irq_suspend_timeout" ] &&
+				set -- "$@" irq_suspend_timeout "$irq_suspend_timeout"
+			[ -n "$threaded" ] && set -- "$@" threaded "$threaded"
+			"$NETDEV" set "$name" "$@" 2>/dev/null
+		fi
+
 		for q in "$d"/queues/rx-*/rps_cpus; do
-			[ -w "$q" ] && printf '%s\n' "$rps_cpus" > "$q" 2>/dev/null
+			[ -w "$q" ] && printf '%s\n' "$cur_rps" > "$q" 2>/dev/null
 		done
-	fi
-	if [ -n "$xps_cpus" ]; then
 		for q in "$d"/queues/tx-*/xps_cpus; do
-			[ -w "$q" ] && printf '%s\n' "$xps_cpus" > "$q" 2>/dev/null
+			[ -w "$q" ] && printf '%s\n' "$cur_xps" > "$q" 2>/dev/null
 		done
+	done
+	profile=$p
+	write_json
+}
+
+# One-shot helpers (qdisc/irq/GRO state); no-op unless configured.
+apply_helpers() {
+	local devargs=
+
+	[ -n "$devices" ] || return 0
+	for d in $devices; do devargs="$devargs --dev $d"; done
+	if [ -n "$irq_cpus" ] && [ -x /usr/sbin/dpd-napi-irq ]; then
+		# shellcheck disable=SC2086
+		/usr/sbin/dpd-napi-irq --cpus "$irq_cpus" --json "$OUT/irq.json" \
+			$devargs ||
+			logger -t dpd-napi "irq affinity failed (irq_cpus=$irq_cpus)"
 	fi
-done
-
-json_init
-json_add_boolean enabled "$enabled"
-json_add_int netdev_budget "$netdev_budget"
-json_add_int netdev_budget_usecs "$netdev_budget_usecs"
-json_add_int dev_weight "$dev_weight"
-json_add_int gro_flush_timeout "$gro_flush_timeout"
-json_add_int napi_defer_hard_irqs "$napi_defer_hard_irqs"
-json_add_string irq_suspend_timeout "$irq_suspend_timeout"
-json_add_string threaded "$threaded"
-json_add_boolean netdev_genl "$genl"
-json_add_string rps_cpus "$rps_cpus"
-json_add_string xps_cpus "$xps_cpus"
-json_add_string devices "$devices"
-json_dump > "$OUT/napi.json.tmp" && mv "$OUT/napi.json.tmp" "$OUT/napi.json"
-
-# ---- optional system tuning -------------------------------------------
-# These helpers are no-ops unless their UCI knob says otherwise, so the
-# default boot path is unchanged. A failure is logged and never aborts the
-# NAPI configuration. --dev is passed unquoted on purpose (the list is
-# already word-split by the enumeration above).
-devargs=
-for d in $devices; do devargs="$devargs --dev $d"; done
-if [ -n "$irq_cpus" ] && [ -x /usr/sbin/dpd-napi-irq ]; then
-	# shellcheck disable=SC2086
-	/usr/sbin/dpd-napi-irq --cpus "$irq_cpus" --json "$OUT/irq.json" $devargs ||
-		logger -t dpd-napi "irq affinity failed (irq_cpus=$irq_cpus)"
-fi
-
-# Record the current GRO/GSO/TSO state. No feature is changed here: the
-# default is "keep" and A/B runs call the helper by hand.
-if [ -x /usr/sbin/dpd-napi-gro ]; then
-	# shellcheck disable=SC2086
-	/usr/sbin/dpd-napi-gro --json "$OUT/gro.json" $devargs ||
-		logger -t dpd-napi "gro state dump failed"
-fi
-
-if [ -x /usr/sbin/dpd-napi-qdisc ]; then
-	# "keep" only records the current root qdiscs; the helper changes
-	# nothing. Failure to record is not fatal in that mode.
-	if [ "$qdisc_mode" = keep ]; then
-		/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
-			--cake-args "$qdisc_cake_args" --json "$OUT/qdisc.json" >/dev/null 2>&1 || true
-	else
-		/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
-			--cake-args "$qdisc_cake_args" --json "$OUT/qdisc.json" ||
-			logger -t dpd-napi "qdisc mode '$qdisc_mode' not applied (see $OUT/qdisc.json)"
+	if [ -x /usr/sbin/dpd-napi-gro ]; then
+		# shellcheck disable=SC2086
+		/usr/sbin/dpd-napi-gro --json "$OUT/gro.json" $devargs ||
+			logger -t dpd-napi "gro state dump failed"
 	fi
-fi
+	if [ -x /usr/sbin/dpd-napi-qdisc ]; then
+		if [ "$qdisc_mode" = keep ]; then
+			/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
+				--cake-args "$qdisc_cake_args" \
+				--json "$OUT/qdisc.json" >/dev/null 2>&1 || true
+		else
+			/usr/sbin/dpd-napi-qdisc --mode "$qdisc_mode" \
+				--cake-args "$qdisc_cake_args" \
+				--json "$OUT/qdisc.json" ||
+				logger -t dpd-napi "qdisc mode '$qdisc_mode' not applied (see $OUT/qdisc.json)"
+		fi
+	fi
+}
 
-while true; do sleep 3600; done
+# Read /proc/stat's aggregate line as "<total> <idle+iowait>".
+read_cpu() {
+	awk '/^cpu / { t = 0; for (i = 2; i <= NF; i++) t += $i; print t, $5 + $6; exit }' /proc/stat
+}
+
+case "$mode" in
+low)
+	apply_profile low
+	apply_helpers
+	while :; do sleep 3600; done
+	;;
+throughput)
+	apply_profile throughput
+	apply_helpers
+	while :; do sleep 3600; done
+	;;
+adaptive)
+	apply_profile low
+	apply_helpers
+	set -- $(read_cpu)
+	prev_total=${1:-0}
+	prev_idle=${2:-0}
+	high=0
+	lowcnt=0
+	while :; do
+		sleep 10
+		set -- $(read_cpu)
+		total=${1:-0}
+		idle=${2:-0}
+		dt=$((total - prev_total))
+		di=$((idle - prev_idle))
+		prev_total=$total
+		prev_idle=$idle
+		if [ "$dt" -gt 0 ]; then
+			busy=$(( (dt - di) * 100 / dt ))
+		else
+			busy=0
+		fi
+		if [ "$profile" = low ]; then
+			if [ "$busy" -ge "$HIGH_PCT" ]; then
+				high=$((high + 1))
+				[ "$high" -ge "$HIGH_SAMPLES" ] && {
+					apply_profile throughput
+					switches=$((switches + 1))
+					logger -t dpd-napi "adaptive: CPU ${busy}% -> throughput"
+					high=0
+					lowcnt=0
+				}
+			else
+				high=0
+			fi
+		else
+			if [ "$busy" -le "$LOW_PCT" ]; then
+				lowcnt=$((lowcnt + 1))
+				[ "$lowcnt" -ge "$LOW_SAMPLES" ] && {
+					apply_profile low
+					switches=$((switches + 1))
+					logger -t dpd-napi "adaptive: CPU ${busy}% -> low latency"
+					lowcnt=0
+					high=0
+				}
+			else
+				lowcnt=0
+			fi
+		fi
+		write_json
+	done
+	;;
+*)
+	logger -t dpd-napi "unknown mode '$mode', using low"
+	apply_profile low
+	apply_helpers
+	while :; do sleep 3600; done
+	;;
+esac
