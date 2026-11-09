@@ -100,6 +100,11 @@ start_service() {
 
 	acl_nft_apply "$mode" "$lan_dev" "$mark" "$mask"
 
+	# A rule/attach change can alter which flows are eligible. Drop the cached
+	# egress decisions so the next packet of each flow is re-evaluated instead
+	# of keeping a verdict learned under the old rule set.
+	[ -x /usr/sbin/dpdctl ] && /usr/sbin/dpdctl bump >/dev/null 2>&1
+
 	acl_log "started: enabled=$enabled mode=$mode wan='$wan'($wan_dev) lan='$lan'($lan_dev) attached=$nok fullcone=$fullcone"
 }
 
@@ -119,6 +124,9 @@ stop_service() {
 	# must happen unconditionally: a leftover `notrack` with nothing doing the
 	# NAT would break every LAN->WAN flow
 	acl_nft_apply off
+
+	# the ACL is gone; cached flows must be re-evaluated by the stack
+	[ -x /usr/sbin/dpdctl ] && /usr/sbin/dpdctl bump >/dev/null 2>&1
 
 	acl_log "stopped"
 }

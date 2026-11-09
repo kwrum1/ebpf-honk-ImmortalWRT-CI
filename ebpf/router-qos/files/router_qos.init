@@ -50,6 +50,7 @@ start_service() {
 		for dev in $(rq_all_devs); do
 			rq_clear "$dev"
 		done
+		[ -x /usr/sbin/dpdctl ] && /usr/sbin/dpdctl bump >/dev/null 2>&1
 		return 0
 	fi
 
@@ -58,6 +59,10 @@ start_service() {
 		rq_apply "$dev"
 	done
 	[ "$found" = "1" ] || rq_log "WAN '$RQ_WAN' has no device yet; hotplug will retry on ifup"
+
+	# UFS caches skb_priority at learn time; a profile/qdisc change must not
+	# keep the old priority on already-accelerated flows.
+	[ -x /usr/sbin/dpdctl ] && /usr/sbin/dpdctl bump >/dev/null 2>&1
 }
 
 stop_service() {
@@ -67,6 +72,7 @@ stop_service() {
 	for dev in $(rq_all_devs); do
 		rq_clear "$dev"
 	done
+	[ -x /usr/sbin/dpdctl ] && /usr/sbin/dpdctl bump >/dev/null 2>&1
 	rq_log "stopped"
 }
 
