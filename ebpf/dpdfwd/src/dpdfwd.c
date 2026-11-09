@@ -706,6 +706,250 @@ static void plugin_ct(struct nlmsghdr *h, int ev)
 		plugin_flow(ev, &t);
 }
 
+/* -------------------------------------------------------------- auto-tune
+ *
+ * The Flow Manager closes the loop on the four datapath knobs instead of
+ * freezing them in UCI:
+ *
+ *   - accel_after_pkts: short flows (destroyed before 3 s) should stay on
+ *     the stack; a high short-flow ratio raises the prime window, a
+ *     long-flow mix lowers it;
+ *   - tcp_ttl / udp_ttl: 4x the EWMA of the observed conntrack lifetime,
+ *     clamped to [2 min, 10 min] and [1 min, 5 min];
+ *   - udp_unidir_ttl: a quarter of the UDP TTL, clamped [15 s, 60 s].
+ *
+ * Samples come from CT new/destroy: a small open-addressed table maps a
+ * 64-bit tuple hash to the start time. Collisions only skew one sample.
+ * Values are written through dpdctl at most every 10 s and only when they
+ * change; the static UCI values remain the initial state and the fallback
+ * when auto_tune is off. Bounds are conservative on purpose.
+ */
+#define TUNE_SLOTS	4096
+#define TUNE_INTERVAL	10
+
+struct tune_ent {
+	uint64_t	hash;
+	uint64_t	started_ms;
+};
+
+static struct tune_ent tune_tab[TUNE_SLOTS];
+static int auto_tune;
+static int tune_dry = 1;
+static unsigned int tune_accel = 32;
+static unsigned int tune_tcp_ttl = 300000;
+static unsigned int tune_udp_ttl = 120000;
+static unsigned int tune_udp_unidir = 30000;
+static unsigned int tune_accel_min = 8, tune_accel_max = 64;
+static unsigned int tune_tcp_min = 120000, tune_tcp_max = 600000;
+static unsigned int tune_udp_min = 60000, tune_udp_max = 300000;
+static unsigned int tune_unidir_min = 15000, tune_unidir_max = 60000;
+static unsigned long tune_samples, tune_short;
+static unsigned long tune_tcp_samples, tune_udp_samples;
+static uint64_t tune_tcp_avg, tune_udp_avg;
+static time_t tune_last;
+
+static uint64_t tune_hash(const struct ct_tuple *t)
+{
+	uint64_t h = 1469598103934665603ULL;
+	int i, n = (t->family == AF_INET) ? 4 : 16;
+
+#define TUNE_MIX(v) do {						\
+	h = (h ^ (uint8_t)(v)) * 1099511628211ULL;			\
+} while (0)
+	TUNE_MIX(t->family);
+	TUNE_MIX(t->proto);
+	for (i = 0; i < n; i++)
+		TUNE_MIX(t->saddr[i]);
+	for (i = 0; i < n; i++)
+		TUNE_MIX(t->daddr[i]);
+	TUNE_MIX(t->sport);
+	TUNE_MIX(t->sport >> 8);
+	TUNE_MIX(t->dport);
+	TUNE_MIX(t->dport >> 8);
+#undef TUNE_MIX
+	return h ? h : 1;
+}
+
+static void tune_ct(int ev, const struct ct_tuple *t)
+{
+	uint64_t h, now, life;
+	uint32_t i;
+
+	if (!auto_tune)
+		return;
+	h = tune_hash(t);
+	i = (uint32_t)(h % TUNE_SLOTS);
+	now = (uint64_t)time(NULL) * 1000;
+	if (ev == DPD_EV_CT_NEW) {
+		tune_tab[i].hash = h;
+		tune_tab[i].started_ms = now;
+		return;
+	}
+	if (ev != DPD_EV_CT_DESTROY)
+		return;
+	if (tune_tab[i].hash != h || !tune_tab[i].started_ms)
+		return;
+	life = now - tune_tab[i].started_ms;
+	tune_tab[i].hash = 0;
+	tune_tab[i].started_ms = 0;
+
+	tune_samples++;
+	if (life < 3000)
+		tune_short++;
+	if (t->proto == IPPROTO_TCP) {
+		tune_tcp_avg = tune_tcp_avg ?
+			(tune_tcp_avg * 7 + life) / 8 : life;
+		tune_tcp_samples++;
+	} else if (t->proto == IPPROTO_UDP) {
+		tune_udp_avg = tune_udp_avg ?
+			(tune_udp_avg * 7 + life) / 8 : life;
+		tune_udp_samples++;
+	}
+}
+
+static unsigned int tune_clamp(uint64_t v, unsigned int lo, unsigned int hi)
+{
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return (unsigned int)v;
+}
+
+static unsigned int tune_round(unsigned int v, unsigned int step)
+{
+	return v - v % step;
+}
+
+static void tune_apply(const char *key, unsigned int val)
+{
+	char buf[16];
+	char *argv[5];
+
+	snprintf(buf, sizeof(buf), "%u", val);
+	argv[0] = (char *)DPD_CTL;
+	argv[1] = "set";
+	argv[2] = (char *)key;
+	argv[3] = buf;
+	argv[4] = NULL;
+	class_exec(argv);
+}
+
+static void tune_tick(void)
+{
+	time_t now = time(NULL);
+	unsigned int accel = tune_accel, tcp = tune_tcp_ttl;
+	unsigned int udp = tune_udp_ttl, uni = tune_udp_unidir;
+	int changed = 0;
+
+	if (!auto_tune || now - tune_last < TUNE_INTERVAL)
+		return;
+	tune_last = now;
+
+	if (tune_samples >= 8) {
+		double r = (double)tune_short / (double)tune_samples;
+
+		if (r > 0.60) {
+			unsigned int v = tune_clamp((uint64_t)accel + 8,
+						    tune_accel_min,
+						    tune_accel_max);
+			if (v != accel) {
+				accel = v;
+				changed = 1;
+			}
+		} else if (r < 0.25) {
+			unsigned int v = tune_clamp(accel > 4 ? accel - 4 : 0,
+						    tune_accel_min,
+						    tune_accel_max);
+			if (v != accel) {
+				accel = v;
+				changed = 1;
+			}
+		}
+	}
+	if (tune_tcp_samples >= 4) {
+		unsigned int v = tune_round(tune_clamp(tune_tcp_avg * 4,
+						       tune_tcp_min, tune_tcp_max),
+					    10000);
+		if (v != tcp) {
+			tcp = v;
+			changed = 1;
+		}
+	}
+	if (tune_udp_samples >= 4) {
+		unsigned int v = tune_round(tune_clamp(tune_udp_avg * 4,
+						       tune_udp_min, tune_udp_max),
+					    10000);
+		if (v != udp) {
+			udp = v;
+			changed = 1;
+		}
+		{
+			unsigned int u = tune_round(tune_clamp(udp / 4,
+							       tune_unidir_min,
+							       tune_unidir_max),
+						    5000);
+			if (u != uni) {
+				uni = u;
+				changed = 1;
+			}
+		}
+	}
+
+	if (tune_samples && getenv("DPD_TUNE_DEBUG"))
+		fprintf(stderr, "dpdfwd: tune tick samples=%lu short=%lu "
+			"accel=%u tcp=%u udp=%u udp1=%u\n",
+			tune_samples, tune_short, accel, tcp, udp, uni);
+
+	if (changed) {
+		if (!tune_dry) {
+			if (accel != tune_accel)
+				tune_apply("accel", accel);
+			if (tcp != tune_tcp_ttl)
+				tune_apply("tcp_ttl", tcp);
+			if (udp != tune_udp_ttl)
+				tune_apply("udp_ttl", udp);
+			if (uni != tune_udp_unidir)
+				tune_apply("udp_unidir_ttl", uni);
+		}
+		fprintf(stderr, "dpdfwd: tune accel=%u tcp=%u udp=%u "
+			"udp1=%u samples=%lu short=%.0f%%%s\n",
+			accel, tcp, udp, uni, tune_samples,
+			tune_samples ? 100.0 * tune_short / tune_samples : 0.0,
+			tune_dry ? " (dry-run)" : "");
+	}
+	tune_accel = accel;
+	tune_tcp_ttl = tcp;
+	tune_udp_ttl = udp;
+	tune_udp_unidir = uni;
+	tune_samples /= 2;
+	tune_short /= 2;
+}
+
+static void tune_ct_msg(struct nlmsghdr *h, int ev)
+{
+	struct nfgenmsg *nfg = NLMSG_DATA(h);
+	struct nlattr *attrs, *a;
+	struct ct_tuple t;
+	int len;
+
+	if (!auto_tune)
+		return;
+	if (h->nlmsg_len < NLMSG_HDRLEN + sizeof(*nfg))
+		return;
+	attrs = (struct nlattr *)((char *)nfg + sizeof(*nfg));
+	len = h->nlmsg_len - NLMSG_HDRLEN - sizeof(*nfg);
+	a = nla_find(attrs, len, CTA_TUPLE_ORIG);
+	if (a && !parse_tuple(a, &t))
+		tune_ct(ev, &t);
+}
+
+static void ct_event(struct nlmsghdr *h, int ev)
+{
+	plugin_ct(h, ev);
+	tune_ct_msg(h, ev);
+}
+
 static volatile sig_atomic_t stop;
 
 static void on_signal(int sig)
@@ -758,12 +1002,19 @@ static void publish(struct stats *st)
 		" \"unknown\": %lu, \"errors\": %lu, \"ct_delete_batches\": %lu,"
 		" \"class_rules\": %lu, \"class_bad\": %lu,"
 		" \"class_applied_at\": %ld, \"class_error\": %lu,"
+		" \"tune\": { \"auto\": %d, \"accel\": %u,"
+		" \"tcp_ttl_ms\": %u, \"udp_ttl_ms\": %u,"
+		" \"udp_unidir_ttl_ms\": %u, \"samples\": %lu,"
+		" \"short_ratio\": %.3f },"
 		" \"last_event\": %ld }\n",
 		(long)(time(NULL) - st->started), st->link, st->addr,
 		st->route, st->neigh, st->ct_new, st->ct_update,
 		st->ct_destroy, st->bumps, st->unknown, st->errors,
 		ct_delete_batches, st->class_rules, st->class_bad,
 		(long)st->class_applied_at, st->class_error,
+		auto_tune, tune_accel, tune_tcp_ttl, tune_udp_ttl,
+		tune_udp_unidir, tune_samples,
+		tune_samples ? (double)tune_short / (double)tune_samples : 0.0,
 		(long)st->last_event);
 	fclose(f);
 	if (rename(tmp, OUT_FILE) != 0)
@@ -793,12 +1044,34 @@ int main(int argc, char **argv)
 			plugins_enabled = 0;
 		else if (!strcmp(argv[i], "--plugin-dir") && i + 1 < argc)
 			plugin_dir = argv[++i];
+		else if (!strcmp(argv[i], "--auto-tune"))
+			auto_tune = 1;
+		else if (!strcmp(argv[i], "--no-auto-tune"))
+			auto_tune = 0;
+		else if (!strcmp(argv[i], "--accel") && i + 1 < argc)
+			tune_accel = strtoul(argv[++i], NULL, 0);
+		else if (!strcmp(argv[i], "--tcp-ttl") && i + 1 < argc)
+			tune_tcp_ttl = strtoul(argv[++i], NULL, 0);
+		else if (!strcmp(argv[i], "--udp-ttl") && i + 1 < argc)
+			tune_udp_ttl = strtoul(argv[++i], NULL, 0);
+		else if (!strcmp(argv[i], "--udp-unidir") && i + 1 < argc)
+			tune_udp_unidir = strtoul(argv[++i], NULL, 0);
 	}
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
 	st.started = time(NULL);
 	mkdir(OUT_DIR, 0755);
 	plugin_dry = dry;
+	tune_dry = dry;
+	tune_accel = tune_clamp(tune_accel, tune_accel_min, tune_accel_max);
+	tune_tcp_ttl = tune_clamp(tune_tcp_ttl, tune_tcp_min, tune_tcp_max);
+	tune_udp_ttl = tune_clamp(tune_udp_ttl, tune_udp_min, tune_udp_max);
+	tune_udp_unidir = tune_clamp(tune_udp_unidir, tune_unidir_min,
+				     tune_unidir_max);
+	if (auto_tune)
+		fprintf(stderr, "dpdfwd: auto-tune on (accel=%u tcp=%u "
+			"udp=%u udp1=%u)\n", tune_accel, tune_tcp_ttl,
+			tune_udp_ttl, tune_udp_unidir);
 	if (plugins_enabled)
 		plugin_load_dir(plugin_dir);
 
@@ -885,24 +1158,25 @@ int main(int argc, char **argv)
 
 						if (msg == IPCTNL_MSG_CT_NEW) {
 							st.ct_new++;
-							plugin_ct(h, DPD_EV_CT_NEW);
+							ct_event(h, DPD_EV_CT_NEW);
 						} else if (msg ==
 							   IPCTNL_MSG_CT_DELETE) {
 							st.ct_destroy++;
-							plugin_ct(h,
-								  DPD_EV_CT_DESTROY);
+							ct_event(h,
+								 DPD_EV_CT_DESTROY);
 							if (ct_delete)
 								ct_queue(h);
 						} else {
 							st.ct_update++;
-							plugin_ct(h,
-								  DPD_EV_CT_UPDATE);
+							ct_event(h,
+								 DPD_EV_CT_UPDATE);
 						}
 					}
 				}
 			}
 		}
 		class_tick(&st, dry);
+		tune_tick();
 		if (bump_at && now_ms >= bump_at) {
 			bump_epoch(dry, &st);
 			bump_at = 0;
