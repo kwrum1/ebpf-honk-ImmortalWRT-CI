@@ -136,6 +136,15 @@ fetch_honk_stage() {
 			'[.[] | select(.assets != null) | select([.assets[].name] | index($a))][0].assets[]? | select(.name == $n) | .browser_download_url' 2>/dev/null | head -1
 	}
 	stage=$(pick_from "honk-core-${core}-p1-x86_64.tar.gz" generated-stage.mk)
+	# The core is normally published by kwrum1/dpd-fw. Until that release exists
+	# (or if its API is unreachable), fall back to this repository's own release:
+	# the same core tag may still be there from before the split.
+	if { [ -z "$stage" ] || [ "$stage" = "null" ]; } && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+		echo "honk: no p1 core in kwrum1/dpd-fw, trying ${GITHUB_REPOSITORY}" >&2
+		rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+			"https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30" 2>/dev/null || true)
+		[ -n "$rel_json" ] && stage=$(pick_from "honk-core-${core}-p1-x86_64.tar.gz" generated-stage.mk)
+	fi
 	if [ -z "$stage" ] || [ "$stage" = "null" ]; then
 		echo "honk: no p1 core for CORE_COMMIT=$core, using the plain core" >&2
 		stage=$(pick_from "honk-core-${core}-x86_64.tar.gz" generated-stage.mk)
