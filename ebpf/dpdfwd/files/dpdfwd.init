@@ -10,7 +10,7 @@ start_service() {
 	. /lib/functions.sh
 	config_load dpd_fastpath
 	config_get_bool auto_tune global auto_tune 1
-	config_get accel global accel_after_pkts 32
+	config_get accel global accel_after_pkts 8
 	config_get tcp_ttl global tcp_ttl_ms 300000
 	config_get udp_ttl global udp_ttl_ms 120000
 	config_get udp_unidir global udp_unidir_ttl_ms 30000

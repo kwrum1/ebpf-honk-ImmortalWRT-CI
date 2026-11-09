@@ -1209,7 +1209,21 @@ static int cmd_flows(int argc, char **argv)
 	for (;;) {
 		if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
 			uint64_t age_ms = flow_age_ms(v.last_seen_ms);
+			char sa[INET6_ADDRSTRLEN] = "-";
+			char da[INET6_ADDRSTRLEN] = "-";
 
+			/* v4 is stored in the last word (see the BPF key
+			 * builder); v6 fills the whole array. Printing the
+			 * tuple is what makes a flow identifiable at all. */
+			if (k.family == AF_INET) {
+				inet_ntop(AF_INET, &k.saddr[3], sa, sizeof(sa));
+				inet_ntop(AF_INET, &k.daddr[3], da, sizeof(da));
+			} else if (k.family == AF_INET6) {
+				inet_ntop(AF_INET6, k.saddr, sa, sizeof(sa));
+				inet_ntop(AF_INET6, k.daddr, da, sizeof(da));
+			}
+			printf("%s:%u > %s:%u\n", sa, ntohs(k.sport), da,
+			       ntohs(k.dport));
 			printf("%-10s fam=%u proto=%u egress=%-10s wan=%u epoch=%u "
 			       "cls=%s age=%llums "
 			       "dmac=%02x:%02x:%02x:%02x:%02x:%02x "

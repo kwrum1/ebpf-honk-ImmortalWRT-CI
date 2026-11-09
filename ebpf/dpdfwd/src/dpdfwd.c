@@ -54,6 +54,11 @@
 #define DPD_CTL "/usr/sbin/dpdctl"
 #define CT_DELETE_FILE "/tmp/dpd-ct-delete"
 #define DEBOUNCE_MS 300
+/* Neighbour events (IPv6 NUD) arrive about once a second; bumping the flow
+ * epoch on each one throws the whole cache away every couple of seconds.
+ * Only a MAC change matters for an L2-cached flow, so one bump per 30 s is
+ * plenty. Link/address/route changes still bump immediately. */
+#define NEIGH_BUMP_MS 30000
 #define PUBLISH_MS 2000
 
 #define CLASS_FILE_DEFAULT "/etc/dpd/class.conf"
@@ -735,7 +740,7 @@ struct tune_ent {
 static struct tune_ent tune_tab[TUNE_SLOTS];
 static int auto_tune;
 static int tune_dry = 1;
-static unsigned int tune_accel = 32;
+static unsigned int tune_accel = 8;
 static unsigned int tune_tcp_ttl = 300000;
 static unsigned int tune_udp_ttl = 120000;
 static unsigned int tune_udp_unidir = 30000;
@@ -821,6 +826,20 @@ static unsigned int tune_round(unsigned int v, unsigned int step)
 	return v - v % step;
 }
 
+/* Lifetime-derived TTLs are noisy: one long download lifts the EWMA by tens
+ * of seconds, the next short flows drop it again, and without a limit the
+ * TCP timeout flaps between 120 s and 450 s on every tick. Move at most
+ * maxstep per update and only recompute the TTLs every third tick. */
+static unsigned int tune_step(unsigned int old, unsigned int want,
+			      unsigned int maxstep)
+{
+	if (want > old + maxstep)
+		return old + maxstep;
+	if (want + maxstep < old)
+		return old - maxstep;
+	return want;
+}
+
 static void tune_apply(const char *key, unsigned int val)
 {
 	char buf[16];
@@ -840,13 +859,15 @@ static void tune_tick(void)
 	time_t now = time(NULL);
 	unsigned int accel = tune_accel, tcp = tune_tcp_ttl;
 	unsigned int udp = tune_udp_ttl, uni = tune_udp_unidir;
-	int changed = 0;
+	static unsigned int ttl_tick;
+	int changed = 0, do_ttl;
 
 	if (!auto_tune || now - tune_last < TUNE_INTERVAL)
 		return;
 	tune_last = now;
+	do_ttl = (++ttl_tick % 3) == 0;
 
-	if (tune_samples >= 8) {
+	if (tune_samples >= 32) {
 		double r = (double)tune_short / (double)tune_samples;
 
 		if (r > 0.60) {
@@ -867,19 +888,21 @@ static void tune_tick(void)
 			}
 		}
 	}
-	if (tune_tcp_samples >= 4) {
+	if (do_ttl && tune_tcp_samples >= 4) {
 		unsigned int v = tune_round(tune_clamp(tune_tcp_avg * 4,
 						       tune_tcp_min, tune_tcp_max),
 					    10000);
+		v = tune_step(tcp, v, 30000);
 		if (v != tcp) {
 			tcp = v;
 			changed = 1;
 		}
 	}
-	if (tune_udp_samples >= 4) {
+	if (do_ttl && tune_udp_samples >= 4) {
 		unsigned int v = tune_round(tune_clamp(tune_udp_avg * 4,
 						       tune_udp_min, tune_udp_max),
 					    10000);
+		v = tune_step(udp, v, 20000);
 		if (v != udp) {
 			udp = v;
 			changed = 1;
@@ -889,6 +912,7 @@ static void tune_tick(void)
 							       tune_unidir_min,
 							       tune_unidir_max),
 						    5000);
+			u = tune_step(uni, u, 5000);
 			if (u != uni) {
 				uni = u;
 				changed = 1;
@@ -1027,6 +1051,7 @@ int main(int argc, char **argv)
 	int rtnl, ct;
 	struct stats st = { 0 };
 	long long bump_at = 0;
+	long long last_neigh_bump = 0;
 	time_t next_publish = 0, last_ct_flush = 0;
 
 	for (i = 1; i < argc; i++) {
@@ -1072,6 +1097,16 @@ int main(int argc, char **argv)
 		fprintf(stderr, "dpdfwd: auto-tune on (accel=%u tcp=%u "
 			"udp=%u udp1=%u)\n", tune_accel, tune_tcp_ttl,
 			tune_udp_ttl, tune_udp_unidir);
+	/* dpd_cfg lives in a pinned map, so it survives a dpdfwd restart while
+	 * the tuner starts again from the init arguments. Push the starting
+	 * point once: otherwise publish()/flowd.json report values the data
+	 * plane is not using until the first change. */
+	if (auto_tune && !tune_dry) {
+		tune_apply("accel", tune_accel);
+		tune_apply("tcp_ttl", tune_tcp_ttl);
+		tune_apply("udp_ttl", tune_udp_ttl);
+		tune_apply("udp_unidir_ttl", tune_udp_unidir);
+	}
 	if (plugins_enabled)
 		plugin_load_dir(plugin_dir);
 
@@ -1117,6 +1152,7 @@ int main(int argc, char **argv)
 				st.last_event = time(NULL);
 				if (i == 0) {
 					struct nlmsghdr *h;
+					int hard = 0, soft = 0;
 
 					for (h = (struct nlmsghdr *)buf;
 					     NLMSG_OK(h, (unsigned int)len);
@@ -1126,28 +1162,44 @@ int main(int argc, char **argv)
 						case RTM_DELLINK:
 							st.link++;
 							plugin_topology(DPD_EV_LINK, NULL);
+							hard = 1;
 							break;
 						case RTM_NEWADDR:
 						case RTM_DELADDR:
 							st.addr++;
 							plugin_topology(DPD_EV_ADDR, NULL);
+							hard = 1;
 							break;
 						case RTM_NEWROUTE:
 						case RTM_DELROUTE:
 							st.route++;
 							plugin_topology(DPD_EV_ROUTE, NULL);
+							hard = 1;
 							break;
 						case RTM_NEWNEIGH:
 						case RTM_DELNEIGH:
 							st.neigh++;
 							plugin_topology(DPD_EV_NEIGH, NULL);
+							soft = 1;
 							break;
 						default:
 							st.unknown++;
 						}
 					}
-					/* topology changed: one debounced bump */
-					bump_at = now_ms + DEBOUNCE_MS;
+					/* A real topology change (link, address,
+					 * route) invalidates every learned flow at
+					 * once. Neighbour churn only affects one
+					 * MAC, and bumping for it every couple of
+					 * seconds means no short flow ever survives
+					 * to accel_after; rate-limit it instead. */
+					if (hard) {
+						bump_at = now_ms + DEBOUNCE_MS;
+					} else if (soft &&
+						   now_ms - last_neigh_bump >=
+							   NEIGH_BUMP_MS) {
+						bump_at = now_ms + DEBOUNCE_MS;
+						last_neigh_bump = now_ms;
+					}
 				} else {
 					struct nlmsghdr *h;
 
