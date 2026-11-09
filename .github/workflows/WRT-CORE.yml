@@ -330,7 +330,7 @@ jobs:
       - name: Upload Build Reports
         if: ${{ !inputs.WRT_TEST && always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: build-reports-${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{github.run_attempt}}
           path: ./build-reports/

@@ -35,7 +35,7 @@ publishes the `einat-p2` release. This repository only downloads the binary
 |---|---|---|---|
 | `EBPF-WRT-ALL` | X86, ROCKCHIP | `@owrt` | the eBPF images (datapath from `ebpf/`) |
 | `QCA-PPE` | IPQ60XX / IPQ807X (wifi yes/no) | `@owrt` | **PPE** variant |
-| `QCA-NSS` | IPQ60XX / IPQ807X (same boards) + IPQ53XX / IPQ95XX | `@main` | **NSS firmware** variant (53xx/95xx are NSS-only) |
+| `QCA-NSS` | IPQ60XX / IPQ807X (same four configs) | `@main` | **NSS firmware** variant |
 | `MTK-ALL` | MEDIATEK-WIFI-YES/NO | `@owrt` | MediaTek |
 | `WRT-TEST` | one config, by hand | `owrt` or `main` | reproduce a single build |
 | `BPF-CHECK` | — | `ebpf/` | compile the datapath + dpdctl in ~1 min |
