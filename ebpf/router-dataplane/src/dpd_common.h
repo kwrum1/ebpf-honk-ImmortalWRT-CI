@@ -190,8 +190,18 @@
  *      - a TCP FIN/RST that hits an accelerated flow deletes the entry and
  *        returns the packet to the stack (ST_FLOW_FIN), instead of holding a
  *        dead flow until the TTL. The reverse entry is left to its TTL.
+ *
+ * 18: UFS v2 + policy cache:
+ *      - dpd_flow_val grows the design's missing fields: state, action,
+ *        skb_priority, ct_cookie, nat_flags, dscp, packets, bytes;
+ *      - the explicit state machine OBSERVE -> BIND (priming count) is
+ *        recorded instead of being implicit in the counter;
+ *      - dpd_class is a userspace-written 5-tuple policy cache
+ *        (FORWARD/PROXY/BLOCK/LOCAL + skb_priority); the learn path copies
+ *        it into the UFS entry and the hit path obeys it. This is the
+ *        "plugins are control-plane, one lookup in the hot path" contract.
  */
-#define DPD_ABI_VERSION		17
+#define DPD_ABI_VERSION		18
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -317,6 +327,12 @@ struct dpd_config {
 	__u32	tcp_ttl_ms;
 	__u32	udp_ttl_ms;
 	__u32	udp_unidir_ttl_ms;
+	/* ABI 18: 1 = update the per-flow packets/bytes counters on every hit
+	 * (useful for telemetry, costs two stores in a cache line that is
+	 * already hot); 0 = leave them to the datapath-wide counters only.
+	 * class_enable: 1 = consult dpd_class when a flow is learned. */
+	__u32	flow_counters;
+	__u32	class_enable;
 };
 
 enum dpd_stat_idx {
@@ -382,6 +398,11 @@ enum dpd_stat_idx {
 	 *			 * einat can re-create/route it. */
 	ST_FLOW_FIN,		/* ABI 17: TCP FIN/RST released an
 	 *			 * accelerated flow (entry deleted). */
+	ST_FLOW_BIND,		/* ABI 18: OBSERVE -> BIND transition	*/
+	ST_FLOW_BLOCK,		/* ABI 18: cached BLOCK action, packet
+	 *			 * dropped by the fast path		*/
+	ST_FLOW_SKIP,		/* ABI 18: cached PROXY/LOCAL action,
+	 *			 * packet handed back to the stack	*/
 	ST__MAX,
 };
 
@@ -494,6 +515,26 @@ struct dpd_flow_key {
  * flags carries DPD_FLOW_F_NO_NEIGH in bit 0 and the per-direction prime
  * counter in bits 8..15 (DPD_FLOW_PRIME_*). The counter is the reason a
  * redirect does not start on the first hit; see the ABI 7 note above. */
+/* ABI 18: explicit flow lifecycle, mirroring the design's NEW->OBSERVE->
+ * BIND->FIN. It is recorded for observability and for the policy cache; the
+ * actual takeover decision is still the prime counter + action. */
+enum dpd_flow_state {
+	DPD_FLOW_STATE_NEW = 0,
+	DPD_FLOW_STATE_OBSERVE,
+	DPD_FLOW_STATE_BIND,
+	DPD_FLOW_STATE_FIN,
+};
+
+/* ABI 18: what the fast path is allowed to do with this flow. FORWARD is the
+ * normal accelerate path; PROXY/LOCAL hand the packet back to the stack (honk
+ * TCX or a local socket); BLOCK drops it explicitly. */
+enum dpd_flow_action {
+	DPD_ACT_FORWARD = 0,
+	DPD_ACT_PROXY,
+	DPD_ACT_BLOCK,
+	DPD_ACT_LOCAL,
+};
+
 struct dpd_flow_val {
 	__u32	egress_ifindex;
 	__u32	last_seen_ms;	/* bpf_ktime_get_ns()/1e6, wraps	*/
@@ -504,7 +545,29 @@ struct dpd_flow_val {
 				 * none; high byte: the cfg epoch this entry
 				 * was learned in (ABI 9)			*/
 	__u32	nh4;		/* ABI 15: IPv4 next hop for an L3 emit	*/
+	/* ABI 18: UFS v2 */
+	__u32	state;		/* enum dpd_flow_state			*/
+	__u32	action;		/* enum dpd_flow_action			*/
+	__u32	skb_priority;	/* cached skb->priority (QoS)		*/
+	__u32	ct_cookie;	/* 0 unless the optional bpf_ct path	*/
+	__u32	nat_flags;	/* DPD_NAT_* (sniffed, for observability) */
+	__u16	dscp;		/* cached DSCP (iph->tos >> 2)		*/
+	__u16	_pad2;
+	__u64	packets;	/* per-flow counters (cfg->flow_counters) */
+	__u64	bytes;
 };
+
+/* ABI 18: userspace-written policy cache, keyed by the same 5-tuple as
+ * dpd_flows (including ingress ifindex). The learn path copies action and
+ * skb_priority into the UFS entry once; the hit path never looks it up. */
+struct dpd_class_val {
+	__u32	action;		/* enum dpd_flow_action			*/
+	__u32	skb_priority;	/* 0 = leave the skb field alone	*/
+	__u32	flags;		/* reserved				*/
+	__u32	_pad;
+};
+
+#define DPD_CLASS_MAX		16384
 
 /* The epoch occupies the high byte of dpd_flow_val.wan; the index itself can
  * never exceed DPD_WAN_MAX (8). */

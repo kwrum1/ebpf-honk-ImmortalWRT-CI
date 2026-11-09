@@ -95,6 +95,17 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } dpd_flows SEC(".maps");
 
+/* ABI 18: policy cache written by userspace (dpdctl class / a control-plane
+ * plugin). The learn path copies action + skb_priority into the UFS entry, so
+ * the hit path never pays for this lookup. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, DPD_CLASS_MAX);
+	__type(key, struct dpd_flow_key);
+	__type(value, struct dpd_class_val);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dpd_class SEC(".maps");
+
 /* per-ifindex L2 capabilities + IPv4 next hop, filled in from userspace
  * (`dpdctl ifaces` / `dpdctl gw`); see struct dpd_iface_val. */
 struct {
@@ -169,6 +180,65 @@ struct {
 } dpd_nat SEC(".maps");
 
 /* ------------------------------------------------------------------ helpers */
+
+/* ABI 18: learn-time policy lookup. Port 0 and ifindex 0 are wildcards, so
+ * the eight combinations cover "any source port", "any destination port" and
+ * "any interface". This runs once per learned flow, never on a hit. */
+static __always_inline struct dpd_class_val *
+dpd_class_find(const struct dpd_flow_key *fk)
+{
+	struct dpd_flow_key ck;
+	struct dpd_class_val *cv;
+
+	cv = bpf_map_lookup_elem(&dpd_class, fk);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.sport = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.dport = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.sport = 0;
+	ck.dport = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.ifindex = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.ifindex = 0;
+	ck.sport = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.ifindex = 0;
+	ck.dport = 0;
+	cv = bpf_map_lookup_elem(&dpd_class, &ck);
+	if (cv)
+		return cv;
+
+	ck = *fk;
+	ck.ifindex = 0;
+	ck.sport = 0;
+	ck.dport = 0;
+	return bpf_map_lookup_elem(&dpd_class, &ck);
+}
 
 /* One lookup gets this CPU's config *and* its counter block (ABI 12). The
  * caller enforces the killer switch on .cfg and bumps counters through .stats;
@@ -1099,6 +1169,23 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				       DPD_FLOW_PRIME_SHIFT;
 			__u32 prime = cfg->accel_after_pkts;
 
+			/* ABI 18: the policy action cached at learn time. The
+			 * class map is not consulted here, so this is two
+			 * compares plus (optionally) the per-flow counters. */
+			if (fval->action == DPD_ACT_BLOCK) {
+				DPD_INC(st, ST_FLOW_BLOCK);
+				return TC_ACT_SHOT;
+			}
+			if (fval->action == DPD_ACT_PROXY ||
+			    fval->action == DPD_ACT_LOCAL) {
+				DPD_INC(st, ST_FLOW_SKIP);
+				return TC_ACT_UNSPEC;
+			}
+			if (cfg->flow_counters) {
+				fval->packets++;
+				fval->bytes += skb->len;
+			}
+
 			/* ABI 17: a FIN/RST releases the flow immediately. The
 			 * packet itself goes to the stack (the TCP state machine
 			 * there still has work to do), and the reverse entry is
@@ -1109,6 +1196,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 
 				if ((void *)(th + 1) <= data_end &&
 				    (th->fin || th->rst)) {
+					fval->state = DPD_FLOW_STATE_FIN;
 					bpf_map_delete_elem(&dpd_flows, &fkey);
 					DPD_INC(st, ST_FLOW_FIN);
 					return TC_ACT_UNSPEC;
@@ -1139,10 +1227,20 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			if (primed < prime) {
 				fval->flags = (fval->flags & ~DPD_FLOW_PRIME_MASK) |
 					      ((primed + 1) << DPD_FLOW_PRIME_SHIFT);
+				if (primed + 1 >= prime) {
+					fval->state = DPD_FLOW_STATE_BIND;
+					DPD_INC(st, ST_FLOW_BIND);
+				}
 				dpd_touch(fval, now, cfg->flow_refresh_ms);
 				/* not counted as a hit: ST_FLOW_HIT keeps
 				 * meaning "packets this program took over". */
 				return TC_ACT_UNSPEC;
+			}
+
+			/* prime == 0: the first hit is already a takeover. */
+			if (fval->state != DPD_FLOW_STATE_BIND) {
+				fval->state = DPD_FLOW_STATE_BIND;
+				DPD_INC(st, ST_FLOW_BIND);
 			}
 
 			DPD_INC(st, ST_FLOW_HIT);
@@ -1180,6 +1278,12 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 					return TC_ACT_UNSPEC;
 				}
 			}
+
+			/* ABI 18: restore the QoS priority cached at learn time.
+			 * The accelerated packet skips the stack's classifier, so
+			 * without this the egress qdisc would see priority 0. */
+			if (fval->skb_priority)
+				skb->priority = fval->skb_priority;
 
 			/* NOTE: the uplink acceleration is safe only with
 			 * net.netfilter.nf_conntrack_tcp_be_liberal=1. The
@@ -1669,6 +1773,36 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 					nv.flags |= DPD_FLOW_F_REPLY;
 			}
 
+			/* ABI 18: fill the UFS v2 fields, then consult the policy
+			 * cache exactly once (never on a hit). */
+			nv.state = DPD_FLOW_STATE_OBSERVE;
+			nv.action = DPD_ACT_FORWARD;
+			nv.skb_priority = skb->priority;
+			nv.packets = 0;
+			nv.bytes = 0;
+			if (fkey.family == AF_INET) {
+				struct iphdr *ih = data + l3_off;
+
+				if ((void *)(ih + 1) <= data_end)
+					nv.dscp = ih->tos >> 2;
+			} else {
+				struct ipv6hdr *i6 = data + l3_off;
+
+				if ((void *)(i6 + 1) <= data_end)
+					nv.dscp = i6->priority;
+			}
+			if (cfg->class_enable) {
+				struct dpd_class_val *cv =
+					dpd_class_find(&fkey);
+
+				if (cv) {
+					nv.action = cv->action;
+					if (cv->skb_priority)
+						nv.skb_priority =
+							cv->skb_priority;
+				}
+			}
+
 			bpf_map_update_elem(&dpd_flows, &fkey, &nv, BPF_ANY);
 
 			/*
@@ -1742,6 +1876,18 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			cpu = dpd_cpu();
 			st = cpu ? &cpu->stats : NULL;
 			DPD_INC(st, ST_FLOW_WRITE);
+			/* ABI 18: the first packet already obeys a cached
+			 * policy, so a block takes effect immediately and a
+			 * proxy/local flow is handed to the stack. */
+			if (nv.action == DPD_ACT_BLOCK) {
+				DPD_INC(st, ST_FLOW_BLOCK);
+				return TC_ACT_SHOT;
+			}
+			if (nv.action == DPD_ACT_PROXY ||
+			    nv.action == DPD_ACT_LOCAL) {
+				DPD_INC(st, ST_FLOW_SKIP);
+				return TC_ACT_UNSPEC;
+			}
 			return TC_ACT_UNSPEC;
 		}
 	}

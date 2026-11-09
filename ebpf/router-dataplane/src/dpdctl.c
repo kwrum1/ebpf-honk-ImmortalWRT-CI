@@ -193,6 +193,7 @@ static const char *stat_name(int i)
 		"tag_pop", "tag_skip",
 		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
 		"l2_v4", "l2_v6", "nat_gone", "flow_fin",
+		"flow_bind", "flow_block", "flow_skip",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -256,6 +257,10 @@ static int cmd_set(int argc, char **argv)
 		cfg.udp_ttl_ms = strtoul(argv[1], NULL, 0);
 	} else if (!strcmp(argv[0], "udp_unidir_ttl")) {
 		cfg.udp_unidir_ttl_ms = strtoul(argv[1], NULL, 0);
+	} else if (!strcmp(argv[0], "counters")) {
+		cfg.flow_counters = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "class")) {
+		cfg.class_enable = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -307,6 +312,8 @@ static int cmd_show(void)
 	printf("accel_after  %u packets\n", cfg.accel_after_pkts);
 	printf("ttl          tcp %u ms / udp %u ms / one-way udp %u ms\n",
 	       cfg.tcp_ttl_ms, cfg.udp_ttl_ms, cfg.udp_unidir_ttl_ms);
+	printf("ufs          counters %u / class cache %u\n",
+	       cfg.flow_counters, cfg.class_enable);
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -573,6 +580,217 @@ static int cmd_gw(int argc, char **argv)
 	return 0;
 }
 
+static const char *state_name(uint32_t s)
+{
+	switch (s) {
+	case DPD_FLOW_STATE_NEW:	return "new";
+	case DPD_FLOW_STATE_OBSERVE:	return "observe";
+	case DPD_FLOW_STATE_BIND:	return "bind";
+	case DPD_FLOW_STATE_FIN:	return "fin";
+	default:			return "?";
+	}
+}
+
+static const char *action_name(uint32_t a)
+{
+	switch (a) {
+	case DPD_ACT_FORWARD:	return "forward";
+	case DPD_ACT_PROXY:	return "proxy";
+	case DPD_ACT_BLOCK:	return "block";
+	case DPD_ACT_LOCAL:	return "local";
+	default:		return "?";
+	}
+}
+
+static int action_parse(const char *s, uint32_t *out)
+{
+	char *e;
+	unsigned long v;
+
+	if (!strcmp(s, "forward")) { *out = DPD_ACT_FORWARD; return 0; }
+	if (!strcmp(s, "proxy")) { *out = DPD_ACT_PROXY; return 0; }
+	if (!strcmp(s, "block")) { *out = DPD_ACT_BLOCK; return 0; }
+	if (!strcmp(s, "local")) { *out = DPD_ACT_LOCAL; return 0; }
+	v = strtoul(s, &e, 0);
+	if (*e || v > DPD_ACT_LOCAL)
+		return -1;
+	*out = (uint32_t)v;
+	return 0;
+}
+
+/* class add|del <if> <tcp|udp|proto> <saddr> <sport> <daddr> <dport>
+ *           <forward|proxy|block|local> [skb_priority]
+ * The key is exactly struct dpd_flow_key, so it matches the UFS entry the
+ * learn path will create for the same ingress interface. */
+static int class_key_from_args(int argc, char **argv, struct dpd_flow_key *k)
+{
+	struct in_addr a4;
+	struct in6_addr a6;
+	char *e;
+	unsigned long v;
+	unsigned idx;
+
+	memset(k, 0, sizeof(*k));
+	if (argc < 6)
+		return -1;
+	if (!strcmp(argv[0], "any") || !strcmp(argv[0], "0")) {
+		idx = 0;	/* wildcard: any ingress interface */
+	} else {
+		idx = if_nametoindex(argv[0]);
+		if (!idx) {
+			v = strtoul(argv[0], &e, 0);
+			if (*e || !v)
+				return -1;
+			idx = v;
+		}
+	}
+	k->ifindex = (uint32_t)idx;
+
+	if (!strcmp(argv[1], "tcp"))
+		k->proto = IPPROTO_TCP;
+	else if (!strcmp(argv[1], "udp"))
+		k->proto = IPPROTO_UDP;
+	else {
+		v = strtoul(argv[1], &e, 0);
+		if (*e || v > 255)
+			return -1;
+		k->proto = (uint8_t)v;
+	}
+
+	if (inet_pton(AF_INET, argv[2], &a4) == 1) {
+		k->family = AF_INET;
+		k->saddr[3] = a4.s_addr;
+	} else if (inet_pton(AF_INET6, argv[2], &a6) == 1) {
+		k->family = AF_INET6;
+		__builtin_memcpy(k->saddr, &a6, sizeof(a6));
+	} else {
+		return -1;
+	}
+
+	if (k->family == AF_INET) {
+		if (inet_pton(AF_INET, argv[4], &a4) != 1)
+			return -1;
+		k->daddr[3] = a4.s_addr;
+	} else {
+		if (inet_pton(AF_INET6, argv[4], &a6) != 1)
+			return -1;
+		__builtin_memcpy(k->daddr, &a6, sizeof(a6));
+	}
+
+	v = strtoul(argv[3], &e, 0);
+	if (*e || v > 65535)
+		return -1;
+	k->sport = htons((uint16_t)v);
+	v = strtoul(argv[5], &e, 0);
+	if (*e || v > 65535)
+		return -1;
+	k->dport = htons((uint16_t)v);
+	return 0;
+}
+
+static void class_print(const struct dpd_flow_key *k)
+{
+	char sa[INET6_ADDRSTRLEN] = "?", da[INET6_ADDRSTRLEN] = "?";
+
+	if (k->family == AF_INET) {
+		inet_ntop(AF_INET, &k->saddr[3], sa, sizeof(sa));
+		inet_ntop(AF_INET, &k->daddr[3], da, sizeof(da));
+	} else {
+		inet_ntop(AF_INET6, k->saddr, sa, sizeof(sa));
+		inet_ntop(AF_INET6, k->daddr, da, sizeof(da));
+	}
+	printf("%-10s fam=%u proto=%u %s:%u -> %s:%u\n",
+	       ifname(k->ifindex), k->family, k->proto, sa,
+	       ntohs(k->sport), da, ntohs(k->dport));
+}
+
+static int cmd_class(int argc, char **argv)
+{
+	struct dpd_flow_key k = {}, nk;
+	struct dpd_class_val v;
+	int fd, n = 0;
+
+	if (argc < 1) {
+		fprintf(stderr, "usage: dpdctl class add|del <if> <tcp|udp> "
+			"<saddr> <sport> <daddr> <dport> "
+			"<forward|proxy|block|local> [priority]\n"
+			"       dpdctl class list|flush\n");
+		return 1;
+	}
+	fd = map_open("dpd_class");
+	if (fd < 0)
+		return 1;
+
+	if (!strcmp(argv[0], "flush")) {
+		while (!dpd_bpf_map_get_next_key(fd, NULL, &k))
+			if (dpd_bpf_map_delete_elem(fd, &k))
+				break;
+		printf("dpd_class flushed\n");
+		return 0;
+	}
+	if (!strcmp(argv[0], "list")) {
+		if (dpd_bpf_map_get_next_key(fd, NULL, &k))
+			return 0;
+		for (;;) {
+			memset(&v, 0, sizeof(v));
+			if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
+				class_print(&k);
+				printf("           action=%s priority=%u\n",
+				       action_name(v.action), v.skb_priority);
+				n++;
+			}
+			if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+				break;
+			k = nk;
+		}
+		printf("classes: %d\n", n);
+		return 0;
+	}
+	if (strcmp(argv[0], "add") && strcmp(argv[0], "del")) {
+		fprintf(stderr, "dpdctl: class: unknown op '%s'\n", argv[0]);
+		return 1;
+	}
+	if (argc < 7) {
+		fprintf(stderr, "dpdctl: class: need 6 arguments after '%s'\n",
+			argv[0]);
+		return 1;
+	}
+	if (!strcmp(argv[0], "add") && argc < 8) {
+		fprintf(stderr, "dpdctl: class add: need the action\n");
+		return 1;
+	}
+	if (class_key_from_args(argc - 1, argv + 1, &k)) {
+		fprintf(stderr, "dpdctl: class: bad 5-tuple\n");
+		return 1;
+	}
+	if (!strcmp(argv[0], "del")) {
+		if (dpd_bpf_map_delete_elem(fd, &k)) {
+			fprintf(stderr, "dpdctl: class del: %s\n",
+				strerror(errno));
+			return 1;
+		}
+		printf("deleted ");
+		class_print(&k);
+		return 0;
+	}
+	memset(&v, 0, sizeof(v));
+	if (action_parse(argv[7], &v.action)) {
+		fprintf(stderr, "dpdctl: class: bad action '%s'\n", argv[7]);
+		return 1;
+	}
+	if (argc >= 9)
+		v.skb_priority = strtoul(argv[8], NULL, 0);
+	if (dpd_bpf_map_update_elem(fd, &k, &v, BPF_ANY)) {
+		fprintf(stderr, "dpdctl: class add: %s\n", strerror(errno));
+		return 1;
+	}
+	printf("added ");
+	class_print(&k);
+	printf("           action=%s priority=%u\n",
+	       action_name(v.action), v.skb_priority);
+	return 0;
+}
+
 static int cmd_flows(int argc, char **argv)
 {
 	struct dpd_flow_key k, nk;
@@ -606,6 +824,12 @@ static int cmd_flows(int argc, char **argv)
 			       v.smac[0], v.smac[1], v.smac[2],
 			       v.smac[3], v.smac[4], v.smac[5],
 			       (v.flags & DPD_FLOW_F_NO_NEIGH) ? " no-neigh" : "");
+			printf("           state=%s action=%s prio=%u dscp=%u "
+			       "pkt=%llu bytes=%llu\n",
+			       state_name(v.state), action_name(v.action),
+			       v.skb_priority, v.dscp,
+			       (unsigned long long)v.packets,
+			       (unsigned long long)v.bytes);
 			if (++n >= max)
 				break;
 		}
@@ -945,6 +1169,8 @@ static int status_json(void)
 		       "\"udp_ttl_ms\": %u, \"udp_unidir_ttl_ms\": %u",
 		       cfg.accel_after_pkts, cfg.tcp_ttl_ms, cfg.udp_ttl_ms,
 		       cfg.udp_unidir_ttl_ms);
+		printf(", \"flow_counters\": %u, \"class_enable\": %u",
+		       cfg.flow_counters, cfg.class_enable);
 		printf(", \"policy\": ");
 		json_string(policy_name(cfg.policy));
 		printf(" },\n");
@@ -1223,6 +1449,11 @@ static void usage(const char *argv0)
 		"  set tcp_ttl <ms>        TCP flow idle timeout (0 = flow_ttl_ms)\n"
 		"  set udp_ttl <ms>        UDP timeout once the flow is bidirectional\n"
 		"  set udp_unidir_ttl <ms> UDP timeout while still one-way\n"
+		"  set counters <0|1>      per-flow packets/bytes in the UFS entry\n"
+		"  set class <0|1>         consult the dpd_class policy cache\n"
+		"  class add|del <if> <tcp|udp> <saddr> <sport> <daddr> <dport>\n"
+		"        <forward|proxy|block|local> [skb_priority]\n"
+		"  class list|flush        inspect/clear the policy cache\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"
@@ -1261,6 +1492,8 @@ int main(int argc, char **argv)
 		return cmd_gw(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "flows"))
 		return cmd_flows(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "class"))
+		return cmd_class(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "version")) {
 		printf("dpdctl abi %d\n", DPD_ABI_VERSION);
 		return 0;
