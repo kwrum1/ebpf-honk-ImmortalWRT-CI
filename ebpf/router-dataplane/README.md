@@ -500,11 +500,20 @@ BPF map（全部 `LIBBPF_PIN_BY_NAME`，ABI 版本 `dpd_common.h` 的
 
 | map | 类型 | 用途 |
 |---|---|---|
-| `dpd_cfg` | ARRAY(1) | mode / enable / redirect / ttl / **policy** |
-| `dpd_stats` | PERCPU_ARRAY | 计数（含 `v6_skip` / `vlan_skip`） |
-| `dpd_flows` | LRU_HASH | Mode B 自学习表 |
-| `dpd_iface` | HASH(64) | 接口 L2 能力（NOARP / POINTOPOINT） |
+| `dpd_cfg` | PERCPU_ARRAY(1) | 每个 CPU 一块：config + 全部计数（ABI 12 起合并） |
+| `dpd_flows` | LRU_HASH | Mode B 自学习表（ABI 18 UFS v2） |
+| `dpd_iface` | HASH(64) | L2 能力 + 下一跳 `gw4` + NAT 地址 `addr4`（ABI 20） |
 | `dpd_vlans` | HASH(64) | `vlans_only` 的段白名单 |
+| `dpd_mtu` | HASH(64) | 每个出口的 MTU（MSS clamp） |
+| `dpd_wans` | ARRAY(1) | 多 WAN 表（ifindex/权重/网关 MAC） |
+| `dpd_class` | LRU_HASH(16384) | 5 元组策略缓存（ABI 18） |
+| `dpd_nat` | LRU_HASH | 内网 tuple → 外部 binding（P2.1/P2.3） |
+| `dpd_nat_rev` | LRU_HASH | 外部 tuple → 内网 tuple；兼端口归属表（P2.2/P2.3） |
+
+程序 section：`classifier/l2`、`classifier/l3`（ingress）、
+`classifier/egress`（ABI 20，仅 `nat_forward=dpd` 时挂在上行 egress）和
+`classifier/nat`（ABI 20，仅 `nat_ingress=dpd` 时挂在上行 ingress 的
+pref 50，早于 router-acl 的 90，只做回程 DNAT 并永远返回 UNSPEC）。
 
 ### 为什么不用 `CompileBPF`
 
@@ -549,7 +558,9 @@ tc filter add dev <if> ingress pref 100 handle 100 bpf da obj dpd_fastpath.bpf.o
 ```sh
 # 编译产物应包含这些 section
 llvm-readelf -S dpd_fastpath.bpf.o | grep -E 'classifier|\.maps|\.BTF'
-# 期望 map：dpd_cfg dpd_stats dpd_flows dpd_iface dpd_vlans
+# 期望 map：dpd_cfg dpd_flows dpd_iface dpd_vlans dpd_mtu dpd_wans
+#           dpd_class dpd_nat dpd_nat_rev
+# 期望 section：classifier/l2 classifier/l3 classifier/egress
 strings -a dpd_fastpath.bpf.o | grep -E '^dpd_' | sort -u
 ```
 

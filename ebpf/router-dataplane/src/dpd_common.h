@@ -231,12 +231,18 @@
 #define DPD_SEC_L3		"classifier/l3"
 /* ABI 20: egress SNAT program, attached to the uplinks only. */
 #define DPD_SEC_EGRESS		"classifier/egress"
+/* ABI 20: return-path DNAT stage, attached to the uplinks at a pref *below*
+ * the policy layer (router-acl owns 90). DNAT-only, always UNSPEC. */
+#define DPD_SEC_NAT		"classifier/nat"
 
 /* TC priority. The interception layer owns TCX (no pref at all), so this pref
  * only orders us among *classic* filters: router-acl owns 90 on the WAN, we own
  * 100 everywhere. Nothing may collide. */
 #define DPD_TC_PREF		100
 #define DPD_TC_HANDLE		100
+/* The DNAT stage must run before router-acl (90), so it lives at 50. It is
+ * not an accelerator: it only restores the internal tuple and yields. */
+#define DPD_TC_PREF_NAT		50
 
 /* default object path inside the image */
 #define DPD_BPF_OBJECT		"/lib/bpf/dpd_fastpath.bpf.o"

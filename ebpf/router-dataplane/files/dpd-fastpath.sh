@@ -39,7 +39,10 @@ DPD_OBJ=/lib/bpf/dpd_fastpath.bpf.o
 DPD_SEC_L2=classifier/l2
 DPD_SEC_L3=classifier/l3
 DPD_SEC_EGRESS=classifier/egress
+DPD_SEC_NAT=classifier/nat
 DPD_PREF=100
+# The DNAT stage has to run before router-acl (pref 90); it yields always.
+DPD_PREF_NAT=50
 DPD_CTL=/usr/sbin/dpdctl
 
 # Published state, kept next to each other so a status page, `logread` and CI
@@ -190,6 +193,52 @@ dpd_nat_egress_sync() {
 	return 0
 }
 
+# ABI 20: return-path DNAT stage. It must be attached at pref 50, i.e. ahead of
+# router-acl at 90: before the tuple is restored an inbound reply is addressed
+# to the router itself, and the policy layer drops it (measured: ICMP 0/3 at
+# pref 100, 3/3 at pref 50). DNAT-only and always TC_ACT_UNSPEC.
+dpd_attach_nat_dn() {
+	local dev="$1"
+
+	[ -n "$dev" ] || return 1
+	[ -e "/sys/class/net/$dev" ] || return 1
+	[ -f "$DPD_OBJ" ] || return 1
+	dpd_bpffs_ensure || dpd_log "warning: /sys/fs/bpf is not a bpffs"
+	dpd_qdisc_ready "$dev" || return 1
+	tc filter del dev "$dev" ingress pref "$DPD_PREF_NAT" 2>/dev/null
+	if ! tc filter add dev "$dev" ingress pref "$DPD_PREF_NAT" \
+		handle "$DPD_PREF_NAT" bpf da obj "$DPD_OBJ" sec "$DPD_SEC_NAT"; then
+		dpd_log "tc filter add (nat dn) failed on $dev"
+		return 1
+	fi
+	return 0
+}
+
+dpd_detach_nat_dn() {
+	[ -e "/sys/class/net/$1" ] || return 0
+	tc filter del dev "$1" ingress pref "$DPD_PREF_NAT" 2>/dev/null
+	return 0
+}
+
+# Keep the DNAT stage in step with `nat_ingress`. Uplinks only: the stage is
+# meaningless on a LAN ingress and would cost two lookups per packet.
+dpd_nat_ingress_sync() {
+	local dev ni
+
+	config_load dpd_fastpath
+	config_get ni global nat_ingress 'einat'
+	for dev in $(dpd_uplink_devs | awk '!seen[$0]++'); do
+		[ -e "/sys/class/net/$dev" ] || continue
+		if [ "$ni" = "dpd" ]; then
+			dpd_attach_nat_dn "$dev" ||
+				dpd_log "nat_ingress=dpd: DNAT stage not attached on $dev"
+		else
+			dpd_detach_nat_dn "$dev"
+		fi
+	done
+	return 0
+}
+
 # Low-level attach to one device. No bridge recursion.
 dpd_attach_one() {
 	local dev="$1"
@@ -246,6 +295,7 @@ dpd_detach_if() {
 
 	[ -e "/sys/class/net/$dev" ] || return 0
 	tc filter del dev "$dev" ingress pref "$DPD_PREF" 2>/dev/null
+	dpd_detach_nat_dn "$dev"
 	dpd_detach_egress "$dev"
 	if [ -d "/sys/class/net/$dev/brif" ]; then
 		for p in /sys/class/net/"$dev"/brif/*; do
@@ -324,7 +374,7 @@ dpd_attach_logical() {
 dpd_push_uci() {
 	local enabled="$1" mode="$2" redirect="$3" ttl="$4" policy="$5"
 	local refresh="$6" ipv6="$7" mss="$8" accel="$9" ttl_tcp="${10}"
-	local ttl_udp="${11}" ttl_udp1="${12}" nf pmin pmax
+	local ttl_udp="${11}" ttl_udp1="${12}" nf ni pmin pmax
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
@@ -357,11 +407,16 @@ dpd_push_uci() {
 	# this only publishes the choice; the port range is the allocator's.
 	config_load dpd_fastpath
 	config_get nf global nat_forward 'einat'
+	config_get ni global nat_ingress 'einat'
 	config_get pmin global nat_port_min 20000
 	config_get pmax global nat_port_max 29999
 	case "$nf" in
 	dpd)	"$DPD_CTL" set nat_forward 1 2>/dev/null ;;
 	*)	"$DPD_CTL" set nat_forward 0 2>/dev/null ;;
+	esac
+	case "$ni" in
+	dpd)	"$DPD_CTL" set nat_ingress 1 2>/dev/null ;;
+	*)	"$DPD_CTL" set nat_ingress 0 2>/dev/null ;;
 	esac
 	"$DPD_CTL" set nat_port_min "$pmin" 2>/dev/null
 	"$DPD_CTL" set nat_port_max "$pmax" 2>/dev/null
@@ -651,9 +706,6 @@ dpd_gate_refresh_uci() {
 	*)	"$DPD_CTL" set nat_ingress 0 2>/dev/null ;;
 	esac
 	dpd_push_vlans "$policy" "$vlans"
-	# ABI 20: the egress SNAT hook is part of the NAT ownership decision, so
-	# it follows the same single source of truth.
-	dpd_nat_egress_sync
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,
 	# and the decision to attach is per event. An image upgraded in place can
@@ -731,6 +783,12 @@ dpd_reconcile_uplink() {
 	elif [ "$n" -gt 0 ]; then
 		dpd_log "invariant: removed $n stale uplink attachment(s)"
 	fi
+	# ABI 20: the NAT hooks (egress SNAT, pref-50 return DNAT) are part of
+	# the same uplink invariant. Run them last: the loop above detaches the
+	# uplink's ingress filters (which includes the pref-50 stage) when
+	# downlink=0.
+	dpd_nat_egress_sync
+	dpd_nat_ingress_sync
 	return 0
 }
 

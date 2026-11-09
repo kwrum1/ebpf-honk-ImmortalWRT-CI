@@ -38,6 +38,7 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/in.h>
+#include <linux/icmp.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <bpf/bpf_helpers.h>
@@ -208,7 +209,8 @@ dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
 
 	if (k->family != AF_INET)
 		return -1;
-	if (k->proto != IPPROTO_TCP && k->proto != IPPROTO_UDP)
+	if (k->proto != IPPROTO_TCP && k->proto != IPPROTO_UDP &&
+	    k->proto != IPPROTO_ICMP)
 		return -1;
 	if ((void *)(iph + 1) > data_end)
 		return -1;
@@ -224,7 +226,7 @@ dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
 			return -1;
 		dport_off = l4_off + __builtin_offsetof(struct tcphdr, dest);
 		csum_off = l4_off + __builtin_offsetof(struct tcphdr, check);
-	} else {
+	} else if (k->proto == IPPROTO_UDP) {
 		struct udphdr *uh = data + l4_off;
 
 		if ((void *)(uh + 1) > data_end)
@@ -233,6 +235,18 @@ dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
 		csum_off = l4_off + __builtin_offsetof(struct udphdr, check);
 		if (uh->check == 0)
 			csum_l4 = 0;
+	} else {
+		/* ABI 20: ICMP echo. The 16-bit echo id takes the place of the
+		 * port; the ICMP checksum does not cover the IP header, so only
+		 * the id participates in the L4 fixup. */
+		struct icmphdr *ic = data + l4_off;
+
+		if ((void *)(ic + 1) > data_end)
+			return -1;
+		dport_off = l4_off +
+			__builtin_offsetof(struct icmphdr, un.echo.id);
+		csum_off = l4_off +
+			__builtin_offsetof(struct icmphdr, checksum);
 	}
 
 	if (bpf_skb_store_bytes(skb,
@@ -244,7 +258,10 @@ dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
 				(__u64)old_daddr, (__u64)new_daddr,
 				sizeof(new_daddr)) < 0)
 		return -1;
-	if (csum_l4 &&
+	/* The ICMPv4 checksum does not cover the IP header, so the address
+	 * change must not touch it (unlike TCP/UDP, which have a pseudo
+	 * header). */
+	if (csum_l4 && k->proto != IPPROTO_ICMP &&
 	    bpf_l4_csum_replace(skb, csum_off, (__u64)old_daddr,
 				(__u64)new_daddr,
 				sizeof(new_daddr) | BPF_F_PSEUDO_HDR) < 0)
@@ -275,7 +292,8 @@ dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
 	__u32 sport_off = 0, csum_off = 0;
 	int csum_l4 = 1;
 
-	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP &&
+	    proto != IPPROTO_ICMP)
 		return -1;
 	if ((void *)(iph + 1) > data_end)
 		return -1;
@@ -289,7 +307,7 @@ dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
 			return -1;
 		sport_off = l4_off + __builtin_offsetof(struct tcphdr, source);
 		csum_off = l4_off + __builtin_offsetof(struct tcphdr, check);
-	} else {
+	} else if (proto == IPPROTO_UDP) {
 		struct udphdr *uh = data + l4_off;
 
 		if ((void *)(uh + 1) > data_end)
@@ -298,6 +316,15 @@ dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
 		csum_off = l4_off + __builtin_offsetof(struct udphdr, check);
 		if (uh->check == 0)
 			csum_l4 = 0;
+	} else {
+		struct icmphdr *ic = data + l4_off;
+
+		if ((void *)(ic + 1) > data_end)
+			return -1;
+		sport_off = l4_off +
+			__builtin_offsetof(struct icmphdr, un.echo.id);
+		csum_off = l4_off +
+			__builtin_offsetof(struct icmphdr, checksum);
 	}
 
 	if (old_saddr != new_saddr) {
@@ -310,7 +337,7 @@ dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
 			(__u64)old_saddr, (__u64)new_saddr,
 			sizeof(new_saddr)) < 0)
 			return -1;
-		if (csum_l4 &&
+		if (csum_l4 && proto != IPPROTO_ICMP &&
 		    bpf_l4_csum_replace(skb, csum_off, (__u64)old_saddr,
 					(__u64)new_saddr,
 					sizeof(new_saddr) | BPF_F_PSEUDO_HDR) < 0)
@@ -773,6 +800,13 @@ static __always_inline int dpd_may_accelerate(const struct dpd_config *cfg,
 		DPD_INC(st, ST_V6_SKIP);
 		return 0;
 	}
+	/* ABI 20: ICMP is NATed (echo id <-> external id) but never taken
+	 * over. Its UFS key has no ports, so every id of one host->peer pair
+	 * would collide in one entry; keeping it on the stack also lets
+	 * conntrack see the reply, which after the DNAT matches the original
+	 * tuple exactly. */
+	if (k->proto == IPPROTO_ICMP)
+		return 0;
 	if (dpd_is_dns(k->proto, k->dport)) {
 		DPD_INC(st, ST_DNS_SKIP);
 		return 0;
@@ -1300,14 +1334,29 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 	 * the reverse key does not match, so this is a no-op by default. It is
 	 * only effective after the ingress TCX link is detached. */
 	if (cfg->nat_ingress && fkey.family == AF_INET &&
-	    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP)) {
+	    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP ||
+	     fkey.proto == IPPROTO_ICMP)) {
 		struct dpd_nat_rev_key rk = {};
 		struct dpd_nat_rev_val *rv;
+		int nat_ok = 1;
+
+		if (fkey.proto == IPPROTO_ICMP) {
+			struct icmphdr *ic = data + l4_off;
+
+			/* ABI 20: only an echo reply carries a mapping; a
+			 * request from the LAN must never be "de-NATed". */
+			if ((void *)(ic + 1) <= data_end &&
+			    ic->type == ICMP_ECHOREPLY) {
+				fkey.dport = ic->un.echo.id;
+			} else {
+				nat_ok = 0;
+			}
+		}
 
 		rk.daddr = fkey.daddr[3];
 		rk.dport = fkey.dport;
 		rk.proto = fkey.proto;
-		rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+		rv = nat_ok ? bpf_map_lookup_elem(&dpd_nat_rev, &rk) : NULL;
 		if (rv && rv->saddr) {
 			__be32 ndaddr = rv->saddr;
 			__be16 ndport = rv->sport;
@@ -2128,6 +2177,128 @@ int dpd_fastpath_l3(struct __sk_buff *skb)
 	return dpd_fastpath_common(skb, 1);
 }
 
+/* ------------------------------------------------------------------- nat
+ *
+ * ABI 20: return-path DNAT stage (nat_ingress=dpd).
+ *
+ * Why it is a separate program at pref 50 instead of the block inside the main
+ * program at pref 100: router-acl sits at pref 90 and, before the tuple is
+ * restored, an inbound reply looks like "WAN -> the router itself". Measured
+ * 2026-11-09 on the lab: ICMP echo replies were dropped at pref 90 and the
+ * ping failed 0/3 with our DNAT at 100; the same program at 50 made the reply
+ * DNAT *before* the ACL and the ping passed 3/3. einat avoids this by using
+ * TCX, which runs before every classic filter.
+ *
+ * This program is DNAT-only and always returns TC_ACT_UNSPEC: it never
+ * accelerates, never drops, and the main program still makes every forwarding
+ * decision after the policy layer.
+ */
+SEC(DPD_SEC_NAT)
+int dpd_fastpath_nat(struct __sk_buff *skb)
+{
+	struct dpd_cpu *cpu = dpd_cpu();
+	struct dpd_config *cfg = cpu ? &cpu->cfg : NULL;
+	struct dpd_stat_val *st = cpu ? &cpu->stats : NULL;
+	struct dpd_iface_val *iv;
+	struct dpd_nat_rev_key rk = {};
+	struct dpd_nat_rev_val *rv;
+	struct dpd_flow_key k = {};
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct iphdr *iph;
+	__u32 ifindex = skb->ifindex;
+	__u32 l3_off, l4_off;
+	__be32 ndaddr;
+	__be16 ndport;
+
+	if (!cfg || !cfg->nat_ingress)
+		return TC_ACT_UNSPEC;
+
+	iv = bpf_map_lookup_elem(&dpd_iface, &ifindex);
+	if (iv && (iv->flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT))) {
+		l3_off = 0;
+	} else {
+		struct ethhdr *eth = data;
+		__be16 et;
+
+		if ((void *)(eth + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		l3_off = sizeof(*eth);
+		et = eth->h_proto;
+		if (et == bpf_htons(ETH_P_8021Q) ||
+		    et == bpf_htons(ETH_P_8021AD)) {
+			struct dpd_vlan_hdr *vh = data + l3_off;
+
+			if ((void *)(vh + 1) > data_end)
+				return TC_ACT_UNSPEC;
+			et = vh->h_vlan_encapsulated_proto;
+			l3_off += 4;
+			if (et == bpf_htons(ETH_P_8021Q)) {
+				struct dpd_vlan_hdr *v2 = data + l3_off;
+
+				if ((void *)(v2 + 1) > data_end)
+					return TC_ACT_UNSPEC;
+				et = v2->h_vlan_encapsulated_proto;
+				l3_off += 4;
+			}
+		}
+		if (et != bpf_htons(ETH_P_IP))
+			return TC_ACT_UNSPEC;
+	}
+
+	iph = data + l3_off;
+	if ((void *)(iph + 1) > data_end)
+		return TC_ACT_UNSPEC;
+	if (iph->version != 4 || iph->ihl < 5)
+		return TC_ACT_UNSPEC;
+	if (iph->frag_off & bpf_htons(DPD_IP_MF | DPD_IP_OFFMASK))
+		return TC_ACT_UNSPEC;
+	k.proto = iph->protocol;
+	if (k.proto != IPPROTO_TCP && k.proto != IPPROTO_UDP &&
+	    k.proto != IPPROTO_ICMP)
+		return TC_ACT_UNSPEC;
+	l4_off = l3_off + (__u32)iph->ihl * 4;
+	k.family = AF_INET;
+	k.daddr[3] = iph->daddr;
+
+	if (k.proto == IPPROTO_TCP) {
+		struct tcphdr *th = data + l4_off;
+
+		if ((void *)(th + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		k.dport = th->dest;
+	} else if (k.proto == IPPROTO_UDP) {
+		struct udphdr *uh = data + l4_off;
+
+		if ((void *)(uh + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		k.dport = uh->dest;
+	} else {
+		struct icmphdr *ic = data + l4_off;
+
+		if ((void *)(ic + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		if (ic->type != ICMP_ECHOREPLY)
+			return TC_ACT_UNSPEC;
+		k.dport = ic->un.echo.id;
+	}
+
+	rk.daddr = k.daddr[3];
+	rk.dport = k.dport;
+	rk.proto = k.proto;
+	rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+	if (!rv || !rv->saddr)
+		return TC_ACT_UNSPEC;
+
+	ndaddr = rv->saddr;
+	ndport = rv->sport;
+	if (dpd_dnat_apply(skb, data, data_end, l3_off, l4_off, &k, ndaddr,
+			   ndport) < 0)
+		return TC_ACT_UNSPEC;
+	DPD_INC(st, ST_NAT_DNAT);
+	return TC_ACT_UNSPEC;
+}
+
 /* ------------------------------------------------------------------ egress
  *
  * ABI 20: DPD-owned forward SNAT. Attached to the *uplink's* egress hook only
@@ -2218,7 +2389,8 @@ int dpd_fastpath_egress(struct __sk_buff *skb)
 	if (iph->version != 4 || iph->ihl < 5)
 		return TC_ACT_UNSPEC;
 	proto = iph->protocol;
-	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP &&
+	    proto != IPPROTO_ICMP)
 		return TC_ACT_UNSPEC;
 	if (iph->frag_off & bpf_htons(DPD_IP_MF | DPD_IP_OFFMASK))
 		return TC_ACT_UNSPEC;
@@ -2232,13 +2404,24 @@ int dpd_fastpath_egress(struct __sk_buff *skb)
 			return TC_ACT_UNSPEC;
 		sport = th->source;
 		dport = th->dest;
-	} else {
+	} else if (proto == IPPROTO_UDP) {
 		struct udphdr *uh = data + l4_off;
 
 		if ((void *)(uh + 1) > data_end)
 			return TC_ACT_UNSPEC;
 		sport = uh->source;
 		dport = uh->dest;
+	} else {
+		/* ABI 20: ICMP echo. Only a request from the LAN is SNATed;
+		 * the echo id plays the role of the source port. */
+		struct icmphdr *ic = data + l4_off;
+
+		if ((void *)(ic + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		if (ic->type != ICMP_ECHO || ic->code != 0)
+			return TC_ACT_UNSPEC;
+		sport = ic->un.echo.id;
+		dport = 0;
 	}
 
 	/* the router's own traffic already carries the external address */
