@@ -1058,6 +1058,25 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 		struct dpd_flow_val *fval;
 		__s32 age;
 
+		fval = bpf_map_lookup_elem(&dpd_flows, &fkey);
+
+		/* ABI 17: per-protocol timeouts. A UDP flow that has not seen a
+		 * reply yet uses the short one-way timeout (pf's 30 s), the
+		 * longer one as soon as the reverse entry exists. 0 falls back
+		 * to flow_ttl_ms. */
+		if (fval) {
+			if (fkey.proto == IPPROTO_TCP && cfg->tcp_ttl_ms) {
+				ttl = cfg->tcp_ttl_ms;
+			} else if (fkey.proto == IPPROTO_UDP) {
+				__u32 u = (fval->flags & DPD_FLOW_F_REPLY) ?
+					  cfg->udp_ttl_ms :
+					  cfg->udp_unidir_ttl_ms;
+
+				if (u)
+					ttl = u;
+			}
+		}
+
 		/* the freshness test is a *signed* difference: last_seen_ms is a
 		 * 32-bit truncation, so an absolute compare would expire every
 		 * flow once per 49.7 days. A negative age means the timestamp is
@@ -1066,7 +1085,6 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 		if (ttl > 86400000u)	/* one day: keep the cast in range */
 			ttl = 86400000u;
 
-		fval = bpf_map_lookup_elem(&dpd_flows, &fkey);
 		age = fval ? (__s32)(now - fval->last_seen_ms) : 0;
 		if (fval && fval->egress_ifindex && age >= 0 &&
 		    age < (__s32)ttl &&
@@ -1079,6 +1097,23 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			((cfg->epoch & 0xff) << 8)) {
 			__u32 primed = (fval->flags & DPD_FLOW_PRIME_MASK) >>
 				       DPD_FLOW_PRIME_SHIFT;
+			__u32 prime = cfg->accel_after_pkts;
+
+			/* ABI 17: a FIN/RST releases the flow immediately. The
+			 * packet itself goes to the stack (the TCP state machine
+			 * there still has work to do), and the reverse entry is
+			 * left to its TTL. Without this a closed connection kept
+			 * its UFS entries until the (now much longer) TCP TTL. */
+			if (fkey.proto == IPPROTO_TCP) {
+				struct tcphdr *th = data + l4_off;
+
+				if ((void *)(th + 1) <= data_end &&
+				    (th->fin || th->rst)) {
+					bpf_map_delete_elem(&dpd_flows, &fkey);
+					DPD_INC(st, ST_FLOW_FIN);
+					return TC_ACT_UNSPEC;
+				}
+			}
 
 			/*
 			 * Prime the direction: the entry is usable, but the
@@ -1093,8 +1128,15 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 * 2026-10-27: a 12.4 GB download left packets=1
 			 * bytes=60 in the table). Letting one more packet per
 			 * direction through completes the handshake.
+			 *
+			 * ABI 17: the count is cfg->accel_after_pkts (default
+			 * 32), so short flows never enter the fast path at all.
+			 * The counter is 7 bits; clamp so a bad config cannot
+			 * overflow into DPD_FLOW_F_REPLY.
 			 */
-			if (primed < DPD_FLOW_PRIME) {
+			if (prime > 127)
+				prime = 127;
+			if (primed < prime) {
 				fval->flags = (fval->flags & ~DPD_FLOW_PRIME_MASK) |
 					      ((primed + 1) << DPD_FLOW_PRIME_SHIFT);
 				dpd_touch(fval, now, cfg->flow_refresh_ms);
@@ -1602,6 +1644,29 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 							    (w.mark & 0x0fffffffu);
 					}
 				}
+			}
+
+			/* ABI 17: does the reverse direction already exist? A
+			 * UDP flow that has exchanged at least one packet gets
+			 * the long timeout, a one-way flow the short one. This
+			 * is one extra lookup at learn time, never on a hit. */
+			if (fkey.proto == IPPROTO_UDP) {
+				struct dpd_flow_key rk = fkey;
+				__be16 p;
+				int i;
+
+				for (i = 0; i < 4; i++) {
+					__be32 t = rk.saddr[i];
+
+					rk.saddr[i] = rk.daddr[i];
+					rk.daddr[i] = t;
+				}
+				p = rk.sport;
+				rk.sport = rk.dport;
+				rk.dport = p;
+				rk.ifindex = nv.egress_ifindex;
+				if (bpf_map_lookup_elem(&dpd_flows, &rk))
+					nv.flags |= DPD_FLOW_F_REPLY;
 			}
 
 			bpf_map_update_elem(&dpd_flows, &fkey, &nv, BPF_ANY);

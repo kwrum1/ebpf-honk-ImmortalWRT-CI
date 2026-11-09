@@ -192,7 +192,7 @@ static const char *stat_name(int i)
 		"dhcp_skip", "bcast_skip", "v6_ok", "mss_clamp", "mss_skip",
 		"tag_pop", "tag_skip",
 		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
-		"l2_v4", "l2_v6", "nat_gone",
+		"l2_v4", "l2_v6", "nat_gone", "flow_fin",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -248,6 +248,14 @@ static int cmd_set(int argc, char **argv)
 		cfg.mss_clamp = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "nat")) {
 		cfg.nat_offload = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "accel")) {
+		cfg.accel_after_pkts = strtoul(argv[1], NULL, 0) & 0x7f;
+	} else if (!strcmp(argv[0], "tcp_ttl")) {
+		cfg.tcp_ttl_ms = strtoul(argv[1], NULL, 0);
+	} else if (!strcmp(argv[0], "udp_ttl")) {
+		cfg.udp_ttl_ms = strtoul(argv[1], NULL, 0);
+	} else if (!strcmp(argv[0], "udp_unidir_ttl")) {
+		cfg.udp_unidir_ttl_ms = strtoul(argv[1], NULL, 0);
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -296,6 +304,9 @@ static int cmd_show(void)
 	printf("nat_offload  %u%s\n", cfg.nat_offload,
 	       cfg.nat_offload ? " (einat owns SNAT)"
 			       : " (uplink half on the stack)");
+	printf("accel_after  %u packets\n", cfg.accel_after_pkts);
+	printf("ttl          tcp %u ms / udp %u ms / one-way udp %u ms\n",
+	       cfg.tcp_ttl_ms, cfg.udp_ttl_ms, cfg.udp_unidir_ttl_ms);
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -325,14 +336,20 @@ static int cmd_show(void)
 	if (dpd_bpf_map_get_next_key(fd, NULL, &k))
 		return 0;
 	for (;;) {
-		uint32_t v = 0;
+		/* the map value is struct dpd_iface_val, not a bare u32: reading
+		 * it into a uint32_t overflowed the stack and corrupted the
+		 * key/iterator, which made this loop repeat the same entry
+		 * forever (found 2026-11-09 while testing ABI 17). */
+		struct dpd_iface_val iv = {};
 
-		if (!dpd_bpf_map_lookup_elem(fd, &k, &v))
-			printf("  %-16s 0x%08x%s%s%s%s\n", ifname(k.ifindex), v,
-			       v & DPD_IF_F_UP ? " UP" : "",
-			       v & DPD_IF_F_NOARP ? " NOARP" : "",
-			       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
-			       v & DPD_IF_F_LOWER ? " LOWER" : "");
+		if (!dpd_bpf_map_lookup_elem(fd, &k, &iv))
+			printf("  %-16s 0x%08x%s%s%s%s\n", ifname(k.ifindex),
+			       iv.flags,
+			       iv.flags & DPD_IF_F_UP ? " UP" : "",
+			       iv.flags & DPD_IF_F_NOARP ? " NOARP" : "",
+			       iv.flags & DPD_IF_F_POINTOPOINT ?
+					" POINTOPOINT" : "",
+			       iv.flags & DPD_IF_F_LOWER ? " LOWER" : "");
 		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
 			break;
 		k = nk;
@@ -924,6 +941,10 @@ static int status_json(void)
 		printf(", \"ipv6\": %u, \"mss_clamp\": %u, \"epoch\": %u",
 		       cfg.ipv6, cfg.mss_clamp, cfg.epoch);
 		printf(", \"nat_offload\": %u", cfg.nat_offload);
+		printf(", \"accel_after_pkts\": %u, \"tcp_ttl_ms\": %u, "
+		       "\"udp_ttl_ms\": %u, \"udp_unidir_ttl_ms\": %u",
+		       cfg.accel_after_pkts, cfg.tcp_ttl_ms, cfg.udp_ttl_ms,
+		       cfg.udp_unidir_ttl_ms);
 		printf(", \"policy\": ");
 		json_string(policy_name(cfg.policy));
 		printf(" },\n");
@@ -1197,6 +1218,11 @@ static void usage(const char *argv0)
 		"  set mss <0|1>           clamp TCP MSS to the egress MTU (default 1)\n"
 		"  set nat <0|1>           1 = einat owns uplink SNAT; take the\n"
 		"                          forward half over once a binding exists\n"
+		"  set accel <n>           packets of a new direction that still walk\n"
+		"                          the stack before it is accelerated (0..127)\n"
+		"  set tcp_ttl <ms>        TCP flow idle timeout (0 = flow_ttl_ms)\n"
+		"  set udp_ttl <ms>        UDP timeout once the flow is bidirectional\n"
+		"  set udp_unidir_ttl <ms> UDP timeout while still one-way\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"

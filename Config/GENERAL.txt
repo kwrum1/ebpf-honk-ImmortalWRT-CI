@@ -12,6 +12,8 @@ CONFIG_PACKAGE_dpd-qos=y
 CONFIG_PACKAGE_dpd-mwan=y
 # P2.1: einat binding mirror for the accelerated forward half
 CONFIG_PACKAGE_dpd-einat-sync=y
+# P1: event-driven flow manager (epoch bump + conntrack counters)
+CONFIG_PACKAGE_dpdfwd=y
 # --- ebpf 数据面（#18）：TC ingress eBPF 快路径 ---
 # 包不在任何 feed 里。**唯一**的归属地是本仓库的 ebpf/router-dataplane/，
 # 由 Scripts/Packages.sh 在构建前拷进构建树的 package/ebpf/（和第三方仓库

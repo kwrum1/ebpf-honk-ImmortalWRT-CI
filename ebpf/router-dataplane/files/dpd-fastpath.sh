@@ -234,7 +234,8 @@ dpd_attach_logical() {
 # program is loaded yet: dpdctl then just fails and we retry after attaching.
 dpd_push_uci() {
 	local enabled="$1" mode="$2" redirect="$3" ttl="$4" policy="$5"
-	local refresh="$6" ipv6="$7" mss="$8"
+	local refresh="$6" ipv6="$7" mss="$8" accel="$9" ttl_tcp="${10}"
+	local ttl_udp="${11}" ttl_udp1="${12}"
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
@@ -252,6 +253,12 @@ dpd_push_uci() {
 	esac
 	"$DPD_CTL" set redirect "$redirect" 2>/dev/null
 	"$DPD_CTL" set ttl "$ttl" 2>/dev/null
+	# ABI 17 Flow Manager knobs. The script only publishes; the values come
+	# from UCI so an operator can A/B without rebuilding.
+	[ -n "$accel" ] && "$DPD_CTL" set accel "$accel" 2>/dev/null
+	[ -n "$ttl_tcp" ] && "$DPD_CTL" set tcp_ttl "$ttl_tcp" 2>/dev/null
+	[ -n "$ttl_udp" ] && "$DPD_CTL" set udp_ttl "$ttl_udp" 2>/dev/null
+	[ -n "$ttl_udp1" ] && "$DPD_CTL" set udp_unidir_ttl "$ttl_udp1" 2>/dev/null
 	[ -n "$refresh" ] && "$DPD_CTL" set refresh "$refresh" 2>/dev/null
 	[ -n "$ipv6" ] && "$DPD_CTL" set ipv6 "$ipv6" 2>/dev/null
 	[ -n "$mss" ] && "$DPD_CTL" set mss "$mss" 2>/dev/null
@@ -497,6 +504,7 @@ dpd_has_uplink() {
 # hand). Echoes the effective mode.
 dpd_gate_refresh_uci() {
 	local enabled mode redirect ttl policy vlans refresh ipv6 mss emode
+	local accel tcp_ttl udp_ttl udp_unidir_ttl
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -508,10 +516,14 @@ dpd_gate_refresh_uci() {
 	config_get mss global mss_clamp 1
 	config_get policy global policy 'allow_all'
 	config_get vlans global vlans ''
+	config_get accel global accel_after_pkts 32
+	config_get tcp_ttl global tcp_ttl_ms 300000
+	config_get udp_ttl global udp_ttl_ms 120000
+	config_get udp_unidir_ttl global udp_unidir_ttl_ms 30000
 
 	emode="$(dpd_gate_mode "$mode" "$enabled")"
 	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" \
-		"$ipv6" "$mss"
+		"$ipv6" "$mss" "$accel" "$tcp_ttl" "$udp_ttl" "$udp_unidir_ttl"
 	dpd_push_vlans "$policy" "$vlans"
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,

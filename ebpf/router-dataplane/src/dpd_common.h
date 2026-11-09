@@ -179,8 +179,19 @@
  *      hook run double-NATs the packet (measured 2026-11-09). The forward
  *      entry is re-checked on every hit: a binding that is gone drops the
  *      packet back to the stack instead of sending it un-NATed.
+ *
+ * 17: Flow Manager knobs in dpd_config + FIN/RST release:
+ *      - accel_after_pkts (0..127, default 32) replaces the fixed 1-packet
+ *        prime, so short flows stay on the stack (ECM/SFE behaviour);
+ *      - per-protocol TTLs (tcp 300 s, UDP 120 s, unidirectional UDP 30 s)
+ *        instead of the single 5 s flow_ttl_ms. UDP "has a reply" is learned
+ *        once, at learn time, by looking up the reverse key and setting
+ *        DPD_FLOW_F_REPLY (bit 15; the prime counter narrowed to 7 bits);
+ *      - a TCP FIN/RST that hits an accelerated flow deletes the entry and
+ *        returns the packet to the stack (ST_FLOW_FIN), instead of holding a
+ *        dead flow until the TTL. The reverse entry is left to its TTL.
  */
-#define DPD_ABI_VERSION		16
+#define DPD_ABI_VERSION		17
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -296,6 +307,16 @@ struct dpd_config {
 	 * SNAT). 0 = no einat: never take the uplink half over, because the
 	 * redirected packet would skip fw4's masquerade. */
 	__u32	nat_offload;
+	/* ABI 17: the Flow Manager knobs that used to be compile-time constants
+	 * or absent. accel_after_pkts is how many packets of a newly learned
+	 * direction still walk the stack (0..127; 0 = take over immediately).
+	 * The TTLs are per protocol; 0 falls back to flow_ttl_ms. A UDP flow
+	 * that has no reply learned yet uses udp_unidir_ttl_ms (pf's short
+	 * one-way timeout); once the reverse entry exists it uses udp_ttl_ms. */
+	__u32	accel_after_pkts;
+	__u32	tcp_ttl_ms;
+	__u32	udp_ttl_ms;
+	__u32	udp_unidir_ttl_ms;
 };
 
 enum dpd_stat_idx {
@@ -359,6 +380,8 @@ enum dpd_stat_idx {
 	ST_NAT_GONE,		/* P2.1: forward flow whose einat binding
 	 *			 * disappeared; fall back to the stack so
 	 *			 * einat can re-create/route it. */
+	ST_FLOW_FIN,		/* ABI 17: TCP FIN/RST released an
+	 *			 * accelerated flow (entry deleted). */
 	ST__MAX,
 };
 
@@ -418,16 +441,23 @@ struct dpd_iface_val {
  * must re-check dpd_nat on every packet. Only such flows are gated: the return
  * half needs no binding and must never pay for the lookup. */
 #define DPD_FLOW_F_NAT		0x0080
+/* ABI 17: the reverse direction was already in the table when this entry was
+ * learned (the flow has exchanged at least one packet). Used only to pick the
+ * longer UDP timeout. Bit 15 is free because the prime counter was narrowed to
+ * 7 bits (accel_after_pkts <= 127). */
+#define DPD_FLOW_F_REPLY	0x8000
 
-/* dpd_flow_val.flags bits 8..15: how many packets of this direction have been
+/* dpd_flow_val.flags bits 8..14: how many packets of this direction have been
  * let through netfilter since the entry was learned (saturating). A hit is only
- * redirected once the counter reaches DPD_FLOW_PRIME, so the first
- * DPD_FLOW_PRIME+1 packets of each direction walk the stack -- which is what
+ * redirected once the counter reaches cfg.accel_after_pkts, so the first
+ * accel_after_pkts+1 packets of each direction walk the stack -- which is what
  * lets conntrack see a whole TCP handshake (SYN, SYN-ACK, ACK) instead of
- * stopping at SYN_RECV. See DPD_ABI_VERSION 7. */
+ * stopping at SYN_RECV, and keeps short flows off the fast path entirely.
+ * 7 bits because bit 15 is DPD_FLOW_F_REPLY since ABI 17. */
 #define DPD_FLOW_PRIME_SHIFT	8
-#define DPD_FLOW_PRIME_MASK	0xff00
-#define DPD_FLOW_PRIME		1	/* extra packets per direction	*/
+#define DPD_FLOW_PRIME_MASK	0x7f00
+#define DPD_FLOW_PRIME		32	/* default; cfg.accel_after_pkts
+					 * overrides it at runtime	*/
 
 /*
  * Mode B flow key. Kept at a fixed 48 bytes to keep the LRU hash cheap.
