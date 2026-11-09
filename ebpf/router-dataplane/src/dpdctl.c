@@ -791,6 +791,217 @@ static int cmd_class(int argc, char **argv)
 	return 0;
 }
 
+/* ABI 18: targeted UFS invalidation. A pattern with 0/any fields matches
+ * everything in that field; port 0 is a wildcard. The scan is O(flows) and is
+ * meant for control-plane events (policy change, conntrack destroy), not for
+ * the packet path. */
+struct flow_match {
+	uint32_t ifindex;	/* 0 = any */
+	uint8_t proto;		/* 0 = any */
+	uint8_t family;		/* 0 = any */
+	int has_s, has_d;
+	__be32 saddr[4], daddr[4];
+	uint16_t sport, dport;	/* 0 = any */
+};
+
+static int addr_is_any(const char *s)
+{
+	return !strcmp(s, "any") || !strcmp(s, "0") ||
+	       !strcmp(s, "0.0.0.0") || !strcmp(s, "::");
+}
+
+static int match_set(struct flow_match *m, const char *ifn, const char *proto,
+		     const char *sa, const char *sp, const char *da,
+		     const char *dp)
+{
+	struct in_addr a4;
+	struct in6_addr a6;
+	char *e;
+	unsigned long v;
+
+	memset(m, 0, sizeof(*m));
+	if (strcmp(ifn, "any") && strcmp(ifn, "0")) {
+		v = if_nametoindex(ifn);
+		if (!v) {
+			v = strtoul(ifn, &e, 0);
+			if (*e || !v)
+				return -1;
+		}
+		m->ifindex = (uint32_t)v;
+	}
+	if (strcmp(proto, "any") && strcmp(proto, "0")) {
+		if (!strcmp(proto, "tcp"))
+			m->proto = IPPROTO_TCP;
+		else if (!strcmp(proto, "udp"))
+			m->proto = IPPROTO_UDP;
+		else {
+			v = strtoul(proto, &e, 0);
+			if (*e || v > 255)
+				return -1;
+			m->proto = (uint8_t)v;
+		}
+	}
+	if (!addr_is_any(sa)) {
+		if (inet_pton(AF_INET, sa, &a4) == 1) {
+			m->has_s = 1;
+			m->family = AF_INET;
+			m->saddr[3] = a4.s_addr;
+		} else if (inet_pton(AF_INET6, sa, &a6) == 1) {
+			m->has_s = 1;
+			m->family = AF_INET6;
+			__builtin_memcpy(m->saddr, &a6, sizeof(a6));
+		} else {
+			return -1;
+		}
+	}
+	if (!addr_is_any(da)) {
+		if (inet_pton(AF_INET, da, &a4) == 1) {
+			if (m->family == AF_INET6)
+				return -1;
+			m->has_d = 1;
+			m->family = AF_INET;
+			m->daddr[3] = a4.s_addr;
+		} else if (inet_pton(AF_INET6, da, &a6) == 1) {
+			if (m->family == AF_INET)
+				return -1;
+			m->has_d = 1;
+			m->family = AF_INET6;
+			__builtin_memcpy(m->daddr, &a6, sizeof(a6));
+		} else {
+			return -1;
+		}
+	}
+	v = strtoul(sp, &e, 0);
+	if (*e || v > 65535)
+		return -1;
+	m->sport = (uint16_t)v;
+	v = strtoul(dp, &e, 0);
+	if (*e || v > 65535)
+		return -1;
+	m->dport = (uint16_t)v;
+	return 0;
+}
+
+static int match_key(const struct flow_match *m, const struct dpd_flow_key *k)
+{
+	if (m->ifindex && k->ifindex != m->ifindex)
+		return 0;
+	if (m->proto && k->proto != m->proto)
+		return 0;
+	if (m->family && k->family != m->family)
+		return 0;
+	if (m->has_s && __builtin_memcmp(k->saddr, m->saddr, 16))
+		return 0;
+	if (m->has_d && __builtin_memcmp(k->daddr, m->daddr, 16))
+		return 0;
+	if (m->sport && k->sport != htons(m->sport))
+		return 0;
+	if (m->dport && k->dport != htons(m->dport))
+		return 0;
+	return 1;
+}
+
+#define DPD_DELETE_PATTERNS 256
+
+static int delete_patterns(struct flow_match *m, int nm)
+{
+	struct dpd_flow_key k, nk, *hits = NULL;
+	size_t n = 0, cap = 0;
+	int fd, i, deleted = 0;
+
+	fd = map_open("dpd_flows");
+	if (fd < 0)
+		return 1;
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+		printf("deleted 0 flows\n");
+		return 0;
+	}
+	for (;;) {
+		int hit = 0;
+
+		for (i = 0; i < nm; i++)
+			if (match_key(&m[i], &k)) {
+				hit = 1;
+				break;
+			}
+		if (hit) {
+			if (n == cap) {
+				size_t ncap = cap ? cap * 2 : 64;
+				struct dpd_flow_key *p = realloc(hits,
+						ncap * sizeof(*hits));
+
+				if (!p) {
+					free(hits);
+					return 1;
+				}
+				hits = p;
+				cap = ncap;
+			}
+			hits[n++] = k;
+		}
+		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+			break;
+		k = nk;
+	}
+	for (i = 0; i < (int)n; i++)
+		if (!dpd_bpf_map_delete_elem(fd, &hits[i]))
+			deleted++;
+	free(hits);
+	printf("deleted %d flow(s)\n", deleted);
+	return 0;
+}
+
+/* delete <if|any> <proto|any> <saddr|any> <sport|0> <daddr|any> <dport|0>
+ * delete -f <file>   lines: <proto> <saddr> <sport> <daddr> <dport>
+ * The -f mode is what dpdfwd uses: it batches conntrack destroys into one
+ * scan per second instead of forking one process per event. */
+static int cmd_delete(int argc, char **argv)
+{
+	struct flow_match m[DPD_DELETE_PATTERNS];
+	int nm = 0;
+
+	if (argc >= 2 && !strcmp(argv[0], "-f")) {
+		FILE *fp = fopen(argv[1], "r");
+		char line[256];
+
+		if (!fp)
+			return 0;
+		while (nm < DPD_DELETE_PATTERNS &&
+		       fgets(line, sizeof(line), fp)) {
+			char *tok[5];
+			int t = 0;
+			char *p = strtok(line, " \t\r\n");
+
+			while (p && t < 5) {
+				tok[t++] = p;
+				p = strtok(NULL, " \t\r\n");
+			}
+			if (t == 5 &&
+			    !match_set(&m[nm], "any", tok[0], tok[1], tok[2],
+				       tok[3], tok[4]))
+				nm++;
+		}
+		fclose(fp);
+		if (!nm) {
+			printf("deleted 0 flows\n");
+			return 0;
+		}
+		return delete_patterns(m, nm);
+	}
+	if (argc < 6) {
+		fprintf(stderr, "usage: dpdctl delete <if|any> <proto|any> "
+			"<saddr|any> <sport|0> <daddr|any> <dport|0>\n"
+			"       dpdctl delete -f <file>\n");
+		return 1;
+	}
+	if (match_set(&m[0], argv[0], argv[1], argv[2], argv[3], argv[4],
+		      argv[5])) {
+		fprintf(stderr, "dpdctl: delete: bad pattern\n");
+		return 1;
+	}
+	return delete_patterns(m, 1);
+}
+
 static int cmd_flows(int argc, char **argv)
 {
 	struct dpd_flow_key k, nk;
@@ -1454,6 +1665,9 @@ static void usage(const char *argv0)
 		"  class add|del <if> <tcp|udp> <saddr> <sport> <daddr> <dport>\n"
 		"        <forward|proxy|block|local> [skb_priority]\n"
 		"  class list|flush        inspect/clear the policy cache\n"
+		"  delete <if|any> <proto|any> <saddr|any> <sport|0> <daddr|any>\n"
+		"         <dport|0>        delete matching UFS entries (targeted\n"
+		"                          invalidation from a control-plane event)\n"
 		"  set policy <allow-all|vlans-only>\n"
 		"  bump                    move the flow-cache epoch (drop all cached\n"
 		"                          egress decisions without a map walk)\n"
@@ -1494,6 +1708,8 @@ int main(int argc, char **argv)
 		return cmd_flows(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "class"))
 		return cmd_class(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "delete"))
+		return cmd_delete(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "version")) {
 		printf("dpdctl abi %d\n", DPD_ABI_VERSION);
 		return 0;

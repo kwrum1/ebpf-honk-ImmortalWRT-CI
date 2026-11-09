@@ -31,13 +31,22 @@ Control-plane daemon for DPD-FW.
   cache in one place, even when the change did not come through a hotplug
   script (operator `ip route`, tunnel, carrier flap).
 
+## Targeted invalidation (implemented)
+
+On a conntrack DESTROY, the orig and reply 5-tuples are parsed from ctnetlink
+and queued (128 max). Once per second the daemon writes them to
+`/tmp/dpd-ct-delete` and calls `dpdctl delete -f` **once**; dpdctl scans the
+UFS map and deletes every key matching any tuple. A conntrack that no longer
+exists therefore does not leave a UFS entry behind until its TTL.
+
+`--no-ct-delete` disables the batch; `--dry-run` keeps the tuples but skips the
+call. The UFS key's ingress ifindex is not in the conntrack message, so the
+pattern uses `any` for it (the 5-tuple is unique per direction in practice).
+
 ## Not yet implemented
 
-- Targeted (per-flow) invalidation on conntrack destroy: the UFS key contains
-  the ingress ifindex, which the conntrack message does not carry. A flow
-  cookie map (ct_cookie ↔ UFS key) is the next step; until then entries expire
-  by TTL or by the epoch.
 - `accel_after_pkts` / TTL policy decisions: the daemon publishes nothing into
   `dpd_cfg` today; the values come from UCI via the datapath init script.
 - Plugin classification (ACL/QoS/MWAN/honk) is still done by the individual
-  packages; there is no plugin registration ABI yet.
+  packages; `dpd_class` is the cache, but there is no plugin registration ABI
+  yet.
