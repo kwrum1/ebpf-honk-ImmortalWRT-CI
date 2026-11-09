@@ -11,7 +11,7 @@
 
 ## 1. 结论先行
 
-`kwrum1/openwrt-honk` 的打包层**主动强制 `nfqueue_enable: true`**：
+上游 `kenzok8/openwrt-honk` 的打包层**主动强制 `nfqueue_enable: true`**：
 
 - 运行期写配置时硬编码 `true`
 - 健康检查**要求** `true`，否则判定"不健康"并自动"修复"（重写回 `true`）

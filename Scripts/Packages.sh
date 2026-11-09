@@ -78,20 +78,22 @@ UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
 UPDATE_PACKAGE "vantage" "anothaDev/luci-theme-vantage" "v1.0.12"
 
 # Honk core + LuCI/Doona UI. The package always comes from upstream; for
-# X86/ROCKCHIP the local overlay (patches/honk/overlay) and the p1 core are
-# applied below. IPQ/MTK keep the stock upstream package and core.
+# X86/ROCKCHIP the source patch (patches/honk/honk-x86rk.patch) and the p1 core
+# are applied below. IPQ/MTK keep the stock upstream package and core.
 UPDATE_PACKAGE "honk" "kenzok8/openwrt-honk" "main" "pkg"
 
-# X86/ROCKCHIP: overlay our files and point the Makefile at the p1 core built
-# by .github/workflows/HONK-CORE.yml. A failed anchor stops the build here.
+# X86/ROCKCHIP: patch the freshly cloned upstream source and point the Makefile
+# at the p1 core built by .github/workflows/HONK-CORE.yml. Both are anchored; a
+# failed hunk or a missing anchor stops the build here instead of shipping a
+# half-patched honk.
 case "$WRT_CONFIG" in
 X86|ROCKCHIP)
-	if [ -d "$GITHUB_WORKSPACE/patches/honk/overlay" ]; then
-		cp -a "$GITHUB_WORKSPACE/patches/honk/overlay/." ./package/
-		sh "$GITHUB_WORKSPACE/patches/honk/apply-makefile.sh" ./package/honk/Makefile
-	else
-		echo "!! honk: patches/honk/overlay missing for $WRT_CONFIG" >&2
+	if ! patch -p1 -d ./package --no-backup-if-mismatch \
+		-i "$GITHUB_WORKSPACE/patches/honk/honk-x86rk.patch"; then
+		echo "!! honk: x86/RK patch did not apply; upstream hunks moved (see patches/honk/README.md)" >&2
+		exit 1
 	fi
+	sh "$GITHUB_WORKSPACE/patches/honk/apply-makefile.sh" ./package/honk/Makefile
 	;;
 esac
 

@@ -8,7 +8,7 @@ Last updated: 2026-10-28
 |---|---|---|
 | Firmware | `VIKINGYFY/immortalwrt` | the upstream tree, unchanged. Branch decides the flavour (see below). |
 | eBPF datapath | **this repository, `ebpf/`** | copied into `wrt/package/ebpf/` by `Scripts/Packages.sh`, for X86/ROCKCHIP only. |
-| Third-party packages | cloned by `Scripts/Packages.sh` | aurora theme, honk (kwrum1/openwrt-honk@main), v2ray-geodata, partexp. Only what actually lands in the image. |
+| Third-party packages | cloned by `Scripts/Packages.sh` | aurora theme, honk (upstream `kenzok8/openwrt-honk@main`; x86/RK additionally receive `patches/honk/honk-x86rk.patch`), v2ray-geodata, partexp. Only what actually lands in the image. |
 
 There is no second copy of the datapath anywhere: the firmware repo is
 upstream, and `ebpf/` here is the only place a `dpd_fastpath.bpf.c` change can

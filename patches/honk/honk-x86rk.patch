@@ -1,0 +1,660 @@
+diff --git a/honk/files/90-honk-boot b/honk/files/90-honk-boot
+index 3ce34cd..f54ad6a 100644
+--- a/honk/files/90-honk-boot
++++ b/honk/files/90-honk-boot
+@@ -3,9 +3,67 @@
+ # 不再提供单独的 boot_enabled 开关。
+ /etc/init.d/honk enable
+ 
++# Keep .lan/.local names working when the core's DNS controller intercepts port
++# 53: send those suffixes to the default (SmartDNS) upstream. Older conffiles do
++# not carry the rule; add it once. Without it a private-domain lookup falls
++# through to the proxy/DoH fallback and answers NXDOMAIN on a box with no node.
++if [ -f /etc/honk/config.dae ] && ! grep -q 'qname(suffix: lan)' /etc/honk/config.dae; then
++	sed -i 's/^\([[:space:]]*\)qname(geosite: private) -> asis/\1qname(suffix: lan) -> default\n\1qname(suffix: local) -> default\n\1qname(geosite: private) -> asis/' /etc/honk/config.dae
++fi
++
++# The native API/UI (doona on port 9527) used to bind loopback only, so the
++# controller page could not be opened from the LAN. system.dae is a conffile:
++# upgrades keep the old copy, so rewrite it once here.
++if [ -f /etc/honk/system.dae ] && grep -q "listen: '127.0.0.1:9527'" /etc/honk/system.dae; then
++	sed -i "s/listen: '127\.0\.0\.1:9527'/listen: '0.0.0.0:9527'/" /etc/honk/system.dae
++fi
++
++# All DNS must go to the local SmartDNS. Stock and older conffiles send
++# non-CN queries to 8.8.8.8 through the proxy, which bypasses SmartDNS's
++# split entirely. Collapse the dns block to one upstream (127.0.0.1:53,
++# direct) with fallback default; the dip(...) rule below then sends the DoH
++# that SmartDNS itself uses through the proxy.
++if [ -f /etc/honk/config.dae ] && grep -qE '^[[:space:]]*(remote:|fallback:[[:space:]]*remote)' /etc/honk/config.dae; then
++	sed -i \
++		-e '/^[[:space:]]*remote:.*->.*proxy[[:space:]]*$/d' \
++		-e 's/^\([[:space:]]*\)fallback: remote/\1fallback: default/' \
++		-e "s|^\([[:space:]]*\)default: .*-> direct[[:space:]]*$|\1default: 'udp://127.0.0.1:53' -> direct|" \
++		/etc/honk/config.dae
++fi
++
++# The stock group has no filter, so it resolves 0 nodes even when the
++# subscription carries some. Include every node.
++if [ -f /etc/honk/config.dae ] && ! grep -q 'filter: name' /etc/honk/config.dae; then
++	sed -i "s|^\([[:space:]]*\)policy: min_moving_avg|\1policy: min_moving_avg\n\1filter: name(keyword: '')|" /etc/honk/config.dae
++fi
++
++# SmartDNS foreign DoH/bootstrap goes through the proxy. Clients use the local
++# SmartDNS; its default group is Cloudflare/Google DoH, which are unreachable
++# from a Chinese line. Honk sees the router's own traffic through its cgroup
++# hooks, so routing these destination IPs to the proxy makes the foreign half
++# of the split resolve without any smartdns-side proxy knowledge. CN domains
++# stay on the domestic DoH and are routed direct by the rule below.
++if [ -f /etc/honk/config.dae ] && ! grep -q 'ebpf: doh-proxy' /etc/honk/config.dae; then
++	sed -i 's|^\([[:space:]]*\)domain(geosite: cn) -> direct|\1# ebpf: doh-proxy -- smartdns foreign DoH/bootstrap via the proxy\n\1dip(1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 94.140.14.14, 94.140.15.15, 208.67.222.222, 208.67.220.220) -> proxy\n\1domain(geosite: cn) -> direct|' /etc/honk/config.dae
++fi
++
++# Force NFQUEUE off, unconditionally.
++#
++# This image does not ship nft_queue / nfnetlink_queue (the TCX datapath does
++# not use them), but /etc/honk/system.dae is a conffile: a keep-settings
++# upgrade keeps the old `nfqueue_enable: true`, and the packaged
++# control.sh/maintenance.sh rewrite the flag back to true. Either one makes
++# honk's preflight refuse to start ("缺少内核模块 nft_queue"). Sed all three
++# here; the packaged files are also patched at build time, this is the
++# upgrade-time safety net.
++for f in /etc/honk/system.dae /usr/share/honk/control.sh /usr/share/honk/maintenance.sh; do
++	[ -f "$f" ] && sed -i 's/nfqueue_enable: true/nfqueue_enable: false/g' "$f"
++done
++
+ # 配置模式已取消：只清遗留键，活动配置与启停状态一概不动。
+ legacy_mode=$(uci -q get honk.main.config_mode 2>/dev/null)
+ if [ -n "$legacy_mode" ]; then
+ 	uci -q delete honk.main.config_mode && uci -q commit honk
+ fi
++
+ exit 0
+diff --git a/honk/files/config.dae b/honk/files/config.dae
+index fc6228a..aa6fce4 100644
+--- a/honk/files/config.dae
++++ b/honk/files/config.dae
+@@ -5,45 +5,44 @@ include {
+ group {
+     proxy {
+         policy: min_moving_avg
++        # Include every node the subscription provides. Without a filter the
++        # group resolves 0 nodes and the proxy has no outbound at all.
++        filter: name(keyword: '')
+     }
+ }
+ 
+ dns {
+-    # 直连查询带上客户端网段，国内 CDN 才会返回就近地址
+-    client_subnet: auto
++    # Every DNS query belongs to the local SmartDNS. It does the CN/foreign
++    # split itself and its own foreign DoH is routed through this proxy by the
++    # dip(...) rule below. Do not add a remote upstream here: that would
++    # bypass SmartDNS (and was the reason foreign lookups used 8.8.8.8
++    # directly instead of the local resolver).
+     upstream {
+-        default: 'https://223.5.5.5/dns-query?tls_server_name=dns.alidns.com' -> direct
+-        remote: 'https://8.8.8.8/dns-query?tls_server_name=dns.google' -> proxy
++        default: 'udp://127.0.0.1:53' -> direct
+     }
+     routing {
+         request {
++            qname(suffix: lan) -> default
++            qname(suffix: local) -> default
+             qname(geosite: private) -> asis
+-            qname(geosite: cn) -> default
+-            fallback: remote
+-        }
+-        # 远端返回国内 IP 时也采信，避免两边解析结果不一致
+-        response {
+-            upstream(remote) -> accept
+-            qname(geosite: private) -> accept
+-            ip(geoip: cn) -> accept
+-            fallback: remote
++            fallback: default
+         }
+     }
+ }
+ 
+ routing {
++    # DNS itself is never proxied: SmartDNS is the only resolver.
++    dport(53) -> direct(must)
+     dip(224.0.0.0/3, 'ff00::/8') -> direct
+     # 路由器自身地址直连，管理面板不被代理；服务启动时按本机地址重写下面区块
+     # honk:local-direct-begin
+     # honk:local-direct-end
+     dip(geoip: private) && !dport(53) -> direct(must)
+     dip(geoip: cn) && !dport(53) -> direct(must)
++    # SmartDNS's foreign DoH/bootstrap goes through the proxy. These are the
++    # resolver IPs its default group uses; the CN group stays on domestic DoH
++    # and is covered by the geoip:cn/domain rules.
++    dip(1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 94.140.14.14, 94.140.15.15, 208.67.222.222, 208.67.220.220) -> proxy
+     domain(geosite: cn) -> direct
+-    # 这几类在 geosite: cn 里覆盖不全，单独列出
+-    domain(geosite: apple-cn) -> direct
+-    domain(geosite: category-games@cn) -> direct
+-    domain(geosite: steam@cn) -> direct
+-    domain(geosite: category-ai-cn) -> direct
+-    domain(geosite: onedrive) -> direct
+     fallback: direct
+ }
+diff --git a/honk/files/control.sh b/honk/files/control.sh
+index 2658df5..130311d 100644
+--- a/honk/files/control.sh
++++ b/honk/files/control.sh
+@@ -67,7 +67,18 @@ system_config_readonly() {
+ }
+ 
+ no_honk_resources() {
+-	honk_lifecycle_reclaim_resources || :
++	# honk-core removes dae0/dae0peer and the daens netns when it exits cleanly. A
++	# crash or SIGKILL leaves them behind, and preflight then refuses every later
++	# start, so the service can never come back without hand surgery. Reclaim them
++	# here, but only when no core is running to own them.
++	if ! pidof honk-core >/dev/null 2>&1; then
++		for stale_link in dae0 dae0peer; do
++			ip link show "$stale_link" >/dev/null 2>&1 && ip link del "$stale_link" >/dev/null 2>&1
++		done
++		if ip netns list 2>/dev/null | awk '{print $1}' | grep -qx daens; then
++			ip netns del daens >/dev/null 2>&1
++		fi
++	fi
+ 	for link in dae0 dae0peer; do
+ 		ip link show "$link" >/dev/null 2>&1 && { fail "$link 已存在（上次没有正常退出），请先停止服务或执行系统恢复"; return 1; }
+ 	done
+@@ -150,6 +161,10 @@ check_config() {
+ 	valid_clash_api || { fail "Clash API 设置不合法（端口 1024-65535，密钥 6-128 位）"; return 1; }
+ }
+ 
++nfqueue_required() {
++	grep -qE '^[[:space:]]*nfqueue_enable:[[:space:]]*true' /etc/honk/system.dae 2>/dev/null
++}
++
+ # 顺序同 honk-core：设了 HONK_VMLINUX_BTF 就只认它
+ kernel_btf_path() {
+ 	if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
+@@ -167,15 +182,7 @@ check_kernel() {
+ 	kernel=$(uname -r | cut -d- -f1)
+ 	major=$(printf '%s' "$kernel" | cut -d. -f1)
+ 	minor=$(printf '%s' "$kernel" | cut -d. -f2)
+-	if [ "$(jsonfilter -i /usr/share/honk/core-capabilities.json -e '@.lane' 2>/dev/null)" = linux66 ]; then
+-		expected_hash=$(jsonfilter -i /usr/share/honk/core-capabilities.json -e '@.core_sha256' 2>/dev/null)
+-		actual_hash=$(sha256sum "$HONK_CORE" 2>/dev/null | cut -d' ' -f1)
+-		[ -n "$expected_hash" ] && [ "$expected_hash" = "$actual_hash" ] || { kernel_error=core_capabilities_mismatch; fail "核心与兼容信息不匹配，请重新安装 honk"; return 1; }
+-		patch=$(printf '%s' "$kernel" | cut -d. -f3 | sed 's/[^0-9].*//')
+-		[ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && { [ "$minor" -gt 6 ] || { [ "$minor" -eq 6 ] && [ "${patch:-0}" -ge 40 ]; }; }; } || { kernel_error=kernel_compat_too_old; fail "兼容核心需要 Linux 6.6.40 或更新"; return 1; }
+-	else
+-		[ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 12 ]; } || { kernel_error=kernel_too_old; fail "内核版本过低，需要 Linux 6.12 或更新"; return 1; }
+-	fi
++	[ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 12 ]; } || { kernel_error=kernel_too_old; fail "内核版本过低，需要 Linux 6.12 或更新"; return 1; }
+ 	if ! kernel_btf_path >/dev/null; then
+ 		if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
+ 			kernel_error=kernel_btf_override_invalid
+@@ -189,8 +196,10 @@ check_kernel() {
+ 	[ -d /sys/fs/bpf ] && grep -q ' /sys/fs/bpf bpf ' /proc/mounts || { kernel_error=bpffs_not_mounted; fail "bpffs 未挂载到 /sys/fs/bpf，请检查内核或手工挂载"; return 1; }
+ 	command -v ip >/dev/null 2>&1 || { kernel_error=ip_full_missing; fail "缺少 ip 命令（装 ip-full）"; return 1; }
+ 	command -v modprobe >/dev/null 2>&1 || { kernel_error=kmod_missing; fail "缺少 modprobe 命令（装 kmod）"; return 1; }
+-	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
+-		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth / kmod-nft-queue 已安装"; return 1; }
++	modules="sch_ingress cls_bpf veth"
++	nfqueue_required && modules="$modules nft_queue nfnetlink_queue"
++	for module in $modules; do
++		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth 已安装"; return 1; }
+ 	done
+ }
+ 
+@@ -300,7 +309,9 @@ preflight() {
+ 
+ prepare_runtime() {
+ 	preflight || return 1
+-	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
++	modules="sch_ingress cls_bpf veth"
++	nfqueue_required && modules="$modules nft_queue nfnetlink_queue"
++	for module in $modules; do
+ 		module_loaded "$module" || modprobe "$module" || { fail "无法加载内核模块 $module，请确认对应 kmod 包已安装"; return 1; }
+ 	done
+ 	mkdir -p /etc/honk/state || { fail "无法创建状态目录（/etc/honk/state），请检查磁盘空间与权限"; return 1; }
+@@ -1226,10 +1237,33 @@ recover() {
+ 			return 1
+ 		fi
+ 	fi
+-	honk_lifecycle_reclaim_resources || :
+ 	echo '{"ok":true,"message":"transaction_recovered"}'
+ }
+ 
++# 启动时自动收尾被中断的维护事务。只在没有任何在途操作时动手：
++#   * HONK_MAINT_CAP 由 maintenance.sh 在恢复/回滚过程中导出，不能抢；
++#   * 签名更新（/etc/.honk-update）需要重装完整包集，不能自动回滚；
++#   * 活锁 / 非托管 honk-core 说明还有人在用，保持原状让 UI 报错。
++# 回滚本身不启动服务（HONK_RECOVER_NO_START=1），由调用方继续正常的启动流程，
++# 避免 start_service -> recover -> start_service 的递归。
++auto_recover() {
++	[ -n "${HONK_MAINT_CAP:-}" ] && return 0
++	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then
++		return 0
++	fi
++	if [ ! -d "$HONK_LOCK_DIR" ] && [ ! -e "$HONK_MAINT_JOURNAL" ] && [ ! -L "$HONK_MAINT_JOURNAL" ]; then
++		return 0
++	fi
++	if [ -d "$HONK_LOCK_DIR" ]; then
++		[ -r "$HONK_LOCK_DIR/pid" ] || return 1
++		honk_lock_is_stale || return 1
++	fi
++	pidof honk-core >/dev/null 2>&1 && return 1
++	logger -t honk "recovering interrupted maintenance transaction" 2>/dev/null || :
++	rm -rf "$HONK_LOCK_DIR" 2>/dev/null || :
++	HONK_RECOVER_NO_START=1 /usr/share/honk/maintenance.sh recover >/dev/null 2>&1
++}
++
+ case "$1" in
+ 	check)
+ 		preflight
+@@ -1259,8 +1293,11 @@ case "$1" in
+ 	recover)
+ 		recover
+ 		;;
++	auto-recover)
++		auto_recover
++		;;
+ 	*)
+-		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair|detach|recover}" >&2
++		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair|detach|recover|auto-recover}" >&2
+ 		exit 2
+ 		;;
+ esac
+diff --git a/new/honk/files/direct-unspec b/honk/files/direct-unspec
+new file mode 100644
+index 0000000..0344779
+--- /dev/null
++++ b/honk/files/direct-unspec
+@@ -0,0 +1,10 @@
++honk-core built with the mydist direct hand-back patch (p1).
++
++Direct-classified flows return TC_ACT_UNSPEC and carry DIRECT_UNSPEC_MARK, so the
++classic TC chain (mydist's dpd) sees them and can keep accelerating direct
++traffic while honk proxies the rest. Proxy and block verdicts remain terminal for
++honk, and NAT stays with einat on the WAN.
++
++Absence of this file means an unpatched core: dpd must stay in observe while honk
++owns the LAN TCX, because its direct exits return TC_ACT_OK and the classic chain
++is never reached.
+diff --git a/honk/files/honk.init b/honk/files/honk.init
+index 0577fff..356265a 100644
+--- a/honk/files/honk.init
++++ b/honk/files/honk.init
+@@ -17,6 +17,14 @@ boot() {
+ 
+ start_service() {
+ 	local enabled initialized config_file ready_token ready_hash ready_runtime ready_api_enabled ready_api_listen ready_clash_api_listen ready_clash_api_secret_set old_ready_token
++	# 掉电或 UI 任务被杀会留下 /etc/.honk-maintenance/journal。必须在
++	# enabled/initialized 判断之前收尾：中断的 restore/reset 可能把 enabled 写回 0，
++	# 那样服务永远起不来，状态页也就一直卡在“需要恢复系统”。
++	if ! "$HONK_CONTROL" auto-recover >/dev/null 2>&1; then
++		if [ -e /etc/.honk-maintenance/journal ] || [ -L /etc/.honk-maintenance/journal ]; then
++			logger -t honk "interrupted maintenance transaction still needs manual recovery"
++		fi
++	fi
+ 	config_load honk
+ 	config_get_bool enabled main enabled 0
+ 	config_get_bool initialized main initialized 0
+@@ -72,19 +80,6 @@ start_service() {
+ 	procd_close_instance
+ }
+ 
+-# procd 默认的 stop→start 太快，start 的 preflight 会把还没清掉的 dae0 当残留
+-# 拒绝，restart 完服务就停在停止状态。走 lifecycle 先排空再起。
+-restart() {
+-	# 没启用时 start 本来就会拒绝，走 lifecycle 只会多打一句误导性的
+-	# “new managed core did not become stable and own its API listener”。
+-	if [ "$(uci get honk.main.enabled 2>/dev/null)" != 1 ]; then
+-		logger -t honk "restart skipped: service is not enabled"
+-		return 0
+-	fi
+-	. /usr/share/honk/lifecycle.sh || return 1
+-	honk_lifecycle_restart 30
+-}
+-
+ reload_service() {
+ 	# honk-core has no hot-reload API wired here; a reload is an explicit
+ 	# restart so existing connections are cycled. The UI only exposes
+diff --git a/honk/files/maintenance.sh b/honk/files/maintenance.sh
+index c522247..8c8ab03 100644
+--- a/honk/files/maintenance.sh
++++ b/honk/files/maintenance.sh
+@@ -106,8 +106,14 @@ issue_capability() {
+ 	chmod 0600 "$cap_tmp" || { rm -f "$cap_tmp"; return 1; }
+ 	mv -f "$cap_tmp" "$CAPABILITY" || { rm -f "$cap_tmp"; return 1; }
+ 	export HONK_MAINT_CAP=$cap_nonce
+-	honk_lifecycle_start 30
+-	cap_start_rc=$?
++	if [ "${HONK_RECOVER_NO_START:-0}" = 1 ]; then
++		# Boot-time auto-recovery: the caller (init start_service) continues the
++		# normal start, so do not start a nested procd instance here.
++		cap_start_rc=0
++	else
++		honk_lifecycle_start 30
++		cap_start_rc=$?
++	fi
+ 	unset HONK_MAINT_CAP
+ 	return "$cap_start_rc"
+ }
+@@ -190,6 +196,13 @@ journal_value() {
+ 	sed -n "s/^$1=//p" "$JOURNAL" 2>/dev/null
+ }
+ 
++# During boot-time auto-recovery the caller continues the normal start, so the
++# rollback must not start a nested procd instance (HONK_RECOVER_NO_START=1).
++recover_start() {
++	[ "${HONK_RECOVER_NO_START:-0}" = 1 ] && return 0
++	honk_lifecycle_start 30
++}
++
+ recover_transaction() {
+ 	[ -e "$TXN_DIR" ] || { journal_active=0; return 0; }
+ 	[ -d "$TXN_DIR" ] && [ ! -L "$TXN_DIR" ] && [ -f "$JOURNAL" ] && [ ! -L "$JOURNAL" ] || return 1
+@@ -220,7 +233,7 @@ recover_transaction() {
+ 		journal_active=0
+ 		swap_started=0
+ 		if [ "$journal_operation" = backup ] && [ "$old_running" = 1 ]; then
+-			honk_lifecycle_start 30 || return 1
++			recover_start || return 1
+ 		fi
+ 		service_stopped=0
+ 		return 0
+@@ -251,7 +264,7 @@ recover_transaction() {
+ 				# A backup never changes the live tree; clear its journal before normal startup.
+ 				rm -rf "$TXN_DIR" || return 1
+ 				journal_active=0
+-				honk_lifecycle_start 30 || return 1
++				recover_start || return 1
+ 			fi
+ 		fi
+ 	else
+@@ -396,14 +409,8 @@ check_root_file() {
+ }
+ 
+ safe_relpath() {
+-	case "$1" in ''|/*|*..*|*//*|*/./*|./*|*/.) return 1 ;; esac
+-	# 空白、控制字符、通配符、反斜杠会打乱 tar 成员解析与解包，一律拒绝；
+-	# 中文等 UTF-8 名放行（路由上不一定有 od/hexdump，只能用 awk 的字符类判）。
+-	printf '%s\n' "$1" | LC_ALL=C awk '
+-		$0 ~ /[[:space:][:cntrl:]]/ { bad = 1 }
+-		$0 ~ /\*/ || $0 ~ /\?/ || $0 ~ /\[/ || $0 ~ /\\/ { bad = 1 }
+-		END { exit bad ? 1 : 0 }
+-	'
++	case "$1" in ''|/*|*..*|*[^A-Za-z0-9._/-]*|*//*|*/./*|./*|*/.) return 1 ;; esac
++	return 0
+ }
+ 
+ size_of() {
+@@ -510,47 +517,30 @@ is_excluded() {
+ collect_tree() {
+ 	collect_root=$1
+ 	collect_out=$2
+-	collect_error=
+-	[ -d "$collect_root" ] && [ ! -L "$collect_root" ] || { collect_error=honk_tree_missing; return 1; }
+-	if find "$collect_root" -type l -print 2>/dev/null | grep -q .; then collect_error=honk_tree_has_symlink; return 1; fi
+-	if find "$collect_root" ! -type f ! -type d -print 2>/dev/null | grep -q .; then collect_error=honk_tree_has_special_file; return 1; fi
+-	: > "$collect_out" || { collect_error=temporary_storage_unavailable; return 1; }
++	[ -d "$collect_root" ] && [ ! -L "$collect_root" ] || return 1
++	if find "$collect_root" -type l -print 2>/dev/null | grep -q .; then return 1; fi
++	if find "$collect_root" ! -type f ! -type d -print 2>/dev/null | grep -q .; then return 1; fi
++	: > "$collect_out" || return 1
+ 	(
+ 		cd "$collect_root" || exit 1
+ 		find . -type f -print
+-	) > "$collect_out.raw" || { collect_error=honk_tree_unreadable; return 1; }
++	) > "$collect_out.raw" || return 1
+ 	: > "$collect_out"
+ 	collect_count=0
+ 	collect_total=0
+ 	while IFS= read -r collect_path; do
+ 		collect_path=${collect_path#./}
+ 		is_excluded "$collect_path" && continue
+-		safe_relpath "$collect_path" || {
+-			collect_error=unsafe_honk_file_name
+-			# 文件名进面板日志（维护→日志→维护），否则用户不知道是哪个文件。
+-			logger -t honk-maintenance "unsafe file name: $collect_path" 2>/dev/null || :
+-			printf '%s\n' "unsafe file name: $collect_path" >&2
+-			return 1
+-		}
+-		[ -f "$collect_root/$collect_path" ] && [ ! -L "$collect_root/$collect_path" ] || { collect_error=honk_tree_has_special_file; return 1; }
+-		collect_size=$(size_of "$collect_root/$collect_path") || { collect_error=honk_tree_unreadable; return 1; }
+-		[ "$collect_size" -le "$MAX_FILE" ] || {
+-			collect_error=honk_backup_file_too_large
+-			logger -t honk-maintenance "file exceeds $MAX_FILE bytes: $collect_path" 2>/dev/null || :
+-			printf '%s\n' "file too large: $collect_path" >&2
+-			return 1
+-		}
++		safe_relpath "$collect_path" || exit 1
++		[ -f "$collect_root/$collect_path" ] && [ ! -L "$collect_root/$collect_path" ] || return 1
++		collect_size=$(size_of "$collect_root/$collect_path") || return 1
++		[ "$collect_size" -le "$MAX_FILE" ] || return 1
+ 		collect_count=$((collect_count + 1))
+ 		collect_total=$((collect_total + collect_size))
+-		[ "$collect_count" -lt "$MAX_FILES" ] && [ "$collect_total" -le $((MAX_EXPANDED - 1048576)) ] || {
+-			collect_error=honk_backup_tree_too_large
+-			logger -t honk-maintenance "tree exceeds limits after $collect_count files, $collect_total bytes: $collect_path" 2>/dev/null || :
+-			printf '%s\n' "tree too large at: $collect_path" >&2
+-			return 1
+-		}
+-		printf '%s\n' "$collect_path" >> "$collect_out" || { collect_error=temporary_storage_unavailable; return 1; }
+-	done < "$collect_out.raw" || { collect_error=honk_tree_unreadable; return 1; }
+-	[ -f "$collect_root/config.dae" ] && [ -f "$collect_root/system.dae" ] || { collect_error=honk_config_incomplete; return 1; }
++		[ "$collect_count" -lt "$MAX_FILES" ] && [ "$collect_total" -le $((MAX_EXPANDED - 1048576)) ] || return 1
++		printf '%s\n' "$collect_path" >> "$collect_out" || exit 1
++	done < "$collect_out.raw" || return 1
++	[ -f "$collect_root/config.dae" ] && [ -f "$collect_root/system.dae" ] || return 1
+ 	return 0
+ }
+ 
+@@ -647,10 +637,7 @@ check_tar_members() {
+ 		{
+ 			if (NF < 2 || substr($1,1,1) != "-") exit 1
+ 			name=$NF
+-			# 空白、控制字符、通配符会打乱成员名解析，其余（含 UTF-8）放行。
+-			if (name ~ /[[:space:][:cntrl:]]/) exit 1
+-			if (name ~ /\*/ || name ~ /\?/ || name ~ /\[/ || name ~ /\\/) exit 1
+-			if (name ~ /^\// || name ~ /(^|\/)\.\.(\/|$)/ || name ~ /(^|\/)\.($|\/)/ || name ~ /\/\//) exit 1
++			if (name !~ /^[A-Za-z0-9_.\/-]+$/ || name ~ /^\// || name ~ /(^|\/)\.\.(\/|$)/ || name ~ /(^|\/)\.($|\/)/ || name ~ /\/\//) exit 1
+ 			seen[name]++
+ 			if (seen[name] > 1) exit 1
+ 			count++
+@@ -677,10 +664,7 @@ extract_archive() {
+ 		NR==2 { if (NF!=2 || $1!="core_commit" || length($2)!=40 || $2 !~ /^[0-9a-f]+$/) exit 1; next }
+ 		NR==3 { if (NF!=2 || $1!="state" || ($2!="present" && $2!="absent")) exit 1; next }
+ 		$1=="file" {
+-			if (NF!=4) exit 1
+-			if ($2 ~ /[[:space:][:cntrl:]]/) exit 1
+-			if ($2 ~ /\*/ || $2 ~ /\?/ || $2 ~ /\[/ || $2 ~ /\\/) exit 1
+-			if ($2 ~ /^\// || $2 ~ /(^|\/)\.\.(\/|$)/ || $2 ~ /(^|\/)\.($|\/)/ || $2 ~ /\/\//) exit 1
++			if (NF!=4 || $2 !~ /^[A-Za-z0-9_.\/-]+$/ || $2 ~ /^\// || $2 ~ /(^|\/)\.\.(\/|$)/ || $2 ~ /(^|\/)\.($|\/)/ || $2 ~ /\/\//) exit 1
+ 			if ($3 !~ /^[0-9]+$/ || $3 > 67108864 || $4 !~ /^[0-9a-f]{64}$/) exit 1
+ 			if (seen[$2]++) exit 1
+ 			total += $3; count++; next
+@@ -847,7 +831,6 @@ validate_candidate() {
+ 	candidate=$1
+ 	uci_dir=$2
+ 	state=$3
+-	identity=${4:-local}
+ 	config_tree=$candidate/etc/honk
+ 	mkdir -p "$temp_dir/uci-tmp" || return 1
+ 	load_uci_values uci "$uci_dir" || return 1
+@@ -868,13 +851,7 @@ validate_candidate() {
+ 	candidate_ip=
+ 	network_get_device candidate_device "$u_network" || return 1
+ 	network_get_ipaddr candidate_ip "$u_network" || return 1
+-	if [ "$identity" = archive ]; then
+-		archive_lan=$(sed -n "s/^    lan_interface: '\([^']*\)'$/\1/p" "$config_tree/system.dae")
+-		archive_listen=$(sed -n "s/^        listen: '\([^']*\)'$/\1/p" "$config_tree/system.dae")
+-		validate_config_tree "$config_tree" "$archive_lan" "${archive_listen%:*}" "${archive_listen##*:}" "$u_initialized" || return 2
+-	else
+-		validate_config_tree "$config_tree" "$candidate_device" "$candidate_ip" "$u_port" "$u_initialized" || return 2
+-	fi
++	validate_config_tree "$config_tree" "$candidate_device" "$candidate_ip" "$u_port" "$u_initialized" || return 2
+ 	if [ "$state" = present ] || { [ "$state" = preview ] && { [ -e "$config_tree/state/honk.db" ] || [ -L "$config_tree/state/honk.db" ]; }; }; then
+ 		archive_sqlite_check "$config_tree/state/honk.db" || return 1
+ 	fi
+@@ -971,7 +948,7 @@ backup() {
+ 		[ "$u_initialized" = 0 ] || { backup_abort initialized_state_missing; return 1; }
+ 	fi
+ 	mkdir -p "$temp_dir/archive/etc" "$temp_dir/archive/uci" || { backup_abort temporary_storage_unavailable; return 1; }
+-	collect_tree "$HONK_ROOT" "$temp_dir/files.list" || { backup_abort "${collect_error:-unsupported_honk_tree_entry}"; return 1; }
++	collect_tree "$HONK_ROOT" "$temp_dir/files.list" || { backup_abort unsupported_honk_tree_entry; return 1; }
+ 	while IFS= read -r relpath; do
+ 		[ -n "$relpath" ] || continue
+ 		dest=$temp_dir/archive/etc/honk/$relpath
+@@ -1052,7 +1029,7 @@ restore() {
+ 		error empty_archive_would_clear_active_state
+ 		return 1
+ 	fi
+-	validate_candidate "$restore_stage" "$uci_dir" "$archive_state" archive
++	validate_candidate "$restore_stage" "$uci_dir" "$archive_state"
+ 	validate_rc=$?
+ 	if [ "$validate_rc" -ne 0 ]; then
+ 		[ "$validate_rc" = 2 ] && error unsupported_candidate_config || error candidate_validation_failed
+diff --git a/honk/files/system.dae b/honk/files/system.dae
+index e85a994..66304e0 100644
+--- a/honk/files/system.dae
++++ b/honk/files/system.dae
+@@ -7,13 +7,17 @@ global {
+     auto_config_kernel_parameter: true
+     data_dir: '/etc/honk'
+     store_subscribe: true
+-    nfqueue_enable: true
++    nfqueue_enable: false
+ }
+ 
+ experimental {
+     native_api {
+         enabled: true
+-        listen: '127.0.0.1:9527'
++        # The native API is the proxy's controller UI (doona), not a datapath
++        # listener: it has to answer the browser on the LAN, so bind all
++        # addresses. password_auth stays on (first visit creates the admin),
++        # and the WAN side is still closed by the firewall.
++        listen: '0.0.0.0:9527'
+         password_auth: true
+         allow_anonymous_loopback: false
+         config_write: true
+diff --git a/luci-app-honk/root/usr/libexec/rpcd/honk b/luci-app-honk/root/usr/libexec/rpcd/honk
+index f0c5239..867e605 100644
+--- a/luci-app-honk/root/usr/libexec/rpcd/honk
++++ b/luci-app-honk/root/usr/libexec/rpcd/honk
+@@ -51,7 +51,6 @@ lock_owner_invalid() {
+ }
+ 
+ status() {
+-	local core_lane
+ 	local enabled initialized boot_enabled running api_url api_ready core_version core_commit doona_version kernel lan_network listen_port errors listen clash_api_enabled clash_api_port clash_api_secret clash_api_url clash_api_ready clash_ui_ready clash_secret_set settings_owner api_enabled core_ready config_pending draft_pending legacy_draft detach_backup clash_listen_addr
+ 	config_load honk
+ 	config_get_bool enabled main enabled 0
+@@ -136,8 +135,6 @@ status() {
+ 	[ -n "$core_version" ] || core_version=unknown
+ 	# --version 只是构建时注入的版本串，真正的上游代码看 provenance.json
+ 	core_commit=$(jsonfilter -i /usr/share/honk/provenance.json -e '@.core.commit' 2>/dev/null)
+-	core_lane=$(jsonfilter -i /usr/share/honk/core-capabilities.json -e '@.lane' 2>/dev/null)
+-	[ -n "$core_lane" ] || core_lane=stable
+ 	doona_version=$(sed -n 's/^Version: //p' /usr/share/doona/SOURCE 2>/dev/null | head -n 1)
+ 	[ -n "$doona_version" ] || doona_version=unknown
+ 	kernel=$(uname -r)
+@@ -174,7 +171,6 @@ status() {
+ 	json_add_string clash_api_url "$clash_api_url"
+ 	json_add_string core_version "$core_version"
+ 	json_add_string core_commit "$core_commit"
+-	json_add_string core_lane "$core_lane"
+ 	json_add_string doona_version "$doona_version"
+ 	json_add_string kernel "$kernel"
+ 	json_add_string lan_network "$lan_network"
+@@ -196,17 +192,6 @@ service_ready_config() {
+ 	[ "$initialized" = 1 ]
+ }
+ 
+-# 包文件被改坏（丢了执行位）时自己修回来，用户不该为这个去敲 chmod。
+-ensure_runner_ready() {
+-	runner_fixed=
+-	for runner_file in "$JOB_RUNNER" "$MAINT" "$CONTROL" "$UPDATE" /usr/share/honk/lock.sh /usr/share/honk/lifecycle.sh; do
+-		[ -f "$runner_file" ] || continue
+-		[ -x "$runner_file" ] && continue
+-		chmod 0755 "$runner_file" 2>/dev/null && runner_fixed="$runner_fixed $runner_file"
+-	done
+-	[ -z "$runner_fixed" ] || logger -t honk-maintenance "restored execute bits:$runner_fixed" 2>/dev/null || :
+-}
+-
+ start_job() {
+ 	job_operation=$1
+ 	job_request=
+@@ -222,7 +207,6 @@ start_job() {
+ 		fi
+ 	fi
+ 
+-	ensure_runner_ready
+ 	if [ ! -e "$JOBS" ] && [ ! -L "$JOBS" ]; then
+ 		(umask 077; mkdir "$JOBS") || { emit_result false job_storage_unavailable; return 1; }
+ 	fi
+@@ -240,31 +224,10 @@ start_job() {
+ 	json_add_string message job_started
+ 	json_dump > "$job_dir/status" || { rm -rf "$job_dir"; emit_result false job_storage_unavailable; return 1; }
+ 	chmod 0600 "$job_dir/status" || { rm -rf "$job_dir"; emit_result false job_storage_unavailable; return 1; }
+-	# 没有 nohup 的固件直接跑，别让一个可选命令决定备份能不能用。
+-	if command -v nohup >/dev/null 2>&1; then
+-		nohup "$JOB_RUNNER" "$job_id" "$job_operation" >/dev/null 2>&1 </dev/null &
+-	else
+-		"$JOB_RUNNER" "$job_id" "$job_operation" >/dev/null 2>&1 </dev/null &
+-	fi
++	nohup "$JOB_RUNNER" "$job_id" "$job_operation" >/dev/null 2>&1 </dev/null &
+ 	job_pid=$!
+ 	printf '%s\n' "$job_pid" > "$job_dir/worker.pid" || { rm -rf "$job_dir"; emit_result false job_storage_unavailable; return 1; }
+ 	chmod 0600 "$job_dir/worker.pid" || { rm -rf "$job_dir"; emit_result false job_storage_unavailable; return 1; }
+-	# worker 一秒内既没活着也没写状态，就是它压根没起来。
+-	# 这时在本进程里直接跑完：备份逻辑本身是好的，不该因为后台起不来就让导出彻底不可用。
+-	sleep 1
+-	if ! kill -0 "$job_pid" 2>/dev/null && [ "$(jsonfilter -i "$job_dir/status" -e '@.phase' 2>/dev/null)" = queued ]; then
+-		job_runner_detail="id=$(id -u 2>/dev/null) jobs=$(stat -c '%u:%a' "$JOBS" 2>/dev/null) dir=$(stat -c '%u:%a' "$job_dir" 2>/dev/null) runner=$(command -v "$JOB_RUNNER" 2>/dev/null || echo missing)"
+-		logger -t honk-maintenance "job runner did not start, running inline: $job_runner_detail" 2>/dev/null || :
+-		"$JOB_RUNNER" "$job_id" "$job_operation" >/dev/null 2>&1 || :
+-		if [ "$(jsonfilter -i "$job_dir/status" -e '@.phase' 2>/dev/null)" = queued ]; then
+-			json_init
+-			json_add_boolean ok 0
+-			json_add_string message job_runner_unavailable
+-			json_add_string detail "$job_runner_detail"
+-			json_dump
+-			return 1
+-		fi
+-	fi
+ 	json_init
+ 	json_add_boolean ok 1
+ 	json_add_string message job_started
+@@ -297,18 +260,10 @@ job_status() {
+ 		else
+ 			json_add_string state failed
+ 			json_add_string phase complete
+-			job_lost_message=worker_lost
+-			# 没 output 说明 job.sh 连脚本都没跑起来（早退或没启动），
+-			# 有 output 才是跑一半被杀，这两种要分得开。
+-			if [ -e "$job_dir/output" ]; then
+-				job_lost_detail="worker pid ${job_pid:-unknown} exited before writing a status"
+-			else
+-				job_lost_detail="the maintenance worker never ran (no output file)"
+-			fi
++			job_lost_message worker_lost
+ 		fi
+ 		json_add_boolean ok 0
+ 		json_add_string message "$job_lost_message"
+-		[ -z "${job_lost_detail:-}" ] || json_add_string detail "$job_lost_detail"
+ 		json_dump > "$job_dir/status.new" && chmod 0600 "$job_dir/status.new" && mv -f "$job_dir/status.new" "$job_status_file" || { emit_result false job_status_unavailable; return 1; }
+ 	fi
+ 	cat "$job_status_file"
+@@ -891,6 +846,12 @@ is_managed_core() {
+ 
+ begin_mutation() {
+ 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then emit_result false update_recovery_required; exit 1; fi
++	# A power loss or a killed UI job can leave a maintenance journal behind.
++	# Recover it before taking the lock, otherwise preflight refuses every start
++	# and the status page stays on "recovery required" until the button is used.
++	if [ -e /etc/.honk-maintenance/journal ] || [ -L /etc/.honk-maintenance/journal ]; then
++		"$CONTROL" auto-recover >/dev/null 2>&1 || :
++	fi
+ 	# A caller that timed out mid-operation cannot release the lock itself. Without
+ 	# this, one aborted apply wedges every later configuration operation.
+ 	if honk_lock_is_stale; then rm -rf "$HONK_LOCK_DIR"; fi

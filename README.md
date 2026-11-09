@@ -7,7 +7,7 @@
 - **IPQ60XX / IPQ807X**：同一批设备出两版 —— `QCA-PPE`（`@owrt`，内核 flowtable/PPE）和 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）。
 - **IPQ53XX / IPQ95XX**：配置保留，但**暂不构建**。上游 `qualcommbe` 的 `kmod-ath12k` 依赖在 `owrt`/`main` 上都未满足（`depends on !(TARGET_qualcommbe) || TARGET_qualcommax`），镜像组装会报 `kmod-ath12k (no such package)`；等上游放开设限后再加回矩阵。
 - **MEDIATEK**：上游 `@owrt`，原版包集。
-- **honk**：`X86/ROCKCHIP` 用本仓库 `patches/honk/` 的 overlay + 自建 `core-p1`；`IPQ/MTK` 用原版上游 honk。不再使用 `kwrum1/openwrt-honk` 分支。
+- **honk**：`X86/ROCKCHIP` 从上游 `kenzok8/openwrt-honk` 拉源码，构建期打 `patches/honk/honk-x86rk.patch` 并用自建 `core-p1`；`IPQ/MTK` 用原版上游 honk。不再使用 `kwrum1/openwrt-honk` 分支。
 
 ### 我该刷哪个？
 
@@ -78,14 +78,17 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 
 ### 2.2 honk 分流
 
-- **X86 / ROCKCHIP**：`Packages.sh` 从上游 `kenzok8/openwrt-honk` 拉包，覆盖
-  `patches/honk/overlay/` 的文件，再用 `apply-makefile.sh` 把 Makefile 指向本仓库
-  `core-p1` 的 patched core；core 由 `HONK-CORE` 构建/发布。
-- **IPQ / MTK**：不覆盖、不改 Makefile、不取 `core-p1`，使用原版包与原版 core
+- **X86 / ROCKCHIP**：`Packages.sh` 从上游 `kenzok8/openwrt-honk` 拉包，用
+  `patches/honk/honk-x86rk.patch` 打源码补丁（`patch -p1`），再用
+  `apply-makefile.sh` 把 Makefile 指向本仓库 `core-p1` 的 patched core；core 由
+  `HONK-CORE` 构建/发布。
+- **IPQ / MTK**：不打补丁、不改 Makefile、不取 `core-p1`，使用原版包与原版 core
   （硬件 flowtable/PPE 路径保持原样）。
 - `kwrum1/openwrt-honk` 不再参与构建，可以归档/删除；CI 里不再引用它。
-- 上游 core 变更时，`HONK-CORE` 的 anchor 检查会先失败；更新 `patches/honk/ci/pins.env`
-  和 `apply-makefile.sh` 里的 `CORE_COMMIT` 即可，不需要合并分支。
+- 补丁只带本项目真正改动的那 ~180 行：上游改动导致 hunk 失败时，镜像构建会在
+  `Packages.sh` 直接停下，重排对应 hunk 即可，不需要合并分支。上游 core 变更时，
+  `HONK-CORE` 的 anchor 检查会先失败；改 `patches/honk/ci/pins.env` 和
+  `apply-makefile.sh` 里的 `CORE_COMMIT` 即可。详见 `patches/honk/README.md`。
 
 ---
 
@@ -188,11 +191,17 @@ TCX 先于 classic `cls_bpf`：honk 判给代理的流到不了 dpd；classic �
 
 ### 5.5 代理 + 加速共存（honk p1）
 
-honk 的 `lan_ingress_l2` 是 TCX，dpd 是 classic。上游 core 的 direct 出口返回 `TC_ACT_OK`，整条 classic 链被跳过，dpd 只能 `observe`。
+honk 的 `lan_ingress_l2` 是 TCX，dpd 是 classic。上游 core 的 direct 出口返回 `TC_ACT_OK`，TCX 链终止，后面的经典 TC 链（dpd）看不到这些包，dpd 只能 `observe`。
 
-`ebpf` 镜像用的 honk 来自 `kwrum1/openwrt-honk@main`，构建期打 **p1** 补丁（`ci/patches/honk-direct-unspec.py`，不改上游源码）：
-
-**所有目标都用这个 p1 core**，包括 IPQ / MediaTek 的 PPE/NSS 镜像：p1 对 direct 流返回 `TC_ACT_UNSPEC`，不会把后面的数据面（x86 是 dpd、IPQ 是内核 flowtable/NSS）挡掉；IPQ / MTK 的其它包仍然用 `GENERAL-STOCK.txt`，只有 honk 的来源换成本仓库这一个改动。`Scripts/Packages.sh` 先找 `honk-core-<commit>-p1-<arch>` 的 release，找不到才回退到旧的 plain core。
+- **X86 / ROCKCHIP**：`Packages.sh` 从上游 `kenzok8/openwrt-honk` 拉包后打
+  `patches/honk/honk-x86rk.patch`，Makefile 指向本仓库 `core-p1`。这个 core 由
+  `HONK-CORE` 从 pin 的 `daeuniverse/honk` 构建，打 **p1** 补丁
+  （`ci/patches/honk-direct-unspec.py`）：direct 流返回 `TC_ACT_UNSPEC`，dpd 继续接管；
+  proxy/block 仍是终态，NAT 仍归 einat。
+- **IPQ / MTK**：不打补丁、不改 Makefile，用原版包和原版 core。硬件加速走内核
+  flowtable/PPE（netfilter 层），不受 honk 的 TCX 影响，保持上游原样。
+- `Scripts/Packages.sh` 先找 `honk-core-<commit>-p1-<arch>` 的 release，找不到才回退到
+  旧的 plain core。
 
 1. 4 个 direct 出口返回 `TC_ACT_UNSPEC` 并打 `DIRECT_UNSPEC_MARK`；
 2. bridge 二次遍历看到该 mark 时跳过分类、仍返回 `UNSPEC`；
@@ -271,7 +280,7 @@ X86 / ROCKCHIP  -> Config/<CONFIG>.txt + Config/GENERAL.txt
 ### 7.1 `Packages.sh`
 
 - 第三方包只保留真正进固件的五个：`aurora`、`aurora-config`、`honk`、`v2ray-geodata`、`partexp`。
-- honk 单分支：`kwrum1/openwrt-honk@main`（含 p1 core 与 `.lan/.local` DNS 规则）。
+- honk 第三方支持：上游 `kenzok8/openwrt-honk@main`；X86/RK 构建期打 `patches/honk/honk-x86rk.patch`（p1 core 和 `.lan/.local` DNS 规则），IPQ/MTK 不打。
 - honk 的 `generated-stage.mk` / `generated-provenance.json` / `generated-doona-stage.mk` 是 release 资产，按 `CORE_COMMIT` 下载并改写 URL，x86_64 资产先 HEAD 预检。
 - 数据面：`X86|ROCKCHIP` 时从 **本仓库 `ebpf/`** 拷到 `package/ebpf/`，同时算出 `DPD_SRC_SHA`；找不到直接失败。其它平台打印一行跳过。
 
@@ -337,5 +346,5 @@ sh Scripts/upstream-check.sh <fresh clone of VIKINGYFY/immortalwrt>
 
 - CI 框架：`VIKINGYFY/OpenWRT-CI`（MIT）。
 - einat：`EHfive/einat-ebpf`（GPL-2.0）。
-- honk：`Glassyiris/honk`，打包与 Doona 见 `kwrum1/openwrt-honk`。
+- honk：`Glassyiris/honk` 构建的 Doona 来自上游 `kenzok8/openwrt-honk`。
 - `ebpf/` 下其余组件为本仓库原创（GPL-2.0-only）。

@@ -388,26 +388,27 @@ fi
 # NAT 是 einat 在 TC egress 做的，业务流还要 notrack。两者对「谁先看到首包」
 # 直接竞争。
 #
-# 全部 5 个 `true` 站点一次改掉（`false` 的那两处是 shadow/mock 配置，本来就对，
-# 一起替换也只是幂等 —— 但下面的 sed 只匹配 true，所以那两处根本不动）。
-# 再摘掉 Makefile 里的 +kmod-nft-queue 依赖。
+# 上游会在不同版本里增删 true 站点（2026.11.01 是 5 处，2026.11.09 是 4 处），
+# 所以这里不再断言「必须改到 N 处」：扫整个 files/，改掉所有 true，然后只断言
+# 改完之后一个都不剩。X86/ROCKCHIP 的 honk-x86rk.patch 已经改过一部分，剩下的
+# 由这里兜住（幂等）。再摘掉 Makefile 里的 +kmod-nft-queue 依赖。
 HONK_DIR="$GITHUB_WORKSPACE/wrt/package/honk"
-if [ -d "$HONK_DIR" ]; then
+if [ -d "$HONK_DIR/files" ]; then
 	HONK_HITS=0
-	for f in "$HONK_DIR/files/system.dae" "$HONK_DIR/files/control.sh" "$HONK_DIR/files/maintenance.sh"; do
+	for f in "$HONK_DIR"/files/*; do
 		[ -f "$f" ] || continue
-		n=$(grep -c 'nfqueue_enable: true' "$f" 2>/dev/null || echo 0)
+		n=$(grep -c 'nfqueue_enable: true' "$f" 2>/dev/null || true)
+		[ -z "$n" ] && continue
 		[ "$n" = "0" ] && continue
 		sed -i 's/nfqueue_enable: true/nfqueue_enable: false/g' "$f"
 		HONK_HITS=$((HONK_HITS + n))
 		echo "  ${f##*/}: $n 处 true -> false"
 	done
-	echo "honk NFQUEUE: 共改 $HONK_HITS 处（预期 5）"
-	if [ "$HONK_HITS" != "5" ]; then
-		echo "!! 改到的处数不是 5 —— 上游可能改了写法，逐处核对 docs/honk-nfqueue-trim.md" >&2
-	fi
+	echo "honk NFQUEUE: 共改 $HONK_HITS 处"
 	# 剩下的必须全是 false，且不能还有 true 漏网
-	echo "  剩余 true 计数: $(grep -rc 'nfqueue_enable: true' "$HONK_DIR/files/" 2>/dev/null | grep -v ':0$' | wc -l)"
+	if grep -rq 'nfqueue_enable: true' "$HONK_DIR/files/" 2>/dev/null; then
+		echo "!! 还有 nfqueue_enable: true 漏网 —— 上游可能换了写法，见 docs/honk-nfqueue-trim.md" >&2
+	fi
 	if [ -f "$HONK_DIR/Makefile" ]; then
 		if grep -q ' +kmod-nft-queue' "$HONK_DIR/Makefile"; then
 			sed -i 's/ +kmod-nft-queue//' "$HONK_DIR/Makefile"
