@@ -128,7 +128,16 @@ jobs:
       - name: Clone Code
         id: clone-code
         run: |
-          git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
+          # A single reset from github.com should not fail the whole build.
+          for attempt in 1 2 3; do
+            if git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/; then
+              break
+            fi
+            echo "clone failed (attempt $attempt), retrying in 15s"
+            rm -rf ./wrt
+            sleep 15
+            [ "$attempt" = 3 ] && exit 1
+          done
 
           cd ./wrt/
           WRT_HASH=$(git rev-parse HEAD)
@@ -192,7 +201,9 @@ jobs:
         run: |
           cd ./wrt/
 
-          ./scripts/feeds update -a
+          # Feeds fetch dozens of git remotes; retry the whole pass instead of
+          # dying on one reset. `update` is incremental, so a retry is cheap.
+          ./scripts/feeds update -a || { echo "feeds update failed, retrying"; sleep 15; ./scripts/feeds update -a; }
           ./scripts/feeds install -a
 
       - name: Custom Packages
