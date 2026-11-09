@@ -45,9 +45,11 @@ jobs:
           releases_keep_keyword: "core-p1"
           delete_tags: true
           delete_workflows: true
-          # Keep one day of runs: with 0 the job also wipes runs that are still
-          # queued/in progress, which makes a CI failure impossible to inspect.
-          workflows_keep_day: 1
+          # Delete every run. The keyword keeps this workflow's own runs, so the
+          # purge does not cancel itself halfway through; every build run and
+          # every artifact is removed.
+          workflows_keep_day: 0
+          workflows_keep_keyword: "Auto-Clean"
 
       # The action above does not touch artifacts. They are the largest thing
       # an image build leaves behind (build reports, provenance, per-target
