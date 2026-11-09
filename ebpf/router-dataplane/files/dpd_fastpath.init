@@ -83,6 +83,10 @@ start_service() {
 	# attaching below does not change these values.
 	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 	dpd_push_vlans "$policy" "$vlans"
+	# ABI 20: nat_forward=dpd attaches the egress SNAT program to the
+	# uplinks. Do it before the LAN hook so the first accelerated uplink
+	# packet cannot leave without its rewrite.
+	dpd_nat_egress_sync
 
 	for i in $ifaces; do
 		dev="$i"
@@ -153,10 +157,11 @@ stop_service() {
 		[ -e "/sys/class/net/$i" ] || dev="$(dpd_resolve_logical "$i")"
 		[ -n "$dev" ] && dpd_detach_if "$dev"
 	done
-	# belt and braces: sweep anything left behind
+	# belt and braces: sweep anything left behind (ingress and the ABI 20
+	# egress SNAT hook; both deletions are idempotent)
 	for dev in /sys/class/net/*; do
 		dev="${dev##*/}"
-		dpd_is_attached "$dev" && dpd_detach_if "$dev"
+		dpd_detach_if "$dev"
 	done
 	logger -t dpd-fastpath "stopped"
 }

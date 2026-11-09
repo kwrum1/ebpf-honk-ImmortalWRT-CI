@@ -99,6 +99,9 @@ ifup|ifupdate|add|update)
 	# dpd_iface and installs nothing.
 	if dpd_is_wan_device "$DEVICE"; then
 		dpd_teach_iface "$DEVICE"
+		# ABI 20: (re)attach the egress SNAT hook and re-teach the new
+		# address after a redial/lease change.
+		dpd_nat_egress_sync
 		if [ "$DPD_DOWNLINK" = 1 ]; then
 			if dpd_attach_if "$DEVICE"; then
 				dpd_push_config

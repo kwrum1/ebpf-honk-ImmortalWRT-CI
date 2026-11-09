@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * dpd_fastpath.bpf.c - ebpf TC *ingress* eBPF fastpath.
+ * dpd_fastpath.bpf.c - ebpf TC fastpath.
  *
  * See src/dpd_common.h for the redlines and the hook layout. Short version:
- * ingress-only, no NAT, no conntrack, does not read einat maps, always yields
- * with TC_ACT_UNSPEC unless it has genuinely taken over a packet.
+ * no conntrack and no reads of einat maps; the classic ingress program always
+ * yields with TC_ACT_UNSPEC unless it has genuinely taken over a packet.
+ *
+ * ABI 19/20 add two optional halves, both off by default:
+ *   classifier/egress   forward SNAT + port allocation (`nat_forward=dpd`)
+ *   ingress DNAT        return-path DNAT from dpd_nat_rev (`nat_ingress=dpd`)
+ * With the defaults (einat owns NAT) neither program rewrites anything.
  *
  * Modes (dpd_cfg.mode):
  *   OBSERVE      do the work but never touch the packet  -> zero risk
@@ -157,20 +162,8 @@ struct {
  * `dpd-einat`. Key = the LAN source (pre-SNAT) 3-tuple; value = the external
  * address/port einat allocated. The hit path applies this SNAT before emit;
  * the return path is already reverse-NATed by einat's TCX program. Keeping it
- * in a separate map (instead of growing dpd_flow_val) keeps ABI 15 intact. */
-struct dpd_nat_key {
-	__be32	saddr;
-	__be16	sport;
-	__u8	proto;
-	__u8	_pad;
-};
-
-struct dpd_nat_val {
-	__be32	to_addr;
-	__be16	to_port;
-	__u16	_pad;
-};
-
+ * in a separate map (instead of growing dpd_flow_val) keeps ABI 15 intact.
+ * The key/value layout lives in dpd_common.h so dpdctl can dump it. */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);
@@ -182,20 +175,13 @@ struct {
 /* ABI 19: return-path DNAT table, mirrored from einat's *reverse* bindings
  * (external tuple -> internal tuple) by dpd-einat-sync. Used only when
  * cfg.nat_ingress is set; with einat's ingress TCX attached the packet is
- * already DNATed and the key does not match, so the mode is safe by default. */
-struct dpd_nat_rev_key {
-	__be32	daddr;
-	__be16	dport;
-	__u8	proto;
-	__u8	_pad;
-};
-
-struct dpd_nat_rev_val {
-	__be32	saddr;
-	__be16	sport;
-	__u16	_pad;
-};
-
+ * already DNATed and the key does not match, so the mode is safe by default.
+ *
+ * ABI 20: with nat_forward=dpd this map is also the port ownership table:
+ * a candidate external port is free when its reverse entry is absent or its
+ * timestamp is older than the TCP TTL. ts_ms is CLOCK_MONOTONIC truncated to
+ * 32 bits (0 = foreign/unknown, e.g. an entry mirrored from einat). The
+ * layout lives in dpd_common.h. */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);
@@ -274,6 +260,103 @@ dpd_dnat_apply(struct __sk_buff *skb, void *data, void *data_end,
 			return -1;
 	}
 	return 0;
+}
+
+/* ABI 20: forward SNAT. Mirrors dpd_dnat_apply(): rewrites saddr/sport and
+ * updates the IP and L4 checksums incrementally. The old tuple is passed in
+ * because the caller parsed it already and looked it up. */
+static __always_inline int
+dpd_snat_apply(struct __sk_buff *skb, void *data, void *data_end,
+	       __u32 l3_off, __u32 l4_off, __u8 proto,
+	       __be32 old_saddr, __be16 old_sport,
+	       __be32 new_saddr, __be16 new_sport)
+{
+	struct iphdr *iph = data + l3_off;
+	__u32 sport_off = 0, csum_off = 0;
+	int csum_l4 = 1;
+
+	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+		return -1;
+	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->saddr != old_saddr)
+		return -1;
+
+	if (proto == IPPROTO_TCP) {
+		struct tcphdr *th = data + l4_off;
+
+		if ((void *)(th + 1) > data_end)
+			return -1;
+		sport_off = l4_off + __builtin_offsetof(struct tcphdr, source);
+		csum_off = l4_off + __builtin_offsetof(struct tcphdr, check);
+	} else {
+		struct udphdr *uh = data + l4_off;
+
+		if ((void *)(uh + 1) > data_end)
+			return -1;
+		sport_off = l4_off + __builtin_offsetof(struct udphdr, source);
+		csum_off = l4_off + __builtin_offsetof(struct udphdr, check);
+		if (uh->check == 0)
+			csum_l4 = 0;
+	}
+
+	if (old_saddr != new_saddr) {
+		if (bpf_skb_store_bytes(skb,
+			l3_off + __builtin_offsetof(struct iphdr, saddr),
+			&new_saddr, sizeof(new_saddr), 0) < 0)
+			return -1;
+		if (bpf_l3_csum_replace(skb,
+			l3_off + __builtin_offsetof(struct iphdr, check),
+			(__u64)old_saddr, (__u64)new_saddr,
+			sizeof(new_saddr)) < 0)
+			return -1;
+		if (csum_l4 &&
+		    bpf_l4_csum_replace(skb, csum_off, (__u64)old_saddr,
+					(__u64)new_saddr,
+					sizeof(new_saddr) | BPF_F_PSEUDO_HDR) < 0)
+			return -1;
+	}
+	if (old_sport != new_sport) {
+		if (bpf_skb_store_bytes(skb, sport_off, &new_sport,
+					sizeof(new_sport), 0) < 0)
+			return -1;
+		if (csum_l4 &&
+		    bpf_l4_csum_replace(skb, csum_off, (__u64)old_sport,
+					(__u64)new_sport,
+					sizeof(new_sport)) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+/* ABI 20: the external address for a new binding. The route's preferred source
+ * is the only correct answer on a multi-homed uplink (the lab's eth1 carries
+ * both 10.46.0.6 and 198.18.0.1), so ask the FIB once per allocation instead of
+ * trusting the first address userspace happened to teach. `fallback` is
+ * dpd_iface.addr4 for a box where the lookup fails. */
+static __always_inline __be32
+dpd_nat_ext_addr(struct __sk_buff *skb, __be32 daddr, __u8 proto,
+		 __be16 sport, __be16 dport, __be32 fallback)
+{
+	struct bpf_fib_lookup fib = {};
+	int ret;
+
+	fib.family = AF_INET;
+	fib.l4_protocol = proto;
+	fib.sport = sport;
+	fib.dport = dport;
+	fib.ipv4_dst = daddr;
+	fib.ifindex = skb->ifindex;
+	fib.mark = skb->mark;
+	/* tot_len stays 0: no MTU check, a too-big packet must not make the
+	 * source lookup fail. SKIP_NEIGH: the neighbour may still be
+	 * unresolved on the SYN that triggers the allocation. */
+	ret = bpf_fib_lookup(skb, &fib, sizeof(fib),
+			     BPF_FIB_LOOKUP_OUTPUT | BPF_FIB_LOOKUP_SRC |
+			     BPF_FIB_LOOKUP_SKIP_NEIGH | BPF_FIB_LOOKUP_MARK);
+	if (ret == 0 && fib.ipv4_src)
+		return fib.ipv4_src;
+	return fallback;
 }
 
 /* ABI 18: learn-time policy lookup. Port 0 and ifindex 0 are wildcards, so
@@ -1386,7 +1469,11 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			 * for this flow, so the egress hook can SNAT it.
 			 * Return traffic is reverse-NATed by einat's TCX ingress
 			 * before this classic program sees it. */
-			if ((fval->flags & DPD_FLOW_F_NAT) &&
+			/* ABI 20: in nat_forward=dpd mode there is no einat
+			 * binding to gate on -- the egress program below owns
+			 * the rewrite and allocates on its own miss. */
+			if (!cfg->nat_forward &&
+			    (fval->flags & DPD_FLOW_F_NAT) &&
 			    fkey.family == AF_INET &&
 			    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP)) {
 				struct dpd_nat_key nk = {};
@@ -1625,12 +1712,18 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				    (fkey.proto != IPPROTO_TCP &&
 				     fkey.proto != IPPROTO_UDP))
 					return TC_ACT_UNSPEC;
-				nk.saddr = fkey.saddr[3];
-				nk.sport = fkey.sport;
-				nk.proto = fkey.proto;
-				nv = bpf_map_lookup_elem(&dpd_nat, &nk);
-				if (!nv || !nv->to_addr)
-					return TC_ACT_UNSPEC;
+				/* ABI 20: DPD's egress program allocates on its
+				 * own first packet, so there is nothing to wait
+				 * for here. ICMP and other protocols still stay
+				 * on the stack: DPD has no SNAT for them. */
+				if (!cfg->nat_forward) {
+					nk.saddr = fkey.saddr[3];
+					nk.sport = fkey.sport;
+					nk.proto = fkey.proto;
+					nv = bpf_map_lookup_elem(&dpd_nat, &nk);
+					if (!nv || !nv->to_addr)
+						return TC_ACT_UNSPEC;
+				}
 			}
 		}
 
@@ -2033,6 +2126,235 @@ SEC(DPD_SEC_L3)
 int dpd_fastpath_l3(struct __sk_buff *skb)
 {
 	return dpd_fastpath_common(skb, 1);
+}
+
+/* ------------------------------------------------------------------ egress
+ *
+ * ABI 20: DPD-owned forward SNAT. Attached to the *uplink's* egress hook only
+ * (files/dpd-fastpath.sh), i.e. after routing and netfilter, which is exactly
+ * where einat's TCX egress hook runs. Replacing einat here therefore does not
+ * change which packets netfilter sees; the redirected fast path (which skips
+ * netfilter) is the reason the rewrite has to happen at egress and not at
+ * ingress -- rewriting at ingress double-NATs once einat is back (measured
+ * 2026-11-09).
+ *
+ * A device opts in by having an addr4 taught (`dpdctl nat_addr`), so the same
+ * object can sit on a LAN device without ever touching its packets.
+ *
+ * The binding is created on the first packet: the port is claimed by inserting
+ * the reverse entry with BPF_NOEXIST, so two CPUs racing for the same port
+ * cannot both win. A reverse entry older than the TCP TTL is recycled, which is
+ * also how the port pool is bounded.
+ */
+
+/* How many ports to probe before giving up. 8 consecutive taken ports in a
+ * 10000-port range is rare, and bounding it keeps the verifier happy. */
+#define DPD_NAT_PROBES	8
+
+SEC(DPD_SEC_EGRESS)
+int dpd_fastpath_egress(struct __sk_buff *skb)
+{
+	struct dpd_cpu *cpu = dpd_cpu();
+	struct dpd_config *cfg = cpu ? &cpu->cfg : NULL;
+	struct dpd_stat_val *st = cpu ? &cpu->stats : NULL;
+	struct dpd_iface_val *iv;
+	struct dpd_nat_key nk = {};
+	struct dpd_nat_val *nv;
+	struct dpd_nat_rev_key rk = {};
+	struct dpd_flow_key fk = {};
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct iphdr *iph;
+	__u32 ifindex = skb->ifindex;
+	__be32 saddr, daddr, ext;
+	__be16 sport, dport;
+	__u32 l3_off, l4_off, now, port_min, port_max, span, h, stale;
+	__u32 ext2;
+	__u16 chosen = 0;
+	__u8 proto;
+
+	if (!cfg || !cfg->enable || !cfg->nat_forward)
+		return TC_ACT_UNSPEC;
+
+	iv = bpf_map_lookup_elem(&dpd_iface, &ifindex);
+	if (!iv || !iv->addr4)
+		return TC_ACT_UNSPEC;
+	ext = iv->addr4;
+
+	if (iv->flags & (DPD_IF_F_NOARP | DPD_IF_F_POINTOPOINT)) {
+		l3_off = 0;	/* ppp/tun: data starts at the IP header */
+	} else {
+		struct ethhdr *eth = data;
+		__be16 et;
+
+		if ((void *)(eth + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		l3_off = sizeof(*eth);
+		et = eth->h_proto;
+		if (et == bpf_htons(ETH_P_8021Q) ||
+		    et == bpf_htons(ETH_P_8021AD)) {
+			struct dpd_vlan_hdr *vh = data + l3_off;
+
+			if ((void *)(vh + 1) > data_end)
+				return TC_ACT_UNSPEC;
+			et = vh->h_vlan_encapsulated_proto;
+			l3_off += 4;
+			if (et == bpf_htons(ETH_P_8021Q)) {
+				struct dpd_vlan_hdr *v2 = data + l3_off;
+
+				if ((void *)(v2 + 1) > data_end)
+					return TC_ACT_UNSPEC;
+				et = v2->h_vlan_encapsulated_proto;
+				l3_off += 4;
+			}
+		}
+		if (et != bpf_htons(ETH_P_IP))
+			return TC_ACT_UNSPEC;
+	}
+
+	iph = data + l3_off;
+	if ((void *)(iph + 1) > data_end)
+		return TC_ACT_UNSPEC;
+	if (iph->version != 4 || iph->ihl < 5)
+		return TC_ACT_UNSPEC;
+	proto = iph->protocol;
+	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+		return TC_ACT_UNSPEC;
+	if (iph->frag_off & bpf_htons(DPD_IP_MF | DPD_IP_OFFMASK))
+		return TC_ACT_UNSPEC;
+	l4_off = l3_off + (__u32)iph->ihl * 4;
+	saddr = iph->saddr;
+	daddr = iph->daddr;
+	if (proto == IPPROTO_TCP) {
+		struct tcphdr *th = data + l4_off;
+
+		if ((void *)(th + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		sport = th->source;
+		dport = th->dest;
+	} else {
+		struct udphdr *uh = data + l4_off;
+
+		if ((void *)(uh + 1) > data_end)
+			return TC_ACT_UNSPEC;
+		sport = uh->source;
+		dport = uh->dest;
+	}
+
+	/* the router's own traffic already carries the external address */
+	if (saddr == ext)
+		return TC_ACT_UNSPEC;
+	/* multicast / limited broadcast is never NATed */
+	if (daddr == 0xffffffffu ||
+	    (bpf_ntohl(daddr) & 0xf0000000u) == 0xe0000000u)
+		return TC_ACT_UNSPEC;
+
+	nk.saddr = saddr;
+	nk.sport = sport;
+	nk.proto = proto;
+	now = (__u32)(bpf_ktime_get_ns() / 1000000ULL);
+
+	nv = bpf_map_lookup_elem(&dpd_nat, &nk);
+	if (nv && nv->to_addr && nv->to_port) {
+		/* Keep the port owned while the flow is alive: refresh the
+		 * ownership stamp at most once a minute, which is the only
+		 * per-packet cost of the pool besides the lookup. */
+		struct dpd_nat_rev_val *rv;
+
+		rk.daddr = nv->to_addr;
+		rk.dport = nv->to_port;
+		rk.proto = proto;
+		rv = bpf_map_lookup_elem(&dpd_nat_rev, &rk);
+		if (rv && now - rv->ts_ms > 60000)
+			rv->ts_ms = now;
+		if (dpd_snat_apply(skb, data, data_end, l3_off, l4_off, proto,
+				   saddr, sport, nv->to_addr,
+				   nv->to_port) < 0) {
+			DPD_INC(st, ST_NAT_GONE);
+			return TC_ACT_UNSPEC;
+		}
+		DPD_INC(st, ST_NAT_SNAT);
+		return TC_ACT_OK;
+	}
+
+	/* Miss: allocate. The candidate is a pure function of the internal
+	 * 5-tuple, so retransmissions that race the allocation land on the
+	 * same first candidate; the probe only moves on a real collision. */
+	ext2 = dpd_nat_ext_addr(skb, daddr, proto, sport, dport, ext);
+	/* the router's own traffic leaves with the selected source already:
+	 * never allocate a binding for it (it would rewrite the source port) */
+	if (ext2 == saddr)
+		return TC_ACT_UNSPEC;
+	port_min = cfg->nat_port_min ? cfg->nat_port_min : 20000;
+	port_max = cfg->nat_port_max ? cfg->nat_port_max : 29999;
+	if (port_min < 1024 || port_max <= port_min || port_max > 65535)
+		return TC_ACT_UNSPEC;
+	span = port_max - port_min + 1;
+	stale = cfg->tcp_ttl_ms ? cfg->tcp_ttl_ms : 300000;
+
+	fk.family = AF_INET;
+	fk.proto = proto;
+	fk.saddr[3] = saddr;
+	fk.daddr[3] = daddr;
+	fk.sport = sport;
+	fk.dport = dport;
+	h = dpd_flow_hash(&fk, 0x85ebca6bu);
+
+#define DPD_ALLOC_TRY(i) do {						\
+	if (!chosen) {							\
+		__u32 p = port_min +					\
+			((h + (i) * 0x9e3779b9u) % span);		\
+		struct dpd_nat_rev_key ck = {};				\
+		struct dpd_nat_rev_val *old;				\
+									\
+		ck.daddr = ext2;					\
+		ck.dport = bpf_htons((__u16)p);				\
+		ck.proto = proto;					\
+		old = bpf_map_lookup_elem(&dpd_nat_rev, &ck);		\
+		if (!old || now - old->ts_ms > stale) {			\
+			struct dpd_nat_rev_val nrv = {};		\
+									\
+			if (old)					\
+				bpf_map_delete_elem(&dpd_nat_rev, &ck);	\
+			nrv.saddr = saddr;				\
+			nrv.sport = sport;				\
+			nrv.ts_ms = now;				\
+			if (bpf_map_update_elem(&dpd_nat_rev, &ck, &nrv,	\
+						BPF_NOEXIST) == 0)	\
+				chosen = (__u16)p;			\
+		}							\
+	}								\
+} while (0)
+	DPD_ALLOC_TRY(0); DPD_ALLOC_TRY(1); DPD_ALLOC_TRY(2); DPD_ALLOC_TRY(3);
+	DPD_ALLOC_TRY(4); DPD_ALLOC_TRY(5); DPD_ALLOC_TRY(6); DPD_ALLOC_TRY(7);
+#undef DPD_ALLOC_TRY
+
+	if (!chosen) {
+		DPD_INC(st, ST_NAT_EXHAUST);
+		return TC_ACT_UNSPEC;
+	}
+
+	{
+		struct dpd_nat_val nvn = {};
+
+		nvn.to_addr = ext2;
+		nvn.to_port = bpf_htons(chosen);
+		if (bpf_map_update_elem(&dpd_nat, &nk, &nvn, BPF_ANY) < 0) {
+			/* give the port back; the packet stays un-NATed */
+			rk.daddr = ext2;
+			rk.dport = bpf_htons(chosen);
+			rk.proto = proto;
+			bpf_map_delete_elem(&dpd_nat_rev, &rk);
+			DPD_INC(st, ST_NAT_GONE);
+			return TC_ACT_UNSPEC;
+		}
+		DPD_INC(st, ST_NAT_ALLOC);
+		if (dpd_snat_apply(skb, data, data_end, l3_off, l4_off, proto,
+				   saddr, sport, ext2, nvn.to_port) < 0)
+			return TC_ACT_UNSPEC;
+	}
+	DPD_INC(st, ST_NAT_SNAT);
+	return TC_ACT_OK;
 }
 
 char _license[] SEC("license") = "GPL";

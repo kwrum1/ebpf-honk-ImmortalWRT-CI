@@ -38,6 +38,7 @@
 DPD_OBJ=/lib/bpf/dpd_fastpath.bpf.o
 DPD_SEC_L2=classifier/l2
 DPD_SEC_L3=classifier/l3
+DPD_SEC_EGRESS=classifier/egress
 DPD_PREF=100
 DPD_CTL=/usr/sbin/dpdctl
 
@@ -102,6 +103,91 @@ dpd_teach_iface() {
 	return 0
 }
 
+# ABI 20: teach the external address the egress SNAT program uses. Only the
+# uplinks are taught, so a device without addr4 (every LAN device) makes the
+# egress program return immediately.
+dpd_teach_nat_addr() {
+	local dev="$1" addr
+
+	[ -x "$DPD_CTL" ] || return 1
+	[ -e "/sys/class/net/$dev" ] || return 1
+	addr="$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null |
+		awk '{print $4}' | cut -d/ -f1 | head -n 1)"
+	[ -n "$addr" ] || return 1
+	"$DPD_CTL" nat_addr "$dev" "$addr" >/dev/null 2>&1
+}
+
+# The egress hook needs clsact: the legacy ingress qdisc has no egress side.
+# Never replace an existing qdisc (honk/einat may own it).
+dpd_clsact_ready() {
+	local dev="$1"
+
+	tc qdisc show dev "$dev" 2>/dev/null | grep -q clsact && return 0
+	tc qdisc add dev "$dev" clsact 2>/dev/null && return 0
+	return 1
+}
+
+# ABI 20: attach the egress SNAT program to one uplink.
+dpd_attach_egress() {
+	local dev="$1"
+
+	[ -n "$dev" ] || return 1
+	[ -e "/sys/class/net/$dev" ] || return 1
+	[ -f "$DPD_OBJ" ] || { dpd_log "missing $DPD_OBJ"; return 1; }
+	dpd_bpffs_ensure || dpd_log "warning: /sys/fs/bpf is not a bpffs"
+	dpd_clsact_ready "$dev" || {
+		dpd_log "no clsact qdisc on $dev, cannot attach the egress SNAT"
+		return 1
+	}
+	tc filter del dev "$dev" egress pref "$DPD_PREF" 2>/dev/null
+	if ! tc filter add dev "$dev" egress pref "$DPD_PREF" handle "$DPD_PREF" \
+		bpf da obj "$DPD_OBJ" sec "$DPD_SEC_EGRESS"; then
+		dpd_log "tc filter add (egress) failed on $dev"
+		return 1
+	fi
+	return 0
+}
+
+dpd_detach_egress() {
+	[ -e "/sys/class/net/$1" ] || return 0
+	tc filter del dev "$1" egress pref "$DPD_PREF" 2>/dev/null
+	return 0
+}
+
+# ABI 20: keep the egress SNAT hook in step with `nat_forward`. Attached on
+# every uplink when DPD owns NAT, removed otherwise. Called from start, gate
+# refresh and the WAN hotplug path, so a config change never leaves a stale
+# rewrite hook behind.
+dpd_nat_egress_sync() {
+	local dev nf attach=0
+
+	config_load dpd_fastpath
+	config_get nf global nat_forward 'einat'
+	if [ "$nf" = "dpd" ]; then
+		# Attach only when bpftool positively confirms einat is gone
+		# from every uplink. "cannot tell" (no bpftool) is treated as
+		# unsafe: two SNAT programs on one packet is worse than no DPD
+		# NAT, and the gate refuses to accelerate in the same state.
+		dpd_einat_any_uplink
+		case "$?" in
+		1) attach=1 ;;
+		0) dpd_log "nat_forward=dpd but einat is still attached on an uplink: egress SNAT stays off" ;;
+		*) dpd_log "nat_forward=dpd but the uplinks cannot be checked (no bpftool): egress SNAT stays off" ;;
+		esac
+	fi
+	for dev in $(dpd_uplink_devs | awk '!seen[$0]++'); do
+		[ -e "/sys/class/net/$dev" ] || continue
+		if [ "$attach" = 1 ]; then
+			dpd_teach_nat_addr "$dev"
+			dpd_attach_egress "$dev" ||
+				dpd_log "nat_forward=dpd: egress SNAT not attached on $dev"
+		else
+			dpd_detach_egress "$dev"
+		fi
+	done
+	return 0
+}
+
 # Low-level attach to one device. No bridge recursion.
 dpd_attach_one() {
 	local dev="$1"
@@ -158,6 +244,7 @@ dpd_detach_if() {
 
 	[ -e "/sys/class/net/$dev" ] || return 0
 	tc filter del dev "$dev" ingress pref "$DPD_PREF" 2>/dev/null
+	dpd_detach_egress "$dev"
 	if [ -d "/sys/class/net/$dev/brif" ]; then
 		for p in /sys/class/net/"$dev"/brif/*; do
 			[ -e "$p" ] || continue
@@ -235,7 +322,7 @@ dpd_attach_logical() {
 dpd_push_uci() {
 	local enabled="$1" mode="$2" redirect="$3" ttl="$4" policy="$5"
 	local refresh="$6" ipv6="$7" mss="$8" accel="$9" ttl_tcp="${10}"
-	local ttl_udp="${11}" ttl_udp1="${12}"
+	local ttl_udp="${11}" ttl_udp1="${12}" nf pmin pmax
 
 	[ -x "$DPD_CTL" ] || return 0
 	"$DPD_CTL" set mode "$mode" 2>/dev/null
@@ -263,6 +350,19 @@ dpd_push_uci() {
 	[ -n "$ipv6" ] && "$DPD_CTL" set ipv6 "$ipv6" 2>/dev/null
 	[ -n "$mss" ] && "$DPD_CTL" set mss "$mss" 2>/dev/null
 	[ -n "$policy" ] && "$DPD_CTL" set policy "$policy" 2>/dev/null
+	# ABI 20: who owns the forward SNAT. The gate has already refused to
+	# accelerate when nat_forward=dpd and einat is still on an uplink, so
+	# this only publishes the choice; the port range is the allocator's.
+	config_load dpd_fastpath
+	config_get nf global nat_forward 'einat'
+	config_get pmin global nat_port_min 20000
+	config_get pmax global nat_port_max 29999
+	case "$nf" in
+	dpd)	"$DPD_CTL" set nat_forward 1 2>/dev/null ;;
+	*)	"$DPD_CTL" set nat_forward 0 2>/dev/null ;;
+	esac
+	"$DPD_CTL" set nat_port_min "$pmin" 2>/dev/null
+	"$DPD_CTL" set nat_port_max "$pmax" 2>/dev/null
 	"$DPD_CTL" set enable "$enabled" 2>/dev/null
 	return 0
 }
@@ -293,11 +393,11 @@ dpd_pins_compat() {
 	[ "$cur" = "$want" ] && return 0
 
 	dpd_log "ABI changed ($cur -> $want): dropping stale pinned maps"
-	# ABI 12 merged the counters into dpd_cfg's per-CPU value; older images
-	# may still have a dpd_stats pin, so remove it too if present.
-	rm -f /sys/fs/bpf/dpd_cfg /sys/fs/bpf/dpd_stats /sys/fs/bpf/dpd_flows \
-		/sys/fs/bpf/dpd_iface /sys/fs/bpf/dpd_vlans \
-		/sys/fs/bpf/dpd_mtu /sys/fs/bpf/dpd_wans 2>/dev/null
+	# libbpf's tc loader pins under /sys/fs/bpf/tc/globals (the older releases
+	# used /sys/fs/bpf directly), so clear both. ABI 12 merged the counters
+	# into dpd_cfg; ABI 19/20 added the NAT maps. Removing every dpd_* pin is
+	# the point: any value whose layout changed makes tc refuse to reload.
+	rm -f /sys/fs/bpf/dpd_* /sys/fs/bpf/tc/globals/dpd_* 2>/dev/null
 	return 0
 }
 
@@ -403,7 +503,7 @@ dpd_status_publish() {
 }
 
 dpd_gate_mode() {
-	local mode="$1" enabled="${2:-1}" why="" code="ok" r
+	local mode="$1" enabled="${2:-1}" why="" code="ok" r nf="einat"
 
 	if [ "$enabled" != "1" ]; then
 		code=uci-disabled
@@ -427,7 +527,21 @@ dpd_gate_mode() {
 			code=no-uplink
 			why="no uplink (no WAN device or no default route), so there is no forwarding path to accelerate and hooking the LAN would only steal traffic addressed to the router itself"
 		fi
-		if [ "$code" = "ok" ]; then
+		config_load dpd_fastpath
+		config_get nf global nat_forward 'einat'
+		if [ "$code" = "ok" ] && [ "$nf" = "dpd" ]; then
+			# ABI 20: DPD owns SNAT, so einat must be gone from every
+			# uplink. fw4 still needs its own WAN->LAN accept for the
+			# untracked return path; that is documented, not inferable.
+			dpd_einat_any_uplink
+			r=$?
+			case "$r" in
+			0) code=nat-forward-conflict
+			   why="nat_forward=dpd but einat is still attached on an uplink; detach einat's TCX hooks first, otherwise both SNAT the same packet" ;;
+			2) code=einat-uplink-unknown
+			   why="nat_forward=dpd but bpftool cannot confirm the uplinks are free of einat; refusing to risk a double SNAT" ;;
+			esac
+		elif [ "$code" = "ok" ]; then
 			dpd_einat_attached
 			r=$?
 			case "$r" in
@@ -439,7 +553,7 @@ dpd_gate_mode() {
 		fi
 		# and it must be on the uplink we actually steer into, not just
 		# somewhere on the box
-		if [ "$code" = "ok" ]; then
+		if [ "$code" = "ok" ] && [ "$nf" != "dpd" ]; then
 			dpd_einat_on_uplink
 			r=$?
 			case "$r" in
@@ -535,6 +649,9 @@ dpd_gate_refresh_uci() {
 	*)	"$DPD_CTL" set nat_ingress 0 2>/dev/null ;;
 	esac
 	dpd_push_vlans "$policy" "$vlans"
+	# ABI 20: the egress SNAT hook is part of the NAT ownership decision, so
+	# it follows the same single source of truth.
+	dpd_nat_egress_sync
 	# The attachment invariant survives mode changes: a filter that was only a
 	# counter while observing starts *accelerating* the moment einat attaches,
 	# and the decision to attach is per event. An image upgraded in place can
@@ -713,6 +830,29 @@ dpd_einat_on_uplink() {
 	done
 	[ "$n" -gt 0 ] || return 2
 	return 0
+}
+
+# ABI 20: is einat still attached on ANY uplink? With nat_forward=dpd that is
+# a configuration error, not a missing dependency: both programs would SNAT the
+# same packet (einat's TCX egress runs first and rewrites, then our egress sees
+# the already-rewritten tuple and allocates a second binding).
+#
+# 0 = einat on at least one uplink, 1 = no uplink carries einat, 2 = unknown.
+dpd_einat_any_uplink() {
+	local d n=0
+
+	command -v bpftool >/dev/null 2>&1 || return 2
+	for d in $(dpd_uplink_devs); do
+		[ -n "$d" ] || continue
+		n=$((n + 1))
+		if bpftool net show 2>/dev/null | grep -E "^${d}\(" |
+			grep -qE 'ingress_rev_snat|egress_snat'; then
+			dpd_log "gate: uplink $d still carries einat"
+			return 0
+		fi
+	done
+	[ "$n" -gt 0 ] || return 2
+	return 1
 }
 
 # Do honk's TCX programs own the datapath on the devices this program hooks?

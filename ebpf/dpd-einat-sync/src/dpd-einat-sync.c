@@ -67,6 +67,7 @@ struct nat_rev_val {
 	__u32 saddr;
 	__u16 sport;
 	__u16 pad;
+	__u32 ts_ms;	/* ABI 20: 0 = mirrored/foreign, never a DPD stamp */
 } __attribute__((packed));
 
 static int bpf_call(enum bpf_cmd cmd, union bpf_attr *attr)

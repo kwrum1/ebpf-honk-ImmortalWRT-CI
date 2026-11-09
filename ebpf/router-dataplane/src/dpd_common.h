@@ -207,8 +207,21 @@
  *      DPD before the UFS lookup. With einat's ingress attached (default) it
  *      already DNATed the packet, the reverse key does not match and DPD
  *      does nothing, so the mode is safe by default.
+ *
+ * 20: DPD-owned forward SNAT + port allocation (`nat_forward=dpd`). A TC
+ *      *egress* program (`classifier/egress`) on every uplink owns the
+ *      forward rewrite: it looks up `dpd_nat` for the internal tuple and,
+ *      on a miss, allocates a port from [nat_port_min, nat_port_max] by
+ *      probing `dpd_nat_rev` (which now carries a monotonic timestamp),
+ *      writes both directions and rewrites saddr/sport with incremental
+ *      checksums. The ingress program skips the einat binding gate in
+ *      this mode; the return half is the ABI 19 `dpd_nat_rev` DNAT. The
+ *      external address is the uplink's `dpd_iface_val.addr4`, taught by
+ *      `dpdctl nat_addr`. einat must not be attached on the uplink
+ *      (double NAT) and fw4 needs a WAN->LAN accept for the untracked
+ *      return path; the default (`nat_forward=einat`) is unchanged.
  */
-#define DPD_ABI_VERSION		19
+#define DPD_ABI_VERSION		20
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -216,6 +229,8 @@
 #define DPD_BPF_SECTION		"classifier/l2"
 #define DPD_SEC_L2		"classifier/l2"
 #define DPD_SEC_L3		"classifier/l3"
+/* ABI 20: egress SNAT program, attached to the uplinks only. */
+#define DPD_SEC_EGRESS		"classifier/egress"
 
 /* TC priority. The interception layer owns TCX (no pref at all), so this pref
  * only orders us among *classic* filters: router-acl owns 90 on the WAN, we own
@@ -344,6 +359,14 @@ struct dpd_config {
 	 * dpd_nat_rev (requires einat's ingress TCX to be detached; with it
 	 * attached this is a no-op because the packet is already DNATed). */
 	__u32	nat_ingress;
+	/* ABI 20: 1 = the egress SNAT program owns the forward rewrite and
+	 * allocates ports itself (einat must be detached from the uplink).
+	 * 0 = einat's TCX egress owns SNAT, as before. */
+	__u32	nat_forward;
+	/* ABI 20: external port range for nat_forward=dpd, host byte order,
+	 * inclusive. 0 means "use the default" (20000..29999). */
+	__u32	nat_port_min;
+	__u32	nat_port_max;
 };
 
 enum dpd_stat_idx {
@@ -416,6 +439,12 @@ enum dpd_stat_idx {
 	 *			 * packet handed back to the stack	*/
 	ST_NAT_DNAT,		/* ABI 19: return-path DNAT applied by DPD
 	 *			 * (einat ingress detached)		*/
+	ST_NAT_SNAT,		/* ABI 20: forward SNAT rewritten on the
+	 *			 * egress hook (hit or fresh allocation)	*/
+	ST_NAT_ALLOC,		/* ABI 20: a new external port binding was
+	 *			 * allocated by the egress program		*/
+	ST_NAT_EXHAUST,		/* ABI 20: every probe in the port range was
+	 *			 * taken; packet left un-NATed		*/
 	ST__MAX,
 };
 
@@ -446,6 +475,12 @@ enum dpd_stat_idx {
 struct dpd_iface_val {
 	__u32	flags;
 	__u32	gw4;
+	/* ABI 20: the interface's primary IPv4 address (network order, 0 =
+	 * none), taught by `dpdctl nat_addr`. The egress SNAT program uses it
+	 * as the external address and refuses to touch a device whose addr4 is
+	 * unset, so teaching it is also the NAT-uplink selector. */
+	__be32	addr4;
+	__u32	_pad;
 };
 
 /* dpd_flow_val.flags: the emit class (see dpd_emit_class()). L2 = write the
@@ -581,6 +616,44 @@ struct dpd_class_val {
 };
 
 #define DPD_CLASS_MAX		16384
+
+/* NAT binding tables (ABI 15/19/20). Kept here instead of only in the BPF
+ * source so dpdctl can dump them; dpd-einat-sync keeps its own packed mirror
+ * because it reads the map by id from a different object.
+ *
+ * dpd_nat:      pre-SNAT internal 3-tuple -> external address/port.
+ * dpd_nat_rev:  external 3-tuple -> internal address/port, and (ABI 20) the
+ *               egress port allocator's ownership table.
+ *
+ * ts_ms is CLOCK_MONOTONIC in milliseconds, truncated to 32 bits; 0 means
+ * "foreign" (mirrored from einat) and the allocator treats it as stale. The
+ * external port is stored in network byte order on both sides. */
+struct dpd_nat_key {
+	__be32	saddr;
+	__be16	sport;
+	__u8	proto;
+	__u8	_pad;
+};
+
+struct dpd_nat_val {
+	__be32	to_addr;
+	__be16	to_port;
+	__u16	_pad;
+};
+
+struct dpd_nat_rev_key {
+	__be32	daddr;
+	__be16	dport;
+	__u8	proto;
+	__u8	_pad;
+};
+
+struct dpd_nat_rev_val {
+	__be32	saddr;
+	__be16	sport;
+	__u16	_pad;
+	__u32	ts_ms;		/* ABI 20: port ownership stamp	*/
+};
 
 /* The epoch occupies the high byte of dpd_flow_val.wan; the index itself can
  * never exceed DPD_WAN_MAX (8). */

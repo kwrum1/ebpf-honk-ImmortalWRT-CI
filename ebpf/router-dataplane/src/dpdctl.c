@@ -194,6 +194,7 @@ static const char *stat_name(int i)
 		"bytes_v4", "bytes_v6", "bytes_hit_v4", "bytes_hit_v6",
 		"l2_v4", "l2_v6", "nat_gone", "flow_fin",
 		"flow_bind", "flow_block", "flow_skip", "nat_dnat",
+		"nat_snat", "nat_alloc", "nat_exhaust",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -263,6 +264,12 @@ static int cmd_set(int argc, char **argv)
 		cfg.class_enable = strtoul(argv[1], NULL, 0) ? 1 : 0;
 	} else if (!strcmp(argv[0], "nat_ingress")) {
 		cfg.nat_ingress = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "nat_forward")) {
+		cfg.nat_forward = strtoul(argv[1], NULL, 0) ? 1 : 0;
+	} else if (!strcmp(argv[0], "nat_port_min")) {
+		cfg.nat_port_min = strtoul(argv[1], NULL, 0);
+	} else if (!strcmp(argv[0], "nat_port_max")) {
+		cfg.nat_port_max = strtoul(argv[1], NULL, 0);
 	} else if (!strcmp(argv[0], "policy")) {
 		if (policy_parse(argv[1], &cfg.policy)) {
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
@@ -319,6 +326,13 @@ static int cmd_show(void)
 	printf("nat_ingress  %u%s\n", cfg.nat_ingress,
 	       cfg.nat_ingress ? " (DPD does return-path DNAT)"
 			       : " (einat ingress owns it)");
+	printf("nat_forward  %u%s\n", cfg.nat_forward,
+	       cfg.nat_forward ? " (DPD egress does SNAT + port allocation)"
+			       : " (einat egress owns SNAT)");
+	printf("nat_ports    %u-%u%s\n",
+	       cfg.nat_port_min ? cfg.nat_port_min : 20000,
+	       cfg.nat_port_max ? cfg.nat_port_max : 29999,
+	       (cfg.nat_port_min && cfg.nat_port_max) ? "" : " (default)");
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -516,8 +530,10 @@ static int cmd_ifaces(int argc, char **argv)
 		{
 			struct dpd_iface_val old = {};
 
-			if (dpd_bpf_map_lookup_elem(fd, &ifindex, &old) == 0)
+			if (dpd_bpf_map_lookup_elem(fd, &ifindex, &old) == 0) {
 				val.gw4 = old.gw4;
+				val.addr4 = old.addr4;
+			}
 		}
 
 		if (dpd_bpf_map_update_elem(fd, &ifindex, &val, BPF_ANY)) {
@@ -582,6 +598,122 @@ static int cmd_gw(int argc, char **argv)
 		return 1;
 	}
 	printf("%-16s gw=%s\n", argv[0], argv[1]);
+	return 0;
+}
+
+/*
+ * ABI 20: teach an uplink's NAT source address. The egress SNAT program uses
+ * dpd_iface[ifindex].addr4 as the external address; leaving it unset is also
+ * how every non-uplink device opts out of the egress program.
+ */
+static int cmd_nat_addr(int argc, char **argv)
+{
+	struct dpd_iface_val v = {};
+	struct in_addr a;
+	uint32_t ifindex;
+	int fd;
+
+	if (argc < 2) {
+		fprintf(stderr, "usage: dpdctl nat_addr <ifname> <ipv4|0.0.0.0>\n");
+		return 1;
+	}
+	ifindex = if_nametoindex(argv[0]);
+	if (!ifindex) {
+		fprintf(stderr, "dpdctl: no such iface '%s'\n", argv[0]);
+		return 1;
+	}
+	if (inet_pton(AF_INET, argv[1], &a) != 1) {
+		fprintf(stderr, "dpdctl: not an IPv4 address: '%s'\n", argv[1]);
+		return 1;
+	}
+	fd = map_open("dpd_iface");
+	if (fd < 0)
+		return 1;
+	/* preserve flags and gw4: this is one field of the same entry */
+	dpd_bpf_map_lookup_elem(fd, &ifindex, &v);
+	v.addr4 = a.s_addr;
+	if (dpd_bpf_map_update_elem(fd, &ifindex, &v, BPF_ANY)) {
+		fprintf(stderr, "dpdctl: update dpd_iface[%s].addr4: %s\n",
+			argv[0], strerror(errno));
+		return 1;
+	}
+	printf("%-16s nat_addr=%s\n", argv[0], argv[1]);
+	return 0;
+}
+
+static const char *proto_name(uint32_t p)
+{
+	switch (p) {
+	case IPPROTO_TCP:	return "tcp";
+	case IPPROTO_UDP:	return "udp";
+	case IPPROTO_ICMP:	return "icmp";
+	default:		return "ip";
+	}
+}
+
+/* ABI 20: dump the NAT tables. `-a` adds the reverse (return-path) table,
+ * whose timestamp is CLOCK_MONOTONIC ms (0 = mirrored from einat). */
+static int cmd_nat(int argc, char **argv)
+{
+	struct dpd_nat_key k, nk;
+	struct dpd_nat_val v;
+	struct dpd_nat_rev_key rk, rnk;
+	struct dpd_nat_rev_val rv;
+	int fd, n = 0, rn = 0;
+	int all = argc > 0 && !strcmp(argv[0], "-a");
+
+	fd = map_open("dpd_nat");
+	if (fd >= 0) {
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			for (;;) {
+				char sa[INET_ADDRSTRLEN] = "?";
+				char ea[INET_ADDRSTRLEN] = "?";
+
+				memset(&v, 0, sizeof(v));
+				if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
+					inet_ntop(AF_INET, &k.saddr, sa, sizeof(sa));
+					inet_ntop(AF_INET, &v.to_addr, ea, sizeof(ea));
+					printf("%-4s %s:%-5u -> %s:%u\n",
+					       proto_name(k.proto), sa,
+					       ntohs(k.sport), ea, ntohs(v.to_port));
+					n++;
+				}
+				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+					break;
+				k = nk;
+			}
+		}
+		close(fd);
+	}
+	printf("forward bindings: %d\n", n);
+	if (!all)
+		return 0;
+
+	fd = map_open("dpd_nat_rev");
+	if (fd >= 0) {
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &rk)) {
+			for (;;) {
+				char ea[INET_ADDRSTRLEN] = "?";
+				char ia[INET_ADDRSTRLEN] = "?";
+
+				memset(&rv, 0, sizeof(rv));
+				if (!dpd_bpf_map_lookup_elem(fd, &rk, &rv)) {
+					inet_ntop(AF_INET, &rk.daddr, ea, sizeof(ea));
+					inet_ntop(AF_INET, &rv.saddr, ia, sizeof(ia));
+					printf("rev  %-4s %s:%-5u -> %s:%u ts=%u\n",
+					       proto_name(rk.proto), ea,
+					       ntohs(rk.dport), ia, ntohs(rv.sport),
+					       rv.ts_ms);
+					rn++;
+				}
+				if (dpd_bpf_map_get_next_key(fd, &rk, &rnk))
+					break;
+				rk = rnk;
+			}
+		}
+		close(fd);
+	}
+	printf("reverse bindings: %d\n", rn);
 	return 0;
 }
 
@@ -1388,6 +1520,9 @@ static int status_json(void)
 		printf(", \"flow_counters\": %u, \"class_enable\": %u",
 		       cfg.flow_counters, cfg.class_enable);
 		printf(", \"nat_ingress\": %u", cfg.nat_ingress);
+		printf(", \"nat_forward\": %u, \"nat_port_min\": %u, "
+		       "\"nat_port_max\": %u", cfg.nat_forward,
+		       cfg.nat_port_min, cfg.nat_port_max);
 		printf(", \"policy\": ");
 		json_string(policy_name(cfg.policy));
 		printf(" },\n");
@@ -1588,18 +1723,27 @@ static int status_text(void)
 
 		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
 			for (;;) {
-				uint32_t v = 0, mtu = 0;
+				struct dpd_iface_val iv = {};
+				char na[INET_ADDRSTRLEN] = "-";
+				uint32_t mtu = 0;
 
-				if (!dpd_bpf_map_lookup_elem(fd, &k, &v)) {
+				/* read the whole value: the syscall copies
+				 * sizeof(value) bytes, so a bare uint32_t here
+				 * overflows the stack (the same bug fixed in
+				 * cmd_show while testing ABI 17). */
+				if (!dpd_bpf_map_lookup_elem(fd, &k, &iv)) {
 					if (mfd >= 0)
 						dpd_bpf_map_lookup_elem(mfd, &k.ifindex,
 									&mtu);
-					printf("    %-16s mtu=%-5u%s%s%s%s\n",
-					       ifname(k.ifindex), mtu,
-					       v & DPD_IF_F_UP ? " UP" : "",
-					       v & DPD_IF_F_NOARP ? " NOARP" : "",
-					       v & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
-					       v & DPD_IF_F_LOWER ? " LOWER" : "");
+					if (iv.addr4)
+						inet_ntop(AF_INET, &iv.addr4, na,
+							  sizeof(na));
+					printf("    %-16s mtu=%-5u nat=%-15s%s%s%s%s\n",
+					       ifname(k.ifindex), mtu, na,
+					       iv.flags & DPD_IF_F_UP ? " UP" : "",
+					       iv.flags & DPD_IF_F_NOARP ? " NOARP" : "",
+					       iv.flags & DPD_IF_F_POINTOPOINT ? " POINTOPOINT" : "",
+					       iv.flags & DPD_IF_F_LOWER ? " LOWER" : "");
 				}
 				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
 					break;
@@ -1670,6 +1814,12 @@ static void usage(const char *argv0)
 		"  set class <0|1>         consult the dpd_class policy cache\n"
 		"  set nat_ingress <0|1>   1 = DPD does return-path DNAT from\n"
 		"                          dpd_nat_rev (einat ingress must be off)\n"
+		"  set nat_forward <0|1>   1 = DPD's egress program does SNAT and\n"
+		"                          port allocation (einat egress must be off)\n"
+		"  set nat_port_min <p>    external port range (default 20000)\n"
+		"  set nat_port_max <p>    external port range (default 29999)\n"
+		"  nat_addr <ifname> <ipv4>  teach the NAT source address of an uplink\n"
+		"  nat [-a]                dump forward bindings (-a: reverse too)\n"
 		"  class add|del <if> <tcp|udp> <saddr> <sport> <daddr> <dport>\n"
 		"        <forward|proxy|block|local> [skb_priority]\n"
 		"  class list|flush        inspect/clear the policy cache\n"
@@ -1712,6 +1862,10 @@ int main(int argc, char **argv)
 		return cmd_ifaces(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "gw"))
 		return cmd_gw(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "nat_addr"))
+		return cmd_nat_addr(argc - 2, argv + 2);
+	if (!strcmp(argv[1], "nat"))
+		return cmd_nat(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "flows"))
 		return cmd_flows(argc - 2, argv + 2);
 	if (!strcmp(argv[1], "class"))
