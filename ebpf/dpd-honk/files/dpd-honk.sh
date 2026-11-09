@@ -6,7 +6,15 @@
 #   * bump the DPD flow-cache epoch when honk's config changes, so flows that
 #     were classified before a proxy policy change are re-evaluated.
 . /usr/share/libubox/jshn.sh
+. /lib/functions.sh
 . /usr/libexec/dpd-fastpath.sh 2>/dev/null || true
+
+# UCI switch. A disabled daemon stays alive but idle instead of exiting:
+# procd would respawn an exited instance, and this service is a status
+# producer, not a watchdog.
+config_load dpd_honk
+config_get_bool enabled main enabled 1
+[ "$enabled" = 1 ] || { while true; do sleep 3600; done; }
 
 OUT=/var/run/dpd
 mkdir -p "$OUT"

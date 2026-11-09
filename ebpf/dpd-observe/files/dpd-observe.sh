@@ -1,5 +1,13 @@
 #!/bin/sh
 # Compose the DPD status document once, for ubus/LuCI/scripts.
+. /lib/functions.sh
+
+# UCI switch. A disabled daemon stays alive but idle: procd would otherwise
+# respawn an exited instance.
+config_load dpd_observe
+config_get_bool enabled main enabled 1
+[ "$enabled" = 1 ] || { while true; do sleep 3600; done; }
+
 OUT=/var/run/dpd
 mkdir -p "$OUT"
 
