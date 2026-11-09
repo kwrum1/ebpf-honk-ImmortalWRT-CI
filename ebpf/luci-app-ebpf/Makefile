@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ebpf
 PKG_VERSION:=0.7.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=ebpf
 
@@ -20,7 +20,7 @@ endef
 define Package/luci-app-ebpf/description
   Menu layout and the pages this firmware keeps by hand:
 
-    * Network -> 防火墙    (five-tuple port control for IPv4 and IPv6 on top of
+    * Network -> 防火�?   (five-tuple port control for IPv4 and IPv6 on top of
                             fw4; firewall.ebpf999 always blocks unsolicited
                             inbound and is not exposed in the UI)
     * Network -> DNS       (SmartDNS, the only resolver; it owns :53)

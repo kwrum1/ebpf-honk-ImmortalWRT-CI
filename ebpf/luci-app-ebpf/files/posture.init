@@ -80,11 +80,17 @@ dhcp_self_guard() {
 start_service() {
 	local z changed=0
 
-	# --- firewall posture: open by default, full-cone IPv4 -------------------
+	# --- firewall posture: default deny, full-cone IPv4 ----------------------
+	# The simple-firewall page (Network -> 简易防火墙) manages the only
+	# inbound allows. Both families share the wan zone; rule 999 below is the
+	# belt-and-braces WAN->LAN reject.
 	z=$(wan_zone)
 	if [ -n "$z" ]; then
-		set_uci firewall "$z" forward ACCEPT && changed=1
+		set_uci firewall "$z" input REJECT && changed=1
+		set_uci firewall "$z" forward REJECT && changed=1
 	fi
+	set_uci firewall '@defaults[0]' input REJECT && changed=1
+	set_uci firewall '@defaults[0]' forward REJECT && changed=1
 	set_uci firewall '@defaults[0]' fullcone 1 && changed=1
 	# Belt and braces: router-tool/LuCI may re-apply flow offloading after the
 	# image's defaults; we are past firewall (S26), so re-assert it here. The
@@ -160,7 +166,7 @@ start_service() {
 	# consistent too (the ifup hotplug repeats it for every later change).
 	[ -x /usr/libexec/router-dns-sync ] && /usr/libexec/router-dns-sync
 
-	logger -t ebpf-posture "posture enforced (wan forward, fullcone, rule 999 on, SmartDNS only)"
+	logger -t ebpf-posture "posture enforced (wan input/forward reject, fullcone, rule 999 on, SmartDNS only)"
 }
 
 stop_service() {

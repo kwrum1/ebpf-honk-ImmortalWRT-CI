@@ -15,7 +15,13 @@ var callApply = rpc.declare({
 	params: [ 'timeout', 'rollback' ]
 });
 
-/* Network -> 防火墙: five-tuple port control, one WAN redirect per row.
+/* Network -> 简易防火墙: one WAN port list for IPv4 and IPv6.
+ *
+ * Two row kinds, chosen by the "目标" column:
+ *   - empty or 路由器 -> config rule, src=wan, target=ACCEPT. This lets the
+ *     port through to the router itself (INPUT).
+ *   - an IPv4/IPv6 address -> config redirect, src=wan, dest=lan,
+ *     target=DNAT. This forwards the port to a host behind the router.
  *
  * Why this is a hand-rolled table instead of form.GridSection:
  *   - GridSection's "+" always opens LuCI's "more options" modal, even when
@@ -29,12 +35,17 @@ var callApply = rpc.declare({
  *     delta and fires the config-change triggers (fw4 reload, and the ACL
  *     guard re-imports the port list).
  *
- * Rows are written through the uci RPC (the ACL-covered path, not /sbin/uci).
- * src=wan, dest=lan and target=DNAT
- * are filled in on save so the table only asks for the five tuple. An
- * incomplete row (no source port or no destination address) is dropped instead
- * of being handed to fw4.
+ * Ownership: every section this page creates carries dpd_simple=1. collect()
+ * only manages sections with that marker, plus legacy WAN->LAN DNAT redirects
+ * that predate the marker. The legacy rows are shown and get the marker on
+ * the next save; unrelated rules are never touched.
+ *
+ * A default-deny WAN is required for "only these ports are open" to be true.
+ * The page checks it but never changes it on its own: a visible warning and
+ * an explicit "设为默认拒绝" button are supplied instead.
  */
+
+var MARKER = 'dpd_simple';
 
 function uciVal(v) {
 	if (v == null)
@@ -43,13 +54,98 @@ function uciVal(v) {
 	return Array.isArray(v) ? v.join(' ') : String(v);
 }
 
+function trim(v) {
+	return uciVal(v).trim();
+}
+
 function uciProto(v) {
-	v = uciVal(v).trim();
+	v = trim(v);
 
 	if (v == '')
 		return 'tcp';
 
 	return v.split(/\s+/).sort().join(' ');
+}
+
+function uciFamily(v) {
+	v = trim(v);
+
+	return (v == 'ipv4' || v == 'ipv6') ? v : 'any';
+}
+
+function validIPv4(v) {
+	var parts = v.split('.');
+
+	if (parts.length != 4)
+		return false;
+
+	for (var i = 0; i < 4; i++) {
+		if (!/^(0|[1-9][0-9]{0,2})$/.test(parts[i]))
+			return false;
+		if (parseInt(parts[i], 10) > 255)
+			return false;
+	}
+
+	return true;
+}
+
+function validIPv6(v) {
+	if (v.indexOf(':') < 0 || !/^[0-9a-fA-F:.]+$/.test(v))
+		return false;
+
+	var halves = v.split('::');
+
+	if (halves.length > 2)
+		return false;
+
+	var head = (halves[0] === '') ? [] : halves[0].split(':');
+	var tail = (halves.length == 2 && halves[1] !== '') ? halves[1].split(':') : [];
+	var lists = [ head, tail ];
+	var groups = 0;
+
+	for (var i = 0; i < lists.length; i++) {
+		for (var j = 0; j < lists[i].length; j++) {
+			var g = lists[i][j];
+
+			if (g === '')
+				return false;
+
+			/* An embedded IPv4 address is only valid as the final group. */
+			if (i == lists.length - 1 && j == lists[i].length - 1 &&
+			    g.indexOf('.') >= 0) {
+				if (!validIPv4(g))
+					return false;
+				groups += 2;
+			}
+			else {
+				if (!/^[0-9a-fA-F]{1,4}$/.test(g))
+					return false;
+				groups++;
+			}
+		}
+	}
+
+	return (halves.length == 2) ? (groups <= 7) : (groups == 8);
+}
+
+function ipFamily(v) {
+	if (validIPv4(v))
+		return 4;
+
+	if (validIPv6(v))
+		return 6;
+
+	return 0;
+}
+
+function isDeny(v) {
+	v = trim(v).toUpperCase();
+
+	return (v == 'REJECT' || v == 'DROP');
+}
+
+function isAccept(v) {
+	return trim(v).toUpperCase() == 'ACCEPT';
 }
 
 return view.extend({
@@ -58,9 +154,8 @@ return view.extend({
 	 * ui.changes.apply() (the ubus/ACL path); this page has its own explicit
 	 * button that stages through the uci RPC, so the extra button was both a
 	 * duplicate and the source of the "no permission" error. Shadow the three
-	 * handlers with null so the base
-	 * footer is not rendered; the explicit button below the table is the only
-	 * one. */
+	 * handlers with null so the base footer is not rendered; the explicit
+	 * button below the table is the only one. */
 	handleSave: null,
 	handleSaveApply: null,
 	handleReset: null,
@@ -70,6 +165,8 @@ return view.extend({
 
 		self.rows = [];
 		self.removed = [];
+		self.def = null;
+		self.defaultDeny = false;
 
 		return uci.load('firewall').then(function() {
 			self.collect();
@@ -82,47 +179,110 @@ return view.extend({
 		self.rows = [];
 		self.removed = [];
 
-		uci.sections('firewall', 'redirect', function(sec) {
-			var src = uciVal(sec.src);
-			var dest = uciVal(sec.dest);
-			var target = uciVal(sec.target);
-
-			/* This page owns WAN DNAT port forwards. Do not touch a redirect
-			 * that another page/user pointed at a different zone or target. */
-			if ((src != '' && src != 'wan') ||
-			    (dest != '' && dest != 'lan') ||
-			    (target != '' && target != 'DNAT'))
+		/* UCI sections created by this page. The marker is the contract:
+		 * a section without it is someone else's rule. */
+		uci.sections('firewall', 'rule', function(sec) {
+			if (uciVal(sec[MARKER]) != '1')
 				return;
 
 			self.rows.push({
 				sid: sec['.name'],
+				secType: 'rule',
+				legacy: false,
 				name: uciVal(sec.name),
+				target: '',
+				port: uciVal(sec.dest_port),
+				dest_port: '',
 				proto: uciProto(sec.proto),
-				src_dport: uciVal(sec.src_dport),
-				src_ip: uciVal(sec.src_ip),
-				dest_ip: uciVal(sec.dest_ip),
-				dest_port: uciVal(sec.dest_port),
+				family: uciFamily(sec.family),
 				enabled: uciVal(sec.enabled) != '0'
 			});
 		});
+
+		uci.sections('firewall', 'redirect', function(sec) {
+			var owned = (uciVal(sec[MARKER]) == '1');
+			var src = trim(sec.src);
+			var dest = trim(sec.dest);
+			var target = trim(sec.target);
+
+			/* Migration: show WAN->LAN DNAT redirects written by the old
+			 * page (or by hand). They are adopted on the next save by
+			 * setting the marker. Everything else is left alone. */
+			if (!owned) {
+				if (src != 'wan' || dest != 'lan' || target != 'DNAT')
+					return;
+				if (trim(sec.dest_ip) == '')
+					return;
+			}
+
+			self.rows.push({
+				sid: sec['.name'],
+				secType: 'redirect',
+				legacy: !owned,
+				name: uciVal(sec.name),
+				target: uciVal(sec.dest_ip),
+				port: uciVal(sec.src_dport),
+				dest_port: uciVal(sec.dest_port),
+				proto: uciProto(sec.proto),
+				family: uciFamily(sec.family),
+				enabled: uciVal(sec.enabled) != '0'
+			});
+		});
+
+		self.checkDefaultDeny();
+	},
+
+	checkDefaultDeny: function() {
+		var self = this;
+		var def = {
+			defaultsSid: null,
+			defaults: {},
+			wanSid: null,
+			wan: {}
+		};
+
+		uci.sections('firewall', 'defaults', function(sec) {
+			if (!def.defaultsSid) {
+				def.defaultsSid = sec['.name'];
+				def.defaults = sec;
+			}
+		});
+
+		uci.sections('firewall', 'zone', function(sec) {
+			if (trim(sec.name) == 'wan' && !def.wanSid) {
+				def.wanSid = sec['.name'];
+				def.wan = sec;
+			}
+		});
+
+		def.defaultsOk = (def.defaultsSid != null) &&
+			isDeny(def.defaults.input) && isDeny(def.defaults.forward);
+		def.wanMissing = (def.wanSid == null);
+		def.wanOk = !def.wanMissing &&
+			!isAccept(def.wan.input) && !isAccept(def.wan.forward);
+
+		self.def = def;
+		self.defaultDeny = def.defaultsOk && def.wanOk;
 	},
 
 	render: function() {
 		var self = this;
 
 		self.tbody = E('tbody');
+		self.warnBox = E('div');
 
 		self.renderRows();
+		self.renderWarning();
 
 		var table = E('table', { 'class': 'table' }, [
 			E('thead', {}, [
 				E('tr', { 'class': 'tr table-titles' }, [
 					E('th', { 'class': 'th' }, [ _('名称') ]),
+					E('th', { 'class': 'th' }, [ _('目标') ]),
+					E('th', { 'class': 'th' }, [ _('端口') ]),
+					E('th', { 'class': 'th' }, [ _('目标端口') ]),
 					E('th', { 'class': 'th' }, [ _('协议') ]),
-					E('th', { 'class': 'th' }, [ _('源端口') ]),
-					E('th', { 'class': 'th' }, [ _('源地址') ]),
-					E('th', { 'class': 'th' }, [ _('目的地址') ]),
-					E('th', { 'class': 'th' }, [ _('目的端口') ]),
+					E('th', { 'class': 'th' }, [ _('地址族') ]),
 					E('th', { 'class': 'th' }, [ _('启用') ]),
 					E('th', { 'class': 'th' }, [ _('操作') ])
 				])
@@ -131,15 +291,19 @@ return view.extend({
 		]);
 
 		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, [ _('防火墙') ]),
+			E('h2', {}, [ _('简易防火墙') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('WAN 入站端口控制：每一行是一条 fw4 redirect。' +
-				  '只填源端口和目的地址即可；目的端口留空时与源端口相同，' +
-				  'src=wan / dest=lan / target=DNAT 会自动补齐。')
+				_('默认拒绝 WAN 入站（v4+v6），只放行下面列出的端口；' +
+				  '目标留空=放行到路由器，填 IP=转发到内网主机。'),
+				E('br'),
+				_('端口支持单个、范围（8000-8010）和空格分隔的多个值；' +
+				  '“目标端口”只在转发时使用，留空表示与“端口”相同。')
 			]),
 
+			self.warnBox,
+
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ _('端口控制') ]),
+				E('h3', {}, [ _('WAN 端口') ]),
 				table,
 				E('div', { 'class': 'cbi-section-create' }, [
 					E('button', {
@@ -148,7 +312,8 @@ return view.extend({
 					}, [ _('添加规则') ])
 				]),
 				E('div', { 'class': 'cbi-value-description' }, [
-					_('“添加规则”直接加一行，不弹确认框；填好后点下面的“保存并应用”。')
+					_('“添加规则”直接加一行，不弹确认框；填好后点下面的“保存并应用”。' +
+					  '“目标”留空或填“路由器”=放行到路由器；填 IP=转发到内网主机。')
 				])
 			]),
 
@@ -159,6 +324,89 @@ return view.extend({
 				}, [ _('保存并应用') ])
 			])
 		]);
+	},
+
+	renderWarning: function() {
+		var self = this;
+
+		if (!self.warnBox)
+			return;
+
+		while (self.warnBox.firstChild)
+			self.warnBox.removeChild(self.warnBox.firstChild);
+
+		if (self.defaultDeny || !self.def)
+			return;
+
+		var reasons = [];
+
+		if (!self.def.defaultsOk)
+			reasons.push(_('firewall defaults 的 input/forward 不是 REJECT/DROP'));
+
+		if (self.def.wanMissing)
+			reasons.push(_('没有找到 name=wan 的防火墙区域'));
+		else if (isAccept(self.def.wan.input) || isAccept(self.def.wan.forward))
+			reasons.push(_('WAN 区域的 input/forward 是 ACCEPT'));
+
+		self.warnBox.appendChild(E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, [ _('默认拒绝未生效') ]),
+			E('div', { 'class': 'alert-message warning' }, [
+				E('p', {}, [
+					_('当前防火墙没有对 WAN 入站默认拒绝，' +
+					  '下面的端口列表不会限制未列出的端口。')
+				]),
+				E('p', {}, [ reasons.join('；') ]),
+				E('p', {}, [
+					_('“设为默认拒绝”会把 defaults 与 WAN 区域的 input/forward 设为 REJECT；' +
+					  'output 保持 ACCEPT，其他规则不动。')
+				]),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-negative important',
+					click: function() { return self.applyDefaultDeny(); }
+				}, [ _('设为默认拒绝') ])
+			])
+		]));
+	},
+
+	applyDefaultDeny: function() {
+		var self = this;
+		var def = self.def;
+
+		if (!def || !def.defaultsSid) {
+			ui.addNotification(null, E('p', {}, [
+				_('没有找到 firewall defaults 段，无法设置默认拒绝。')
+			]), 'danger');
+			return Promise.resolve();
+		}
+
+		/* Only input/forward are changed. output stays as configured, and
+		 * nothing is touched before the user presses the button. */
+		uci.set('firewall', def.defaultsSid, 'input', 'REJECT');
+		uci.set('firewall', def.defaultsSid, 'forward', 'REJECT');
+
+		if (def.wanSid) {
+			uci.set('firewall', def.wanSid, 'input', 'REJECT');
+			uci.set('firewall', def.wanSid, 'forward', 'REJECT');
+		}
+
+		return uci.save().then(function() {
+			return callApply(0, false);
+		}).then(function() {
+			return self.reload();
+		}).then(function() {
+			if (def.wanSid)
+				ui.addNotification(null, E('p', {}, [
+					_('已设为默认拒绝并应用')
+				]), 'info');
+			else
+				ui.addNotification(null, E('p', {}, [
+					_('已设置 defaults 默认拒绝；未找到 WAN 区域，请手动检查。')
+				]), 'warning');
+		}).catch(function(e) {
+			ui.addNotification(null, E('p', {}, [
+				e.message || String(e)
+			]), 'danger');
+		});
 	},
 
 	renderRows: function() {
@@ -196,37 +444,53 @@ return view.extend({
 			return E('input', attrs);
 		}
 
-		row.elName = input(row.name, _('可选'), '9em');
-		row.elSrcDport = input(row.src_dport, '8080 / 8000-8010', '10em');
-		row.elSrcIp = input(row.src_ip, _('任意'), '9em');
-		row.elDestIp = input(row.dest_ip, '192.168.1.10', '10em');
-		row.elDestPort = input(row.dest_port, _('同源端口'), '8em');
+		function select(options, value) {
+			var el = E('select', { 'class': 'cbi-input-select' });
+
+			options.forEach(function(o) {
+				el.appendChild(E('option', { 'value': o.value }, [ o.label ]));
+			});
+			el.value = value;
+
+			return el;
+		}
+
+		row.elName = input(row.name, _('可选'), '8em');
+		row.elTarget = input(row.target, _('留空=路由器 / 填 IP=转发'), '13em');
+		row.elPort = input(row.port, '8080 / 8000-8010', '11em');
+		row.elDestPort = input(row.dest_port, _('同“端口”'), '8em');
 
 		var protos = [ 'tcp', 'udp', 'tcp udp' ];
 
 		if (protos.indexOf(row.proto) < 0)
 			protos.push(row.proto);
 
-		row.elProto = E('select', { 'class': 'cbi-input-select' },
-			protos.map(function(p) {
-				var label = (p == 'tcp') ? 'TCP' :
-					(p == 'udp') ? 'UDP' :
-					(p == 'tcp udp') ? 'TCP+UDP' : p;
+		row.elProto = select(protos.map(function(p) {
+			var label = (p == 'tcp') ? 'TCP' :
+				(p == 'udp') ? 'UDP' :
+				(p == 'tcp udp') ? 'TCP+UDP' : p;
 
-				return E('option', { 'value': p }, [ label ]);
-			}));
-		row.elProto.value = row.proto;
+			return { value: p, label: label };
+		}), row.proto);
+
+		var fams = [
+			{ value: 'any', label: _('任意（v4+v6）') },
+			{ value: 'ipv4', label: 'IPv4' },
+			{ value: 'ipv6', label: 'IPv6' }
+		];
+
+		row.elFamily = select(fams, row.family);
 
 		row.elEnabled = E('input', { 'type': 'checkbox' });
 		row.elEnabled.checked = row.enabled;
 
 		return E('tr', { 'class': 'tr' }, [
 			E('td', { 'class': 'td' }, [ row.elName ]),
-			E('td', { 'class': 'td' }, [ row.elProto ]),
-			E('td', { 'class': 'td' }, [ row.elSrcDport ]),
-			E('td', { 'class': 'td' }, [ row.elSrcIp ]),
-			E('td', { 'class': 'td' }, [ row.elDestIp ]),
+			E('td', { 'class': 'td' }, [ row.elTarget ]),
+			E('td', { 'class': 'td' }, [ row.elPort ]),
 			E('td', { 'class': 'td' }, [ row.elDestPort ]),
+			E('td', { 'class': 'td' }, [ row.elProto ]),
+			E('td', { 'class': 'td' }, [ row.elFamily ]),
 			E('td', { 'class': 'td' }, [ row.elEnabled ]),
 			E('td', { 'class': 'td' }, [
 				E('button', {
@@ -242,12 +506,14 @@ return view.extend({
 
 		this.rows.push({
 			sid: null,
+			secType: null,
+			legacy: false,
 			name: '',
-			proto: 'tcp',
-			src_dport: '',
-			src_ip: '',
-			dest_ip: '',
+			target: '',
+			port: '',
 			dest_port: '',
+			proto: 'tcp',
+			family: 'any',
 			enabled: true
 		});
 		this.renderRows();
@@ -282,12 +548,12 @@ return view.extend({
 	},
 
 	readRow: function(row) {
-		row.name = String(row.elName.value || '').trim();
+		row.name = trim(row.elName.value);
+		row.target = trim(row.elTarget.value);
+		row.port = trim(row.elPort.value);
+		row.dest_port = trim(row.elDestPort.value);
 		row.proto = row.elProto.value || 'tcp';
-		row.src_dport = String(row.elSrcDport.value || '').trim();
-		row.src_ip = String(row.elSrcIp.value || '').trim();
-		row.dest_ip = String(row.elDestIp.value || '').trim();
-		row.dest_port = String(row.elDestPort.value || '').trim();
+		row.family = row.elFamily.value || 'any';
 		row.enabled = !!row.elEnabled.checked;
 	},
 
@@ -304,17 +570,11 @@ return view.extend({
 			});
 	},
 
-	validIPMask: function(v) {
-		if (v == '')
-			return true;
-
-		return /^[0-9a-fA-F:.]+\/[0-9]{1,3}$/.test(v) ||
-			/^[0-9a-fA-F:.]+$/.test(v);
-	},
-
 	saveAll: function() {
 		var self = this;
 		var ops = [];
+		var plan = [];
+		var dropped = 0;
 
 		self.removed.forEach(function(sid) {
 			ops.push({ op: 'remove', sid: sid });
@@ -324,53 +584,129 @@ return view.extend({
 			self.readRow(row);
 		});
 
+		/* Validate everything before staging anything, so a bad row cannot
+		 * leave half-created sections in the uci session. */
 		for (var i = 0; i < self.rows.length; i++) {
 			var r = self.rows[i];
+			var target = trim(r.target);
+			var port = trim(r.port);
+			var destPort = trim(r.dest_port);
 
-			if (!self.validPortRange(r.src_dport) || !self.validPortRange(r.dest_port))
-				return ui.addNotification(null, E('p', {}, [
-					_('源端口/目的端口格式不对：%s').format(r.src_dport || r.dest_port)
-				]), 'danger');
+			if (target == '路由器')
+				target = '';
 
-			if (!self.validIPMask(r.src_ip) || !self.validIPMask(r.dest_ip))
-				return ui.addNotification(null, E('p', {}, [
-					_('源/目的地址格式不对：%s').format(r.src_ip || r.dest_ip)
-				]), 'danger');
-
-			/* Incomplete rows carry no usable rule. Drop new ones; remove an
-			 * existing one so fw4 does not keep a half-written redirect. */
-			if (!r.src_dport || !r.dest_ip) {
+			/* The only row this page drops is a truly empty one. A row
+			 * with a WAN port and no target is an INPUT allow, not a
+			 * half-filled forward. */
+			if (port == '' && target == '') {
+				dropped++;
 				if (r.sid)
 					ops.push({ op: 'remove', sid: r.sid });
 				continue;
 			}
 
-			var sid = r.sid;
+			var wantType = target ? 'redirect' : 'rule';
 
-			if (!sid) {
-				sid = uci.add('firewall', 'redirect');
-				r.sid = sid;
+			if (!self.validPortRange(port)) {
+				return ui.addNotification(null, E('p', {}, [
+					_('端口格式不对：%s（支持 8080、8000-8010、以及空格分隔的多个值）').format(port)
+				]), 'danger');
 			}
 
-			var set = function(opt, val) {
-				ops.push(val == ''
-					? { op: 'unset', sid: sid, opt: opt }
-					: { op: 'set', sid: sid, opt: opt, val: val });
-			};
+			if (wantType == 'redirect' && !self.validPortRange(destPort)) {
+				return ui.addNotification(null, E('p', {}, [
+					_('目标端口格式不对：%s').format(destPort)
+				]), 'danger');
+			}
 
-			set('name', r.name);
-			set('proto', r.proto);
-			set('src_dport', r.src_dport);
-			set('src_ip', r.src_ip);
-			set('dest_ip', r.dest_ip);
-			set('dest_port', r.dest_port || r.src_dport);
-			set('enabled', r.enabled ? '1' : '0');
+			if (wantType == 'redirect') {
+				var fam = ipFamily(target);
 
-			/* Non-tuple parts are this page's contract with fw4. */
-			set('src', 'wan');
-			set('dest', 'lan');
-			set('target', 'DNAT');
+				if (!fam) {
+					return ui.addNotification(null, E('p', {}, [
+						_('“目标”必须是 IPv4/IPv6 地址，或留空/填“路由器”表示放行到路由器。')
+					]), 'danger');
+				}
+
+				if (r.family == 'ipv4' && fam != 4) {
+					return ui.addNotification(null, E('p', {}, [
+						_('目标是 IPv6 地址 %s，但地址族选了 IPv4。').format(target)
+					]), 'danger');
+				}
+
+				if (r.family == 'ipv6' && fam != 6) {
+					return ui.addNotification(null, E('p', {}, [
+						_('目标是 IPv4 地址 %s，但地址族选了 IPv6。').format(target)
+					]), 'danger');
+				}
+			}
+
+			plan.push({ row: r, target: target, port: port,
+				destPort: destPort, type: wantType });
 		}
+
+		if (ops.length == 0 && plan.length == 0) {
+			if (dropped)
+				ui.addNotification(null, E('p', {}, [
+					_('没有可保存的规则：%s 个空行已忽略。').format(dropped)
+				]), 'warning');
+			else
+				ui.addNotification(null, E('p', {}, [
+					_('没有规则可保存。')
+				]), 'warning');
+
+			return Promise.resolve();
+		}
+
+		function setOpt(sid, opt, val) {
+			ops.push(val == ''
+				? { op: 'unset', sid: sid, opt: opt }
+				: { op: 'set', sid: sid, opt: opt, val: val });
+		}
+
+		plan.forEach(function(p) {
+			var r = p.row;
+			var sid = r.sid;
+
+			/* UCI section types cannot be changed in place. If the row's
+			 * kind changed (a target was added or removed), drop the old
+			 * section and create the correct type. */
+			if (sid && r.secType != p.type) {
+				ops.push({ op: 'remove', sid: sid });
+				sid = null;
+			}
+
+			if (!sid) {
+				sid = uci.add('firewall', p.type);
+				r.sid = sid;
+				r.secType = p.type;
+			}
+
+			setOpt(sid, 'name', r.name);
+			setOpt(sid, 'proto', r.proto);
+			setOpt(sid, 'family', r.family || 'any');
+			setOpt(sid, 'enabled', r.enabled ? '1' : '0');
+			setOpt(sid, MARKER, '1');
+			setOpt(sid, 'src', 'wan');
+
+			if (p.type == 'rule') {
+				/* src=wan + target=ACCEPT is an INPUT allow. No dest
+				 * zone: a rule with dest=lan would match forwarded
+				 * traffic instead. */
+				setOpt(sid, 'dest', '');
+				setOpt(sid, 'dest_port', p.port);
+				setOpt(sid, 'src_dport', '');
+				setOpt(sid, 'dest_ip', '');
+				setOpt(sid, 'target', 'ACCEPT');
+			}
+			else {
+				setOpt(sid, 'dest', 'lan');
+				setOpt(sid, 'src_dport', p.port);
+				setOpt(sid, 'dest_ip', p.target);
+				setOpt(sid, 'dest_port', p.destPort || p.port);
+				setOpt(sid, 'target', 'DNAT');
+			}
+		});
 
 		/* Stage the ops through the LuCI uci RPC: it writes into the
 		 * session's config delta, which uci apply then commits. */
@@ -395,11 +731,19 @@ return view.extend({
 		}).then(function() {
 			return self.reload();
 		}).then(function() {
-			ui.addNotification(null, E('p', {}, [ _('已保存并应用') ]), 'info');
+			if (dropped)
+				ui.addNotification(null, E('p', {}, [
+					_('已保存并应用；%s 个空行已忽略。').format(dropped)
+				]), 'info');
+			else
+				ui.addNotification(null, E('p', {}, [ _('已保存并应用') ]), 'info');
 		}).catch(function(e) {
-			ui.addNotification(null, E('p', {}, [ e.message || String(e) ]), 'danger');
+			ui.addNotification(null, E('p', {}, [
+				e.message || String(e)
+			]), 'danger');
 		});
 	},
+
 	reload: function() {
 		var self = this;
 
@@ -408,6 +752,7 @@ return view.extend({
 		return uci.load('firewall').then(function() {
 			self.collect();
 			self.renderRows();
+			self.renderWarning();
 		});
 	}
 });

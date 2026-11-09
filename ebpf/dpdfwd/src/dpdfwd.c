@@ -26,12 +26,16 @@
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+
+#include "dpd_plugin.h"
 
 #define RTNL_GROUPS (RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE | \
 		     RTMGRP_NEIGH)
@@ -520,6 +524,188 @@ static void class_tick(struct stats *st, int dry)
 	class_ready_seen = 1;
 }
 
+/* ---------------------------------------------------------------- plugins
+ *
+ * Control-plane plugins (see src/dpd_plugin.h). They are optional: a missing
+ * directory, a broken .so or a failed init only logs and skips that plugin.
+ * The packet path is never involved; a plugin classifies new flows and
+ * dpdfwd turns the verdict into a dpd_class entry through dpdctl.
+ */
+#define PLUGIN_DIR_DEFAULT "/usr/lib/dpd/plugins"
+#define PLUGIN_MAX 8
+
+static struct dpd_plugin_ops *plugins[PLUGIN_MAX];
+static void *plugin_handles[PLUGIN_MAX];
+static int plugin_count;
+static int plugins_enabled = 1;
+static int plugin_dry = 1;
+static const char *plugin_dir = PLUGIN_DIR_DEFAULT;
+
+static void plugin_load_dir(const char *dir)
+{
+	DIR *d;
+	struct dirent *de;
+
+	d = opendir(dir);
+	if (!d)
+		return;
+	while ((de = readdir(d)) != NULL) {
+		char path[512];
+		void *h;
+		struct dpd_plugin_ops *ops;
+		size_t n;
+
+		n = strlen(de->d_name);
+		if (n < 4 || strcmp(de->d_name + n - 3, ".so"))
+			continue;
+		if (plugin_count >= PLUGIN_MAX) {
+			fprintf(stderr, "dpdfwd: plugin limit (%d) reached\n",
+				PLUGIN_MAX);
+			break;
+		}
+		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+		h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+		if (!h) {
+			fprintf(stderr, "dpdfwd: plugin %s: %s\n", path,
+				dlerror());
+			continue;
+		}
+		ops = (struct dpd_plugin_ops *)dlsym(h, DPD_PLUGIN_SYMBOL);
+		if (!ops || !ops->name || ops->version != DPD_PLUGIN_ABI) {
+			fprintf(stderr, "dpdfwd: plugin %s: bad ABI\n", path);
+			dlclose(h);
+			continue;
+		}
+		if (ops->init && ops->init() != 0) {
+			fprintf(stderr, "dpdfwd: plugin %s: init failed\n",
+				ops->name);
+			dlclose(h);
+			continue;
+		}
+		plugin_handles[plugin_count] = h;
+		plugins[plugin_count++] = ops;
+		fprintf(stderr, "dpdfwd: plugin %s loaded (ABI %d)\n",
+			ops->name, ops->version);
+	}
+	closedir(d);
+}
+
+static void plugin_unload(void)
+{
+	int i;
+
+	for (i = 0; i < plugin_count; i++) {
+		if (plugin_handles[i])
+			dlclose(plugin_handles[i]);
+		plugin_handles[i] = NULL;
+		plugins[i] = NULL;
+	}
+	plugin_count = 0;
+}
+
+static const char *plugin_action_name(uint32_t a)
+{
+	switch (a) {
+	case DPD_PLUGIN_PROXY:	return "proxy";
+	case DPD_PLUGIN_BLOCK:	return "block";
+	case DPD_PLUGIN_LOCAL:	return "local";
+	default:		return "forward";
+	}
+}
+
+static void plugin_apply_class(const struct dpd_flow_desc *d)
+{
+	char sa[INET6_ADDRSTRLEN], da[INET6_ADDRSTRLEN];
+	char sport[8], dport[8], prio[16], proto[8];
+	char *argv[12];
+	int n = 0;
+
+	if (plugin_dry || access(DPD_CTL, X_OK) != 0)
+		return;
+	if (!inet_ntop(d->family, d->saddr, sa, sizeof(sa)) ||
+	    !inet_ntop(d->family, d->daddr, da, sizeof(da)))
+		return;
+	snprintf(sport, sizeof(sport), "%u", d->sport);
+	snprintf(dport, sizeof(dport), "%u", d->dport);
+	snprintf(prio, sizeof(prio), "%u", d->skb_priority);
+	snprintf(proto, sizeof(proto), "%u", d->proto);
+
+	argv[n++] = DPD_CTL;
+	argv[n++] = "class";
+	argv[n++] = "add";
+	argv[n++] = "any";
+	argv[n++] = proto;
+	argv[n++] = sa;
+	argv[n++] = sport;
+	argv[n++] = da;
+	argv[n++] = dport;
+	argv[n++] = (char *)plugin_action_name(d->action);
+	argv[n++] = prio;
+	argv[n] = NULL;
+	class_exec(argv);
+}
+
+static void plugin_flow(int ev, const struct ct_tuple *t)
+{
+	struct dpd_flow_desc d;
+	int i;
+
+	if (!plugin_count)
+		return;
+	memset(&d, 0, sizeof(d));
+	d.family = t->family;
+	d.proto = t->proto;
+	d.sport = t->sport;
+	d.dport = t->dport;
+	memcpy(d.saddr, t->saddr, sizeof(d.saddr));
+	memcpy(d.daddr, t->daddr, sizeof(d.daddr));
+	d.action = DPD_PLUGIN_FORWARD;
+
+	for (i = 0; i < plugin_count; i++) {
+		struct dpd_plugin_ops *p = plugins[i];
+		struct dpd_flow_desc c = d;
+
+		if (ev == DPD_EV_CT_DESTROY) {
+			if (p->flow_expire)
+				p->flow_expire(&c);
+			continue;
+		}
+		if (p->flow_classify)
+			p->flow_classify(&c);
+		if (c.action != DPD_PLUGIN_FORWARD || c.skb_priority)
+			plugin_apply_class(&c);
+		if (p->flow_create)
+			p->flow_create(&c);
+	}
+}
+
+static void plugin_topology(int ev, const char *ifname)
+{
+	int i;
+
+	for (i = 0; i < plugin_count; i++)
+		if (plugins[i]->topology_event)
+			plugins[i]->topology_event(ev, ifname);
+}
+
+static void plugin_ct(struct nlmsghdr *h, int ev)
+{
+	struct nfgenmsg *nfg = NLMSG_DATA(h);
+	struct nlattr *attrs, *a;
+	struct ct_tuple t;
+	int len;
+
+	if (!plugin_count)
+		return;
+	if (h->nlmsg_len < NLMSG_HDRLEN + sizeof(*nfg))
+		return;
+	attrs = (struct nlattr *)((char *)nfg + sizeof(*nfg));
+	len = h->nlmsg_len - NLMSG_HDRLEN - sizeof(*nfg);
+	a = nla_find(attrs, len, CTA_TUPLE_ORIG);
+	if (a && !parse_tuple(a, &t))
+		plugin_flow(ev, &t);
+}
+
 static volatile sig_atomic_t stop;
 
 static void on_signal(int sig)
@@ -603,11 +789,18 @@ int main(int argc, char **argv)
 			class_enabled = 0;
 		else if (!strcmp(argv[i], "--class-file") && i + 1 < argc)
 			class_file = argv[++i];
+		else if (!strcmp(argv[i], "--no-plugins"))
+			plugins_enabled = 0;
+		else if (!strcmp(argv[i], "--plugin-dir") && i + 1 < argc)
+			plugin_dir = argv[++i];
 	}
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
 	st.started = time(NULL);
 	mkdir(OUT_DIR, 0755);
+	plugin_dry = dry;
+	if (plugins_enabled)
+		plugin_load_dir(plugin_dir);
 
 	rtnl = nl_open(NETLINK_ROUTE, RTNL_GROUPS);
 	ct = nl_open(NETLINK_NETFILTER, CT_GROUPS);
@@ -659,18 +852,22 @@ int main(int argc, char **argv)
 						case RTM_NEWLINK:
 						case RTM_DELLINK:
 							st.link++;
+							plugin_topology(DPD_EV_LINK, NULL);
 							break;
 						case RTM_NEWADDR:
 						case RTM_DELADDR:
 							st.addr++;
+							plugin_topology(DPD_EV_ADDR, NULL);
 							break;
 						case RTM_NEWROUTE:
 						case RTM_DELROUTE:
 							st.route++;
+							plugin_topology(DPD_EV_ROUTE, NULL);
 							break;
 						case RTM_NEWNEIGH:
 						case RTM_DELNEIGH:
 							st.neigh++;
+							plugin_topology(DPD_EV_NEIGH, NULL);
 							break;
 						default:
 							st.unknown++;
@@ -688,13 +885,18 @@ int main(int argc, char **argv)
 
 						if (msg == IPCTNL_MSG_CT_NEW) {
 							st.ct_new++;
+							plugin_ct(h, DPD_EV_CT_NEW);
 						} else if (msg ==
 							   IPCTNL_MSG_CT_DELETE) {
 							st.ct_destroy++;
+							plugin_ct(h,
+								  DPD_EV_CT_DESTROY);
 							if (ct_delete)
 								ct_queue(h);
 						} else {
 							st.ct_update++;
+							plugin_ct(h,
+								  DPD_EV_CT_UPDATE);
 						}
 					}
 				}
@@ -719,6 +921,7 @@ int main(int argc, char **argv)
 		}
 	}
 	publish(&st);
+	plugin_unload();
 	close(rtnl);
 	if (ct >= 0)
 		close(ct);

@@ -39,9 +39,11 @@ endef
 
 define Package/dpdfwd/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/dpd
+	$(INSTALL_DIR) $(1)/usr/include/dpd $(1)/usr/lib/dpd/plugins
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dpdfwd $(1)/usr/sbin/dpdfwd
 	$(INSTALL_BIN) ./files/dpdfwd.init $(1)/etc/init.d/dpdfwd
 	$(INSTALL_CONF) ./files/class.conf $(1)/etc/dpd/class.conf
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/dpd_plugin.h $(1)/usr/include/dpd/dpd_plugin.h
 	$(INSTALL_DIR) $(1)/etc/rc.d
 	ln -sf ../init.d/dpdfwd $(1)/etc/rc.d/S96dpdfwd
 endef
