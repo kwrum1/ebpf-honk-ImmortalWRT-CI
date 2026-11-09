@@ -77,18 +77,31 @@ UPDATE_PACKAGE "aurora-config" "eamonxg/luci-app-aurora-config" "master"
 # new health fields (c.list) and the patch anchors moved, which broke CI.
 UPDATE_PACKAGE "vantage" "anothaDev/luci-theme-vantage" "v1.0.12"
 
-# Honk core + LuCI/Doona UI. One branch for every target: `main` carries the
-# ebpf datapath handover (ci/patches/honk-direct-unspec.py -> core-p1 assets +
-# the direct-unspec marker), nfqueue disabled and the .lan/.local DNS rule.
-UPDATE_PACKAGE "honk" "kwrum1/openwrt-honk" "main" "pkg"
+# Honk core + LuCI/Doona UI. The package always comes from upstream; for
+# X86/ROCKCHIP the local overlay (patches/honk/overlay) and the p1 core are
+# applied below. IPQ/MTK keep the stock upstream package and core.
+UPDATE_PACKAGE "honk" "kenzok8/openwrt-honk" "main" "pkg"
 
-# honk/ 下三个 generated-* 文件都被 .gitignore 忽略，由 openwrt-honk 的 release.yml
+# X86/ROCKCHIP: overlay our files and point the Makefile at the p1 core built
+# by .github/workflows/HONK-CORE.yml. A failed anchor stops the build here.
+case "$WRT_CONFIG" in
+X86|ROCKCHIP)
+	if [ -d "$GITHUB_WORKSPACE/patches/honk/overlay" ]; then
+		cp -a "$GITHUB_WORKSPACE/patches/honk/overlay/." ./package/
+		sh "$GITHUB_WORKSPACE/patches/honk/apply-makefile.sh" ./package/honk/Makefile
+	else
+		echo "!! honk: patches/honk/overlay missing for $WRT_CONFIG" >&2
+	fi
+	;;
+esac
+
+# honk/ 下三个 generated-* 文件都被 .gitignore 忽略，由 HONK-CORE
 # 作为 asset 发布。缺任何一个都会在编译/打包阶段失败：
 #   generated-stage.mk        -> HONK_HASH_* 停在 SKIP，download.pl 报错
 #   generated-provenance.json -> honk 的 install 阶段 cannot stat
 #   generated-doona-stage.mk  -> luci-app-honk 的 Doona 源地址/哈希
 # 按 package 里的 CORE_COMMIT 找到对应 release，把三个都取下来，并把里面写死的
-# kenzok8/openwrt-honk URL 改成实际的 release 目录（asset 发布在 kwrum1 这边）。
+# kwrum1/ebpf-honk-ImmortalWRT-CI URL 改成实际的 release 目录（asset 发布在本仓库的 core-p1 release）。
 fetch_honk_stage() {
 	local core rel_json base stage prov doona
 	[ -d ./package/honk ] || return 0
@@ -101,11 +114,11 @@ fetch_honk_stage() {
 	# both, and say so when neither produced a usable body.
 	if [ -n "${GITHUB_TOKEN:-}" ]; then
 		rel_json=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-			"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+			"https://api.github.com/repos/kwrum1/ebpf-honk-ImmortalWRT-CI/releases?per_page=30" 2>/dev/null)
 	fi
 	if [ -z "${rel_json:-}" ]; then
 		rel_json=$(curl -fsSL \
-			"https://api.github.com/repos/kwrum1/openwrt-honk/releases?per_page=30" 2>/dev/null)
+			"https://api.github.com/repos/kwrum1/ebpf-honk-ImmortalWRT-CI/releases?per_page=30" 2>/dev/null)
 	fi
 	if [ -z "${rel_json:-}" ]; then
 		echo "!! honk: GitHub API returned no releases (set GITHUB_TOKEN to avoid the rate limit)" >&2
@@ -160,7 +173,9 @@ fetch_honk_stage() {
 		echo "!! honk: core asset NOT reachable: $_probe" >&2
 	fi
 }
-fetch_honk_stage
+case "$WRT_CONFIG" in
+X86|ROCKCHIP) fetch_honk_stage ;;
+esac
 # Honk 所需的 GeoIP / GeoSite 数据包
 UPDATE_PACKAGE "v2ray-geodata" "kenzok8/wall" "main" "pkg" "v2ray-geoip v2ray-geosite"
 

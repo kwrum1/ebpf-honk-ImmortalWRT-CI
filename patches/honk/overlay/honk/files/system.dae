@@ -1,0 +1,26 @@
+global {
+    wan_interface: auto
+    lan_interface: br-lan
+    log_level: info
+    dial_mode: domain
+    allow_insecure: false
+    auto_config_kernel_parameter: true
+    data_dir: '/etc/honk'
+    store_subscribe: true
+    nfqueue_enable: false
+}
+
+experimental {
+    native_api {
+        enabled: true
+        # The native API is the proxy's controller UI (doona), not a datapath
+        # listener: it has to answer the browser on the LAN, so bind all
+        # addresses. password_auth stays on (first visit creates the admin),
+        # and the WAN side is still closed by the firewall.
+        listen: '0.0.0.0:9527'
+        password_auth: true
+        allow_anonymous_loopback: false
+        config_write: true
+        ui: '/usr/share/doona'
+    }
+}

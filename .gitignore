@@ -1,3 +1,8 @@
 # 本地复现时 build.sh/symlink 留下的东西
 /wrt
 /Scripts/PRIVATE.sh
+
+# HONK-CORE build outputs (generated in CI, never committed)
+patches/honk/artifacts/
+patches/honk/.cache/
+patches/honk/honk/generated-*

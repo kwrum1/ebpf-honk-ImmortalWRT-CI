@@ -7,6 +7,7 @@
 - **IPQ60XX / IPQ807X**：同一批设备出两版 —— `QCA-PPE`（`@owrt`，内核 flowtable/PPE）和 `QCA-NSS`（`@main`，`qca-nss-drv` 固件加速）。
 - **IPQ53XX / IPQ95XX**：配置保留，但**暂不构建**。上游 `qualcommbe` 的 `kmod-ath12k` 依赖在 `owrt`/`main` 上都未满足（`depends on !(TARGET_qualcommbe) || TARGET_qualcommax`），镜像组装会报 `kmod-ath12k (no such package)`；等上游放开设限后再加回矩阵。
 - **MEDIATEK**：上游 `@owrt`，原版包集。
+- **honk**：`X86/ROCKCHIP` 用本仓库 `patches/honk/` 的 overlay + 自建 `core-p1`；`IPQ/MTK` 用原版上游 honk。不再使用 `kwrum1/openwrt-honk` 分支。
 
 ### 我该刷哪个？
 
@@ -61,6 +62,7 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 | 缓存清理 | `Cache-Clean` 每周日 20:00 UTC `gh cache delete --all` |
 | 数据面快编译 | `BPF-CHECK`：每周 + 手动，1 分钟编译 `ebpf/` 的 BPF 对象与 `dpdctl` |
 | NAT 加速构建 | `EINAT-BUILD`（手动 / 补丁变更）：上游源码（pin 提交）+ p1/p2 补丁构建 einat，发布前在 netns 里跑 EIM/EIF/ICMP/20MB TCP 回归，产物发在固定 tag `einat-p2` |
+| 定制 honk core | `HONK-CORE`（手动 / `patches/honk/ci` 变更）：从 pin 的 `daeuniverse/honk` 构建 x86_64/aarch64/armv7 的 p1 core，发到本仓库固定 tag `core-p1` |
 | 上游锚点检查 | `UPSTREAM-CHECK`：每天 18:15 UTC，对 `owrt` / `main` 各 clone 一次上游，核对构建期改动还匹配不匹配 |
 | 手动 | Actions → 选工作流 → Run workflow（`WRT-TEST` 默认只出 `.config`） |
 
@@ -74,13 +76,24 @@ ebpf_abi / ebpf_object sha256+size / ebpf_src_tree sha256 / clang / libbpf / bui
 - `Auto-Clean` 是唯一定时入口，完成后通过 `workflow_run` 触发四个构建；`einat-*` release 是构建输入，永不被清理。
 - 第三方 `ophub/delete-releases-workflows` 没有稳定 tag，只有它在跟 `@main`；其余全部固定大版本。
 
+### 2.2 honk 分流
+
+- **X86 / ROCKCHIP**：`Packages.sh` 从上游 `kenzok8/openwrt-honk` 拉包，覆盖
+  `patches/honk/overlay/` 的文件，再用 `apply-makefile.sh` 把 Makefile 指向本仓库
+  `core-p1` 的 patched core；core 由 `HONK-CORE` 构建/发布。
+- **IPQ / MTK**：不覆盖、不改 Makefile、不取 `core-p1`，使用原版包与原版 core
+  （硬件 flowtable/PPE 路径保持原样）。
+- `kwrum1/openwrt-honk` 不再参与构建，可以归档/删除；CI 里不再引用它。
+- 上游 core 变更时，`HONK-CORE` 的 anchor 检查会先失败；更新 `patches/honk/ci/pins.env`
+  和 `apply-makefile.sh` 里的 `CORE_COMMIT` 即可，不需要合并分支。
+
 ---
 
 ## 3. 目录
 
 ```
 .github/workflows/   Auto-Clean / Cache-Clean / EBPF-WRT-ALL / QCA-PPE / QCA-NSS
-                     MTK-ALL / WRT-TEST / WRT-CORE / BPF-CHECK / UPSTREAM-CHECK / EINAT-BUILD
+                     MTK-ALL / WRT-TEST / WRT-CORE / BPF-CHECK / UPSTREAM-CHECK / EINAT-BUILD / HONK-CORE
 ebpf/                数据面包（构建时拷进 package/ebpf/，只给 X86/ROCKCHIP）
   router-dataplane     dpd_fastpath.bpf.c + dpdctl + ebpf-mwan + 门禁/看门狗/回归脚本
   router-acl           WAN eBPF ACL（acl.bpf.c + aclctl）
@@ -95,6 +108,7 @@ Config/              每个目标的 .config 片段
   GENERAL-STOCK.txt    IPQ / MTK（原版包集）
   X86 / ROCKCHIP / IPQ60XX-* / IPQ807X-* / MEDIATEK-* / TEST
   （IPQ53XX / IPQ95XX 配置保留，暂未进矩阵）
+patches/honk/        X86/RK 的 honk overlay + core-p1 构建（IPQ/MTK 不用）
 Scripts/
   Packages.sh         第三方包 + 数据面拷贝（只 X86/ROCKCHIP）+ honk 资产
   Settings.sh         .config 生成、LAN IP/WiFi/主机名
