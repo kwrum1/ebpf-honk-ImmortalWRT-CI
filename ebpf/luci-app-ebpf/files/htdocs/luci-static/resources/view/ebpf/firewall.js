@@ -688,19 +688,22 @@ return view.extend({
 		plan.forEach(function(p) {
 			var r = p.row;
 			var sid = r.sid;
+			/* A same-port IPv6 row is expressed as a UCI 'rule' (forward
+			 * accept), not a 'redirect'. */
+			var secType = (p.type == 'redirect' && p.fwd) ? 'rule' : p.type;
 
 			/* UCI section types cannot be changed in place. If the row's
 			 * kind changed (a target was added or removed), drop the old
 			 * section and create the correct type. */
-			if (sid && r.secType != p.type) {
+			if (sid && r.secType != secType) {
 				ops.push({ op: 'remove', sid: sid });
 				sid = null;
 			}
 
 			if (!sid) {
-				sid = uci.add('firewall', p.type);
+				sid = uci.add('firewall', secType);
 				r.sid = sid;
-				r.secType = p.type;
+				r.secType = secType;
 			}
 
 			setOpt(sid, 'name', MARKER + (r.name || 'rule'));
