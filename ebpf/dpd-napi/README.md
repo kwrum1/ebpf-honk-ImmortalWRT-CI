@@ -4,16 +4,22 @@ System-level tuning component for DPD-FW.
 
 ## Scope
 
-- Enumerate NAPI instances and IRQs (`netdev-genl`, `/sys/class/net/*/queues`).
+- Enumerate NAPI instances and IRQs through the kernel's `netdev` generic
+  netlink family (plus `/sys/class/net/*/queues` for RPS/XPS).
 - Apply per-NAPI settings:
   - `defer-hard-irqs`
   - `gro-flush-timeout`
   - `irq-suspend-timeout`
   - `threaded` (threaded NAPI)
-- Bind NAPI kthreads / IRQs to the intended CPUs.
-- Configure RSS/RPS/XPS and `net.core.netdev_budget` / `dev_weight`.
-- A/B GRO/GSO/TSO per device.
-- Select qdisc mode: `noqueue`/`mq` (pure forwarding) or `cake` (QoS).
+- Configure RPS/XPS and `net.core.netdev_budget` / `netdev_budget_usecs` /
+  `dev_weight`.
+- Record the effective state in `/var/run/dpd/napi.json`.
+
+## Binaries / scripts
+
+- `/usr/sbin/dpd-napi` — procd service, applies UCI `dpd_napi`.
+- `/usr/sbin/dpd-napi-netdev` — raw NETLINK_GENERIC helper:
+  `list [dev]`, `set <dev> <key> <value> ...`.
 
 ## Principles
 
@@ -24,4 +30,6 @@ System-level tuning component for DPD-FW.
 
 ## Status
 
-Scaffold (P0). Implementation lands in P4.
+P4.1 delivered: per-NAPI get/set verified on x86_64 (6.18, vmxnet3). Threaded
+NAPI needs a driver that opts in; the knob is exposed but the profile choice
+needs real-hardware A/B. See `docs/P4-NAPI.md` in the dpd-fw repo.
