@@ -925,17 +925,18 @@ static void tune_tick(void)
 			"accel=%u tcp=%u udp=%u udp1=%u\n",
 			tune_samples, tune_short, accel, tcp, udp, uni);
 
+	/* Push the whole set, not just the values that moved: the data plane is
+	 * a pinned map and a dpd-fastpath reload (upgrade, service restart)
+	 * rewrites it with the compiled/UCI defaults while this process keeps
+	 * its own state. Re-applying every TTL tick (30 s) makes the map
+	 * converge again without restarting dpdfwd. */
+	if (!tune_dry && (changed || do_ttl)) {
+		tune_apply("accel", accel);
+		tune_apply("tcp_ttl", tcp);
+		tune_apply("udp_ttl", udp);
+		tune_apply("udp_unidir_ttl", uni);
+	}
 	if (changed) {
-		if (!tune_dry) {
-			if (accel != tune_accel)
-				tune_apply("accel", accel);
-			if (tcp != tune_tcp_ttl)
-				tune_apply("tcp_ttl", tcp);
-			if (udp != tune_udp_ttl)
-				tune_apply("udp_ttl", udp);
-			if (uni != tune_udp_unidir)
-				tune_apply("udp_unidir_ttl", uni);
-		}
 		fprintf(stderr, "dpdfwd: tune accel=%u tcp=%u udp=%u "
 			"udp1=%u samples=%lu short=%.0f%%%s\n",
 			accel, tcp, udp, uni, tune_samples,
