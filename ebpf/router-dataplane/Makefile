@@ -29,7 +29,7 @@ define Package/dpd-fastpath
   CATEGORY:=Network
   TITLE:=eBPF TC ingress fastpath (dpd)
   URL:=https://github.com/kwrum1/openwrt-honk
-  DEPENDS:=+libbpf +libelf +kmod-sched-core +kmod-sched-bpf +tc-bpf $(BPF_DEPENDS)
+  DEPENDS:=@!(TARGET_qualcommax) +libbpf +libelf +kmod-sched-core +kmod-sched-bpf +tc-bpf $(BPF_DEPENDS)
 endef
 
 define Package/dpd-fastpath/description

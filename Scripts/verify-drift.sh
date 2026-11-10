@@ -150,6 +150,53 @@ else
 	fi
 fi
 
+echo "== 7. IPQ/MTK 镜像不得携带 DPD 数据面（PPE/flowtable 独占加速） =="
+# IPQ/MTK 走内核 flowtable（IPQ 还有 PPE 硬件卸载），DPD 数据面不参与竞争。
+# 两个闸门：
+#   a) 包本身不允许被这些 target 选中（DEPENDS 里的 @!(TARGET_qualcommax)）；
+#   b) 镜像构建脚本不允许把 ebpf/ 拷进 IPQ/MTK 的包目录。
+#
+# 这里检查的是**源码约定**，不需要构建产物：一旦有人把闸门删掉，CI 立刻失败，
+# 而不是等烧到机器上才发现两套加速器抢同一条流。
+DPD_PKGS="dpd-fastpath einat-ebpf dpdfwd dpd-honk dpd-acl dpd-qos dpd-mwan"
+leak_src=0
+for f in "$ROOT"/ebpf/router-dataplane/Makefile \
+	 "$ROOT"/ebpf/einat-ebpf/Makefile \
+	 "$ROOT"/ebpf/dpdfwd/Makefile \
+	 "$ROOT"/ebpf/dpd-acl/Makefile \
+	 "$ROOT"/ebpf/dpd-qos/Makefile \
+	 "$ROOT"/ebpf/dpd-mwan/Makefile \
+	 "$ROOT"/ebpf/dpd-honk/Makefile; do
+	[ -f "$f" ] || continue
+	name=$(sed -n 's/^[[:space:]]*PKG_NAME:=//p' "$f" | head -1)
+	dep=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)/\1/p' "$f" | head -1)
+	case "$dep" in
+	*TARGET_qualcommax*) ;;
+	*)
+		# 只有“能被所有 target 选中”的包才需要这个闸门。带
+		# @(x86_64||aarch64) 之类的包在 IPQ 上仍可能被选中（aarch64），
+		# 所以它们同样必须排除 qualcommax。
+		case "$dep" in
+		*@\(x86_64*aarch64*\)*|*@\(aarch64*x86_64*\)*)
+			bad "${f#$ROOT/}: $name 允许 aarch64 但没排除 TARGET_qualcommax"
+			leak_src=1
+			;;
+		esac
+		;;
+	esac
+done
+[ "$leak_src" = 0 ] && ok "dpd 数据面包排除了 TARGET_qualcommax"
+
+# 构建脚本里 ebpf/ 只能进 X86/ROCKCHIP 分支
+if awk '/^case "\$WRT_CONFIG" in/{on=1}
+	on && /^X86\|ROCKCHIP\)/{x86=1}
+	on && /ebpf\/ \$/ {if (!x86) exit 1}
+	on && /^esac/{on=0; x86=0}' "$ROOT/Scripts/Packages.sh"; then
+	ok "Packages.sh 的 ebpf/ 拷贝仍在 X86|ROCKCHIP 分支内"
+else
+	bad "Packages.sh 会把 ebpf/ 拷进非 X86/ROCKCHIP 的构建（IPQ/MTK 会捡到 DPD 数据面）"
+fi
+
 echo
 if [ "$fails" != 0 ]; then
 	echo "verify-drift: FAILED ($fails)"
