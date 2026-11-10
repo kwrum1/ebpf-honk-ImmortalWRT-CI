@@ -276,9 +276,17 @@ dpd_attach_one() {
 # 2026-11-08: pkt/hit stayed flat on br-lan until the filter was also attached
 # to eth0.
 dpd_attach_if() {
-	local dev="$1" p
+	local dev="$1" p ports=1
 
 	dpd_attach_one "$dev" || return 1
+	# `option attach_bridge_ports` is read HERE and nowhere else. It used to
+	# be documentation only: the loop below ran unconditionally, so setting
+	# it to 0 changed nothing. Default 1 because the master hook sees only a
+	# few percent of LAN traffic on a real bridge (measured on the N5000:
+	# eth0 l2 +32114 vs br-lan l2 +1591 over one 349 MB download).
+	config_load dpd_fastpath
+	config_get_bool ports global attach_bridge_ports 1
+	[ "$ports" = 1 ] || return 0
 	if [ -d "/sys/class/net/$dev/brif" ]; then
 		for p in /sys/class/net/"$dev"/brif/*; do
 			[ -e "$p" ] || continue
