@@ -11,7 +11,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=dpd-fastpath
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=ebpf

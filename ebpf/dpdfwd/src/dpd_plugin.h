@@ -31,6 +31,26 @@ enum dpd_plugin_action {
 	DPD_PLUGIN_LOCAL = 3,
 };
 
+/*
+ * Software/hardware coexistence state (ABI 22).
+ *
+ * These values are the *wire format* of `dpdctl flows ppe <state>` and the
+ * contents of dpd_flow_val.ct_cookie, so they must stay in sync with
+ * enum dpd_ppe_state in bpf/core/src/dpd_common.h. They are repeated here
+ * because dpdfwd deliberately does not include the kernel-side header: the
+ * daemon only speaks to the datapath through dpdctl and the maps, and pulling
+ * in linux/bpf.h to share five constants would couple the control plane to a
+ * specific kernel UAPI. Tests/abi-check keeps the two lists identical.
+ */
+enum dpd_ppe_state {
+	DPD_PPE_UNKNOWN = 0,
+	DPD_PPE_SW_ACTIVE = 1,
+	DPD_PPE_YIELDED = 2,
+	DPD_PPE_OFFLOADED = 3,
+	DPD_PPE_FAILED = 4,
+	DPD_PPE_DENIED = 5,
+};
+
 enum dpd_plugin_event {
 	DPD_EV_LINK = 1,
 	DPD_EV_ADDR,

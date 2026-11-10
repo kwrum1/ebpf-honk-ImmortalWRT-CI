@@ -49,21 +49,40 @@ static uint64_t flow_age_ms(uint32_t last_seen_ms)
 	return age > 0 ? (uint64_t)age : 0;
 }
 
-static const char *pin_path(const char *name)
-{
-	static char buf[128];
+/* Where the object's maps can end up, in order of preference.
+ *
+ * `LIBBPF_PIN_BY_NAME` pins relative to whatever bpffs directory the *loader*
+ * chose, which depends on how it was loaded:
+ *   - tc(8) loads under /sys/fs/bpf/tc/globals/<name>. This is the normal
+ *     production path on OpenWrt, and it was the one dpdctl could not see: on
+ *     the IPQ60xx (2026-11-11) `dpdctl abi` printed 0 while the maps were
+ *     plainly present in /sys/fs/bpf/tc/globals/, so every command silently
+ *     fell back to the map-id scan;
+ *   - a future loader that pins at the bpffs root gives /sys/fs/bpf/<name>.
+ * Both are tried. The id scan in map_open() stays as the last resort, but it
+ * is a *heuristic* (it matches the first map with that BTF name), so the
+ * pinned path must be tried first and must be correct.
+ */
+static const char *pin_dirs[] = {
+	"/sys/fs/bpf/tc/globals",
+	DPD_PIN_DIR,
+};
 
-	snprintf(buf, sizeof(buf), "%s/%s", DPD_PIN_DIR, name);
-	return buf;
-}
-
-/* Open a map: try the pin first, then scan map ids for a matching BTF name. */
+/* Open a map: try each pin location, then scan map ids for a matching BTF
+ * name. */
 static int map_open(const char *name)
 {
-	int fd = dpd_bpf_obj_get(pin_path(name));
+	int fd;
+	size_t i;
 
-	if (fd >= 0)
-		return fd;
+	for (i = 0; i < sizeof(pin_dirs) / sizeof(pin_dirs[0]); i++) {
+		char path[160];
+
+		snprintf(path, sizeof(path), "%s/%s", pin_dirs[i], name);
+		fd = dpd_bpf_obj_get(path);
+		if (fd >= 0)
+			return fd;
+	}
 
 	for (uint32_t id = 0;;) {
 		struct bpf_map_info info = {};
@@ -166,6 +185,26 @@ static int mode_parse(const char *s, uint32_t *out)
 	return 0;
 }
 
+static const char *ppe_name(uint32_t m)
+{
+	switch (m) {
+	case DPD_PPE_OFF:	return "off";
+	case DPD_PPE_YIELD:	return "yield";
+	case DPD_PPE_FALLBACK:	return "fallback";
+	default:		return "?";
+	}
+}
+
+static int ppe_parse(const char *s, uint32_t *out)
+{
+	if (!strcmp(s, "off"))		*out = DPD_PPE_OFF;
+	else if (!strcmp(s, "yield"))	*out = DPD_PPE_YIELD;
+	else if (!strcmp(s, "fallback") || !strcmp(s, "dual"))
+		*out = DPD_PPE_FALLBACK;
+	else return -1;
+	return 0;
+}
+
 static const char *policy_name(uint32_t p)
 {
 	switch (p) {
@@ -196,6 +235,7 @@ static const char *stat_name(int i)
 		"l2_v4", "l2_v6", "nat_gone", "flow_fin",
 		"flow_bind", "flow_block", "flow_skip", "nat_dnat",
 		"nat_snat", "nat_alloc", "nat_exhaust",
+		"ppe_yield", "ppe_grace",
 	};
 
 	return (i >= 0 && i < ST__MAX && n[i]) ? n[i] : "?";
@@ -285,6 +325,18 @@ static int cmd_set(int argc, char **argv)
 			fprintf(stderr, "dpdctl: bad policy '%s'\n", argv[1]);
 			return 1;
 		}
+	} else if (!strcmp(argv[0], "ppe")) {
+		if (argc < 2 || ppe_parse(argv[1], &cfg.ppe_mode)) {
+			fprintf(stderr,
+				"usage: dpdctl set ppe off|yield|fallback\n");
+			return 1;
+		}
+	} else if (!strcmp(argv[0], "grace")) {
+		if (argc < 2) {
+			fprintf(stderr, "usage: dpdctl set grace <ms>\n");
+			return 1;
+		}
+		cfg.ppe_grace_ms = (uint32_t)strtoul(argv[1], NULL, 0);
 	} else {
 		fprintf(stderr, "dpdctl: unknown key '%s'\n", argv[0]);
 		return 1;
@@ -343,6 +395,10 @@ static int cmd_show(void)
 	       cfg.nat_port_min ? cfg.nat_port_min : 20000,
 	       cfg.nat_port_max ? cfg.nat_port_max : 29999,
 	       (cfg.nat_port_min && cfg.nat_port_max) ? "" : " (default)");
+	printf("ppe_mode     %s (hardware coexistence)\n",
+	       ppe_name(cfg.ppe_mode));
+	printf("ppe_grace    %u ms%s\n", cfg.ppe_grace_ms,
+	       cfg.ppe_grace_ms ? "" : " (take over at once)");
 
 	fd = map_open("dpd_vlans");
 	if (fd >= 0) {
@@ -1348,11 +1404,169 @@ static int flow_prune(unsigned int max_age_ms)
 	return rc;
 }
 
+/*
+ * ABI 22: record what the hardware did with a flow.
+ *
+ * dpdfwd learns this from conntrack (CTA_STATUS). It has to land in the flow
+ * entry, not in a separate map, because the hit path must not pay another
+ * lookup. Entries in the map are only ever read-modify-written, never enlarged.
+ *
+ * usage: dpdctl flows ppe <state> [iface|any] [proto|tcp|udp] [saddr] [sport]
+ *                            [daddr] [dport]
+ *
+ * state is one of: unknown sw_active yielded offloaded failed denied
+ * A match of "any" for every field sets the state on every entry, which is what
+ * the daemon uses when the kernel reports a whole-table transition (a flowtable
+ * flush).
+ */
+static int ppe_state_parse(const char *s)
+{
+	if (!strcmp(s, "unknown"))	return DPD_PPE_UNKNOWN;
+	if (!strcmp(s, "sw_active"))	return DPD_PPE_SW_ACTIVE;
+	if (!strcmp(s, "yielded"))	return DPD_PPE_YIELDED;
+	if (!strcmp(s, "offloaded"))	return DPD_PPE_OFFLOADED;
+	if (!strcmp(s, "failed"))	return DPD_PPE_FAILED;
+	if (!strcmp(s, "denied"))	return DPD_PPE_DENIED;
+	return -1;
+}
+
+/*
+ * Batch form: one line per flow, "<state> <proto> <sport> <saddr> <dport> <daddr>".
+ * dpdfwd writes this file from conntrack and calls us once per tick, so the
+ * daemon never forks per event. Unknown or stale keys are skipped silently --
+ * a flow may legitimately have expired between the ctnetlink event and now.
+ */
+static int cmd_flows_ppe_file(const char *path)
+{
+	struct dpd_flow_key k, nk;
+	struct dpd_flow_val v;
+	FILE *fp;
+	char line[256];
+	int fd, changed = 0, seen = 0, bad = 0;
+
+	fp = fopen(path, "r");
+	if (!fp)
+		return 0;	/* empty/none: nothing to do, not an error */
+	fd = map_open("dpd_flows");
+	if (fd < 0) {
+		fclose(fp);
+		return 1;
+	}
+
+	while (fgets(line, sizeof(line), fp)) {
+		char proto[16], sa[64], da[64];
+		unsigned state, sport, dport;
+		struct flow_match m;
+
+		if (sscanf(line, "%u %15s %u %63s %u %63s", &state, proto, &sport,
+			   sa, &dport, da) != 6)
+			continue;
+		if (state > DPD_PPE_DENIED || match_set(&m, "any", proto, sa,
+						       "", da, "")) {
+			bad++;
+			continue;
+		}
+		m.sport = (uint16_t)sport;
+		m.dport = (uint16_t)dport;
+
+		if (dpd_bpf_map_get_next_key(fd, NULL, &k))
+			break;
+		for (;;) {
+			struct dpd_flow_key kk = k;
+
+			if (!dpd_bpf_map_lookup_elem(fd, &kk, &v)) {
+				seen++;
+				if (match_key(&m, &kk) &&
+				    v.ct_cookie != state) {
+					v.ct_cookie = state;
+					if (!dpd_bpf_map_update_elem(fd, &kk, &v,
+								     BPF_ANY))
+						changed++;
+				}
+			}
+			if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+				break;
+			k = nk;
+		}
+	}
+	fclose(fp);
+	printf("ppe batch: %d updated, %d scanned, %d bad line(s)\n",
+	       changed, seen, bad);
+	return 0;
+}
+
+static int cmd_flows_ppe(int argc, char **argv)
+{
+	struct dpd_flow_key k, nk;
+	struct dpd_flow_val v;
+	int fd, state, changed = 0, seen = 0;
+	struct flow_match m;
+
+	if (argc >= 2 && !strcmp(argv[0], "-f"))
+		return cmd_flows_ppe_file(argv[1]);
+
+	if (argc < 1) {
+		fprintf(stderr, "usage: dpdctl flows ppe <state>"
+			" [iface|any] [proto|tcp|udp] [saddr] [sport]"
+			" [daddr] [dport]\n"
+			"       dpdctl flows ppe -f <file>\n");
+		return 1;
+	}
+	state = ppe_state_parse(argv[0]);
+	if (state < 0) {
+		fprintf(stderr, "dpdctl: unknown ppe state '%s'\n", argv[0]);
+		return 1;
+	}
+	memset(&m, 0, sizeof(m));
+	if (argc >= 7 &&
+	    match_set(&m, argv[1], argv[2], argv[3], argv[4], argv[5],
+		      argv[6])) {
+		fprintf(stderr, "dpdctl: bad match\n");
+		return 1;
+	}
+
+	fd = map_open("dpd_flows");
+	if (fd < 0)
+		return 1;
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+		printf("ppe: no flows\n");
+		return 0;
+	}
+	for (;;) {
+		struct dpd_flow_key kk = k;
+
+		if (!dpd_bpf_map_lookup_elem(fd, &kk, &v)) {
+			seen++;
+			/* Only touch a flow that the match covers. argc < 7
+			 * means "every entry" (a whole-table transition). */
+			if (argc < 7 || match_key(&m, &kk)) {
+				if (v.ct_cookie != (uint32_t)state) {
+					v.ct_cookie = (uint32_t)state;
+					if (dpd_bpf_map_update_elem(fd, &kk, &v,
+								    BPF_ANY))
+						fprintf(stderr,
+							"dpdctl: update failed\n");
+					else
+						changed++;
+				}
+			}
+		}
+		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+			break;
+		k = nk;
+	}
+	printf("ppe %s: %d of %d flow(s) updated\n", argv[0], changed, seen);
+	return 0;
+}
+
 static int cmd_flows(int argc, char **argv)
 {
 	struct dpd_flow_key k, nk;
 	struct dpd_flow_val v;
 	int fd, n = 0, max = 32;
+
+	if (argc >= 2 && !strcmp(argv[0], "ppe"))
+		return cmd_flows_ppe(argc - 1, argv + 1);
 
 	if (argc >= 1 && !strcmp(argv[0], "-a"))
 		max = 1 << 20;
@@ -2075,7 +2289,8 @@ static void usage(const char *argv0)
 		"  local sync|flush|list   router addresses skipped before the FIB\n"
 		"                          lookup (local delivery, never forwarded)\n"
 		"  flows [-a]              dump dpd_flows\n"
-		"  flows prune [age_ms]    delete entries idle longer than age_ms\n",
+		"  flows prune [age_ms]    delete entries idle longer than age_ms\n"
+		"  flows ppe <state> ...   record the hardware offload state of a flow\n",
 		argv0);
 }
 

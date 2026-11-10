@@ -580,9 +580,22 @@ dpd_gate_mode() {
 		code=mode-observe
 		why="configured mode is 'observe': telemetry only, by operator request"
 	elif dpd_mode_wants_accel "$mode"; then
+		# ABI 22: flow offloading used to mean "stand down entirely". That is
+		# right when DPD has no way to coordinate, but it makes the dual mode
+		# impossible. With ppe_mode=dual the two engines share the box: the
+		# hardware gets first refusal, DPD steps aside per flow when conntrack
+		# reports the flow as offloaded, and takes back what the hardware
+		# failed on. Anything else still stays out of the way completely.
 		if dpd_hw_offload_active; then
-			code=hw-offload
-			why="fw4 flow offloading (software or hardware) is enabled: the kernel flowtable/PPE already accelerates these flows, and DPD does not compete with it -- staying in observe"
+			case "$ppe_mode" in
+			dual|fallback)
+				dpd_log "gate: flow offloading is on and ppe_mode=$ppe_mode: sharing the box with the hardware backend"
+				;;
+			*)
+				code=hw-offload
+				why="fw4 flow offloading (software or hardware) is enabled and ppe_mode is 'off': the kernel flowtable/PPE already accelerates these flows, and DPD does not compete with it -- staying in observe. Set dpd_fastpath.global.ppe_mode='dual' to share the box instead."
+				;;
+			esac
 		fi
 		# Acceleration is a *forwarding* optimisation: it redirects LAN->WAN
 		# flows out of the uplink. With no uplink at all (WAN down, no cable,
@@ -703,7 +716,7 @@ dpd_has_uplink() {
 dpd_gate_refresh_uci() {
 	local enabled mode redirect ttl policy vlans refresh ipv6 mss emode
 	local accel tcp_ttl udp_ttl udp_unidir_ttl flow_counters class_enable
-	local nat_ingress
+	local nat_ingress ppe_mode
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -722,11 +735,22 @@ dpd_gate_refresh_uci() {
 	config_get_bool flow_counters global flow_counters 1
 	config_get_bool class_enable global class_enable 1
 	config_get nat_ingress global nat_ingress 'einat'
+	config_get ppe_mode global ppe_mode 'off'
 
 	emode="$(dpd_gate_mode "$mode" "$enabled")"
 	dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" \
 		"$ipv6" "$mss" "$accel" "$tcp_ttl" "$udp_ttl" "$udp_unidir_ttl"
 	"$DPD_CTL" set counters "$flow_counters" 2>/dev/null
+	# ABI 22: the software/hardware handover. 'dual' shares the box with
+	# qca-ppe/NSS; 'off' (the default on x86/RK, where no such hardware
+	# exists) leaves the datapath unaware of it.
+	case "$ppe_mode" in
+	dual|fallback)	"$DPD_CTL" set ppe fallback 2>/dev/null ;;
+	yield)		"$DPD_CTL" set ppe yield 2>/dev/null ;;
+	*)		"$DPD_CTL" set ppe off 2>/dev/null ;;
+	esac
+	config_get ppe_grace global ppe_grace_ms 0
+	"$DPD_CTL" set grace "$ppe_grace" 2>/dev/null
 	"$DPD_CTL" set class "$class_enable" 2>/dev/null
 	case "$nat_ingress" in
 	dpd)	"$DPD_CTL" set nat_ingress 1 2>/dev/null ;;

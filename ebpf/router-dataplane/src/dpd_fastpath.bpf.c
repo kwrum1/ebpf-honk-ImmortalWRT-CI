@@ -1160,6 +1160,55 @@ static __always_inline int dpd_emit_cached(struct __sk_buff *skb, __u32 ifindex,
 }
 
 
+/*
+ * ABI 22: should the hit path stand down because the hardware owns this flow?
+ *
+ * ppe_mode semantics (see dpd_common.h):
+ *   OFF      never yield -- x86/RK, where no such hardware exists.
+ *   YIELD    stand down only when conntrack explicitly reported OFFLOADED.
+ *   FALLBACK additionally *take over* a flow the hardware failed or denied,
+ *            which is the point of having both engines: DPD is the safety net.
+ *
+ * ppe_grace_ms keeps DPD off a freshly learned flow long enough for the kernel
+ * to decide whether the flowtable/PPE will take it. Without the grace the two
+ * engines race, and the loser's counters lie.
+ *
+ * Returns 1 = hand the packet back to the stack (do not accelerate).
+ */
+static __always_inline int dpd_ppe_yield(const struct dpd_config *cfg,
+					 const struct dpd_flow_val *fval,
+					 __u32 age, struct dpd_stat_val *st)
+{
+	if (cfg->ppe_mode == DPD_PPE_OFF)
+		return 0;
+
+	switch (fval->ct_cookie) {
+	case DPD_PPE_OFFLOADED:
+	case DPD_PPE_YIELDED:
+		/* The kernel already handed this flow to a flowtable (or NSS).
+		 * Redirecting it would either double-process the packet or
+		 * count hits for traffic that no longer reaches us. */
+		DPD_INC(st, ST_PPE_YIELD);
+		return 1;
+	case DPD_PPE_FAILED:
+	case DPD_PPE_DENIED:
+		/* Hardware tried and did not take it. FALLBACK means DPD
+		 * deliberately becomes the data path here; YIELD means the
+		 * operator wants the stack to handle the failure. */
+		return cfg->ppe_mode == DPD_PPE_FALLBACK ? 0 : 1;
+	default:
+		break;
+	}
+
+	/* UNKNOWN / SW_ACTIVE: still inside the grace window? Give the kernel
+	 * its chance before DPD claims the flow. */
+	if (cfg->ppe_grace_ms && age < (__s32)cfg->ppe_grace_ms) {
+		DPD_INC(st, ST_PPE_GRACE);
+		return 1;
+	}
+	return 0;
+}
+
 /* Flow timestamp maintenance: refresh at most once per cfg->flow_refresh_ms.
  * 0 keeps the exact "every packet" behaviour. */
 static __always_inline void dpd_touch(struct dpd_flow_val *fval, __u32 now,
@@ -1570,6 +1619,12 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 				fval->state = DPD_FLOW_STATE_BIND;
 				DPD_INC(st, ST_FLOW_BIND);
 			}
+
+			/* ABI 22: the software/hardware handover. This has to
+			 * run before the counters below, because a yielded
+			 * packet was never taken over. */
+			if (dpd_ppe_yield(cfg, fval, age, st))
+				return TC_ACT_UNSPEC;
 
 			DPD_INC(st, ST_FLOW_HIT);
 			dpd_touch(fval, now, cfg->flow_refresh_ms);
@@ -2160,6 +2215,9 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			nv.skb_priority = skb->priority;
 			nv.packets = 0;
 			nv.bytes = 0;
+			/* ABI 22: a new flow starts with no hardware claim. dpdfwd
+			 * overwrites this from conntrack once the kernel knows. */
+			nv.ct_cookie = DPD_PPE_UNKNOWN;
 			if (fkey.family == AF_INET) {
 				struct iphdr *ih = data + l3_off;
 

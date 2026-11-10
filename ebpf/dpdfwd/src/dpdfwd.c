@@ -35,6 +35,7 @@
 #include <sys/wait.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/neighbour.h>
 
 #include "dpd_plugin.h"
 
@@ -54,12 +55,39 @@
 #define OUT_FILE OUT_DIR "/flowd.json"
 #define DPD_CTL "/usr/sbin/dpdctl"
 #define CT_DELETE_FILE "/tmp/dpd-ct-delete"
+#define CT_PPE_FILE "/tmp/dpd-ct-ppe"
+#define CT_PPE_MAX 128
 #define DEBOUNCE_MS 300
-/* Neighbour events (IPv6 NUD) arrive about once a second; bumping the flow
- * epoch on each one throws the whole cache away every couple of seconds.
- * Only a MAC change matters for an L2-cached flow, so one bump per 30 s is
- * plenty. Link/address/route changes still bump immediately. */
-#define NEIGH_BUMP_MS 30000
+/* Neighbour churn: how long a *suspicious* one may wait before the epoch is
+ * bumped, and the hard ceiling on how stale a cached MAC may get.
+ *
+ * Measured on the N5000 (2026-11-10, 8036 s uptime): 6503 neighbour events,
+ * i.e. ~0.8/s, and 258 epoch bumps = one every 31 s -- the old 30 s rate
+ * limit was permanently saturated, so the whole flow cache was invalidated
+ * twice a minute and every live flow paid the 8-packet priming again. The
+ * idle box still logged ~37 flow_miss/s, almost all of it re-learning.
+ *
+ * A neighbour event by itself is NOT a reason to distrust a cached egress:
+ * NUD_REACHABLE refreshes, REACHABLE->STALE transitions and the periodic
+ * garbage collection all arrive through the same RTM_NEWNEIGH/DELNEIGH path.
+ * Only two things actually invalidate an L2-cached flow:
+ *   - the neighbour became unusable (NUD_FAILED / NUD_INCOMPLETE, or the
+ *     entry was deleted), or
+ *   - the same address now resolves to a different lladdr.
+ * Both are tracked per address below; anything else is ignored.
+ * NEIGH_SWEEP_MS is the backstop for the case we cannot see (a switch or AP
+ * silently changing what a MAC reaches): a cached dmac is trusted for this
+ * long, then one bump re-learns everything. 5 min of a black hole in that
+ * one scenario is far cheaper than re-learning the table every 31 s.
+ *
+ * NEIGH_BUMP_MS is therefore no longer a rate limit on "how often may we
+ * invalidate": it is only the burst coalescer for events that already passed
+ * neigh_event(). It is short (5 s) precisely because a real lladdr change must
+ * propagate fast; the old 30 s value was what turned 0.8 events/s into a
+ * permanent "invalidate everything" mode. */
+#define NEIGH_BUMP_MS 5000
+#define NEIGH_SWEEP_MS 300000L
+#define NEIGH_TRACK_MAX 512
 #define PUBLISH_MS 2000
 /* The datapath deletes an entry only when a packet looks it up again, so an
  * idle flow that never returns stays in the map until LRU evicts it. Sweep the
@@ -119,6 +147,8 @@ struct stats {
 	unsigned long addr;
 	unsigned long route;
 	unsigned long neigh;
+	unsigned long neigh_ignored;	/* refreshes: no epoch bump */
+	unsigned long neigh_forced;	/* the NEIGH_SWEEP_MS backstop */
 	unsigned long ct_new;
 	unsigned long ct_update;
 	unsigned long ct_destroy;
@@ -135,9 +165,186 @@ struct stats {
 	time_t last_event;
 };
 
+/* ABI 22: conntrack-offload state, batched like the delete list so the daemon
+ * forks dpdctl at most once a second instead of once per ctnetlink event. */
+struct ppe_pend {
+	struct ct_tuple t;
+	uint32_t state;
+};
+static struct ppe_pend ppe_pending[CT_PPE_MAX];
+static int ppe_pending_n;
+static int ppe_enabled = 1;	/* set from uci at startup */
+static unsigned long ppe_writes;
+
 static struct ct_tuple ct_pending[CT_PENDING_MAX];
 static int ct_pending_n;
 static unsigned long ct_delete_batches;
+
+/* defined below; the neighbour tracker needs them first */
+static struct nlattr *nla_find(struct nlattr *head, int len, int type);
+static void *nla_payload(struct nlattr *nla);
+
+/*
+ * Neighbour tracker: which addresses are currently believed to have a usable
+ * lladdr, and what it is. Fixed-size and open-addressed; it is a heuristic
+ * cache in front of the epoch bump, so a hash collision only means "that
+ * address is not tracked", never a wrong decision about another one (the
+ * address is compared in full after the probe).
+ */
+#define NEIGH_KEY_LEN 16
+
+struct neigh_ent {
+	uint8_t addr[NEIGH_KEY_LEN];
+	uint8_t lladdr[6];
+	uint8_t family;
+	uint8_t used;
+};
+
+static struct neigh_ent neigh_tab[NEIGH_TRACK_MAX];
+static long long neigh_sweep_at;
+
+static unsigned int neigh_slot(const uint8_t *addr, uint8_t family)
+{
+	unsigned int h = 2166136261u ^ family;
+	int i;
+
+	for (i = 0; i < (family == AF_INET ? 4 : 16); i++)
+		h = (h ^ addr[i]) * 16777619u;
+	return h % NEIGH_TRACK_MAX;
+}
+
+static struct neigh_ent *neigh_find(const uint8_t *addr, uint8_t family)
+{
+	unsigned int s = neigh_slot(addr, family), i;
+
+	for (i = 0; i < 8; i++) {
+		struct neigh_ent *e = &neigh_tab[(s + i) % NEIGH_TRACK_MAX];
+
+		if (!e->used)
+			return NULL;
+		if (e->family == family &&
+		    !memcmp(e->addr, addr, family == AF_INET ? 4 : 16))
+			return e;
+	}
+	return NULL;
+}
+
+/* Returns 1 when the address is new or its lladdr changed, i.e. a cached
+ * egress that used it is now suspect. Returns 0 for a refresh of the same
+ * mapping, which is the common case and must not cost an epoch. */
+static int neigh_update(const uint8_t *addr, uint8_t family,
+			const uint8_t *lladdr, int lladdr_len)
+{
+	unsigned int s = neigh_slot(addr, family), i;
+	struct neigh_ent *e, *victim = NULL;
+
+	e = neigh_find(addr, family);
+	if (e) {
+		if (lladdr_len == 6 && memcmp(e->lladdr, lladdr, 6)) {
+			memcpy(e->lladdr, lladdr, 6);
+			return 1;
+		}
+		return 0;
+	}
+	for (i = 0; i < 8; i++) {
+		struct neigh_ent *c = &neigh_tab[(s + i) % NEIGH_TRACK_MAX];
+
+		if (!c->used) {
+			victim = c;
+			break;
+		}
+	}
+	if (!victim)
+		return 0;	/* table full: do not guess */
+	memset(victim, 0, sizeof(*victim));
+	memcpy(victim->addr, addr, family == AF_INET ? 4 : 16);
+	if (lladdr_len == 6)
+		memcpy(victim->lladdr, lladdr, 6);
+	victim->family = family;
+	victim->used = 1;
+	return 1;
+}
+
+static void neigh_forget(const uint8_t *addr, uint8_t family)
+{
+	struct neigh_ent *e = neigh_find(addr, family);
+
+	if (e)
+		memset(e, 0, sizeof(*e));
+}
+
+/*
+ * Decide whether one RTM_*NEIGH message makes cached egresses wrong.
+ *
+ * Returns 1 = bump, 0 = ignore, -1 = not a neighbour we can track (missing
+ * attributes), which the caller ignores as well. `why` is only for the log.
+ */
+static int neigh_event(struct nlmsghdr *h, const char **why)
+{
+	struct ndmsg *nd = NLMSG_DATA(h);
+	struct nlattr *tb[NDA_MAX + 1] = {};
+	uint8_t addr[NEIGH_KEY_LEN] = {};
+	const uint8_t *lladdr = NULL;
+	int alen, llen = 0;
+	struct rtattr *rta;
+	int rtl;
+
+	if (h->nlmsg_len < NLMSG_HDRLEN + sizeof(*nd)) {
+		*why = "short";
+		return -1;
+	}
+	rtl = (int)(h->nlmsg_len - NLMSG_HDRLEN - sizeof(*nd));
+	rta = (struct rtattr *)((char *)nd + NLMSG_ALIGN(sizeof(*nd)));
+	for (; RTA_OK(rta, rtl); rta = RTA_NEXT(rta, rtl)) {
+		int t = rta->rta_type & NLA_TYPE_MASK;
+
+		if (t <= NDA_MAX)
+			tb[t] = (struct nlattr *)rta;
+	}
+	if (!tb[NDA_DST]) {
+		*why = "no-dst";
+		return -1;
+	}
+	alen = tb[NDA_DST]->nla_len - NLA_ALIGN(sizeof(struct nlattr));
+	if (nd->ndm_family == AF_INET && alen >= 4)
+		memcpy(addr, nla_payload(tb[NDA_DST]), 4);
+	else if (nd->ndm_family == AF_INET6 && alen >= 16)
+		memcpy(addr, nla_payload(tb[NDA_DST]), 16);
+	else {
+		*why = "family";
+		return -1;
+	}
+	if (tb[NDA_LLADDR]) {
+		llen = tb[NDA_LLADDR]->nla_len -
+		       NLA_ALIGN(sizeof(struct nlattr));
+		if (llen > 6)
+			llen = 6;
+		if (llen > 0)
+			lladdr = nla_payload(tb[NDA_LLADDR]);
+	}
+
+	/* A neighbour that just became unusable poisons every flow that
+	 * cached its MAC; a delete does too. */
+	if (h->nlmsg_type == RTM_DELNEIGH) {
+		neigh_forget(addr, nd->ndm_family);
+		*why = "neigh-deleted";
+		return 1;
+	}
+	if (nd->ndm_state & (NUD_FAILED | NUD_INCOMPLETE)) {
+		neigh_forget(addr, nd->ndm_family);
+		*why = "neigh-failed";
+		return 1;
+	}
+	/* Reachable/Stale/Delay/Probe with a lladdr: only a *changed* MAC
+	 * matters. This is the 0.8 events/s stream that used to bump the
+	 * whole table twice a minute. */
+	if (lladdr && neigh_update(addr, nd->ndm_family, lladdr, llen)) {
+		*why = "lladdr-changed";
+		return 1;
+	}
+	*why = "refresh";
+	return 0;
+}
 
 static struct nlattr *nla_find(struct nlattr *head, int len, int type)
 {
@@ -238,6 +445,80 @@ static void ct_queue(struct nlmsghdr *h)
 
 /* One fork per second at most, not one per destroyed connection. dpdctl
  * scans the flow map once and deletes every key matching any of the tuples. */
+/*
+ * Map one CTA_STATUS to a dpd_ppe_state and queue it.
+ *
+ * Order matters: HW_OFFLOAD implies OFFLOAD, so test the hardware bit first.
+ * A flow with neither bit is one the kernel is *not* offloading, i.e. squarely
+ * DPD's business again -- recording SW_ACTIVE lets a flow come back to the
+ * datapath when the flowtable drops it (the kernel does that on route/link
+ * changes, exactly where DPD's epoch also moves).
+ */
+static void ppe_update(const struct ct_tuple *t, uint32_t status)
+{
+	uint32_t want;
+	int i;
+
+	if (status & IPS_HW_OFFLOAD)
+		want = DPD_PPE_OFFLOADED;
+	else if (status & IPS_OFFLOAD)
+		want = DPD_PPE_YIELDED;
+	else
+		want = DPD_PPE_SW_ACTIVE;
+
+	/* Collapse repeated reports of the same tuple: ctnetlink resends
+	 * CTA_STATUS on every update of a live connection. */
+	for (i = 0; i < ppe_pending_n; i++)
+		if (ppe_pending[i].state == want &&
+		    ppe_pending[i].t.family == t->family &&
+		    ppe_pending[i].t.proto == t->proto &&
+		    ppe_pending[i].t.sport == t->sport &&
+		    ppe_pending[i].t.dport == t->dport &&
+		    !memcmp(ppe_pending[i].t.saddr, t->saddr, 16) &&
+		    !memcmp(ppe_pending[i].t.daddr, t->daddr, 16))
+			return;
+
+	if (ppe_pending_n >= CT_PPE_MAX)
+		return;		/* next tick catches up */
+	ppe_pending[ppe_pending_n].t = *t;
+	ppe_pending[ppe_pending_n].state = want;
+	ppe_pending_n++;
+}
+
+/* One fork per tick, regardless of how many flows changed: the whole batch
+ * goes to a file and dpdctl applies it in one pass. Same shape as ct_flush()
+ * for the same reason -- a daemon must not fork per conntrack event. */
+static void ppe_flush(int dry)
+{
+	FILE *f;
+	int i;
+
+	if (!ppe_pending_n)
+		return;
+
+	f = fopen(CT_PPE_FILE, "w");
+	if (!f) {
+		ppe_pending_n = 0;
+		return;
+	}
+	for (i = 0; i < ppe_pending_n; i++) {
+		char sa[INET6_ADDRSTRLEN], da[INET6_ADDRSTRLEN];
+		const struct ct_tuple *t = &ppe_pending[i].t;
+
+		inet_ntop(t->family, t->saddr, sa, sizeof(sa));
+		inet_ntop(t->family, t->daddr, da, sizeof(da));
+		fprintf(f, "%u %s %u %s %u %s\n", ppe_pending[i].state,
+			t->proto == IPPROTO_UDP ? "udp" : "tcp",
+			t->sport, sa, t->dport, da);
+	}
+	fclose(f);
+
+	if (!dry &&
+	    system(DPD_CTL " flows ppe -f " CT_PPE_FILE " >/dev/null 2>&1") == 0)
+		ppe_writes += (unsigned long)ppe_pending_n;
+	ppe_pending_n = 0;
+}
+
 static void ct_flush(int dry)
 {
 	char sa[INET6_ADDRSTRLEN], da[INET6_ADDRSTRLEN];
@@ -1006,6 +1287,17 @@ static void ct_status(struct nlmsghdr *h, struct stats *st)
 		st->ct_offload++;
 	if (status & IPS_HW_OFFLOAD)
 		st->ct_hw_offload++;
+
+	/* ABI 22: feed the software/hardware handover. The original tuple names
+	 * the datapath entry; conntrack always carries it on a NEW/UPDATE. */
+	if (ppe_enabled) {
+		struct ct_tuple t;
+
+		memset(&t, 0, sizeof(t));
+		a = nla_find(attrs, len, CTA_TUPLE_ORIG);
+		if (a && !parse_tuple(a, &t))
+			ppe_update(&t, status);
+	}
 }
 
 static void ct_event(struct nlmsghdr *h, int ev, struct stats *st)
@@ -1079,9 +1371,10 @@ static void publish(struct stats *st)
 	fprintf(f,
 		"{ \"uptime\": %ld, \"link\": %lu, \"link_port\": %lu,"
 		" \"addr\": %lu, \"route\": %lu,"
-		" \"neigh\": %lu, \"ct_new\": %lu, \"ct_update\": %lu,"
+		" \"neigh\": %lu, \"neigh_ignored\": %lu,"
+		" \"neigh_forced\": %lu, \"ct_new\": %lu, \"ct_update\": %lu,"
 		" \"ct_destroy\": %lu, \"ct_offload\": %lu,"
-		" \"ct_hw_offload\": %lu, \"epoch_bumps\": %lu,"
+		" \"ct_hw_offload\": %lu, \"ppe_writes\": %lu, \"epoch_bumps\": %lu,"
 		" \"unknown\": %lu, \"errors\": %lu, \"ct_delete_batches\": %lu,"
 		" \"class_rules\": %lu, \"class_bad\": %lu,"
 		" \"class_applied_at\": %ld, \"class_error\": %lu,"
@@ -1091,8 +1384,10 @@ static void publish(struct stats *st)
 		" \"short_ratio\": %.3f },"
 		" \"last_event\": %ld }\n",
 		(long)(time(NULL) - st->started), st->link, st->link_port,
-		st->addr, st->route, st->neigh, st->ct_new, st->ct_update,
-		st->ct_destroy, st->ct_offload, st->ct_hw_offload, st->bumps,
+		st->addr, st->route, st->neigh, st->neigh_ignored,
+		st->neigh_forced, st->ct_new, st->ct_update,
+		st->ct_destroy, st->ct_offload, st->ct_hw_offload, ppe_writes,
+		st->bumps,
 		st->unknown, st->errors,
 		ct_delete_batches, st->class_rules, st->class_bad,
 		(long)st->class_applied_at, st->class_error,
@@ -1245,11 +1540,17 @@ int main(int argc, char **argv)
 							hard = 1;
 							break;
 						case RTM_NEWNEIGH:
-						case RTM_DELNEIGH:
+						case RTM_DELNEIGH: {
+							const char *why = "";
+
 							st.neigh++;
 							plugin_topology(DPD_EV_NEIGH, NULL);
-							soft = 1;
+							if (neigh_event(h, &why) > 0)
+								soft = 1;
+							else
+								st.neigh_ignored++;
 							break;
+						}
 						default:
 							st.unknown++;
 						}
@@ -1260,6 +1561,13 @@ int main(int argc, char **argv)
 					 * MAC, and bumping for it every couple of
 					 * seconds means no short flow ever survives
 					 * to accel_after; rate-limit it instead. */
+					/* hard: link/address/route -- always.
+					 * soft: a neighbour that actually broke
+					 * or changed MAC (neigh_event() decided
+					 * that). Rate-limit only the burst, so
+					 * an ARP storm cannot become an epoch
+					 * storm; the 30 s table-wide invalidation
+					 * it used to cause is gone. */
 					if (hard) {
 						bump_at = now_ms + DEBOUNCE_MS;
 					} else if (soft &&
@@ -1306,8 +1614,20 @@ int main(int argc, char **argv)
 			if (once)
 				break;
 		}
+		/* Backstop: a cached dmac is trusted for NEIGH_SWEEP_MS. If
+		 * nothing invalidated it by then, re-learn anyway. This is the
+		 * only remaining periodic bump, and it is 5 min apart instead
+		 * of the old 30 s neighbour rate-limit. */
+		if (!neigh_sweep_at)
+			neigh_sweep_at = now_ms + NEIGH_SWEEP_MS;
+		else if (now_ms >= neigh_sweep_at) {
+			st.neigh_forced++;
+			bump_at = now_ms + DEBOUNCE_MS;
+			neigh_sweep_at = now_ms + NEIGH_SWEEP_MS;
+		}
 		if (time(NULL) != last_ct_flush) {
 			ct_flush(dry);
+			ppe_flush(dry);
 			last_ct_flush = time(NULL);
 		}
 		if (time(NULL) >= next_prune) {

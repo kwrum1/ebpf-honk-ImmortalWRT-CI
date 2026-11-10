@@ -255,8 +255,42 @@
  *         can lag by a tick, making age = now - last_seen negative, and a
  *         negative age means "expired" -- every flow would be deleted on its
  *         first lookup. One clock domain, always.
+ *
+ * 22: software/hardware coexistence (the "dual acceleration" contract).
+ *
+ *     The question this answers: on a Qualcomm box, the hardware (qca-ppe, or
+ *     NSS+ECM) and DPD can both accelerate one connection. Whichever touches
+ *     the packet first wins and the other's accounting lies; on NSS the
+ *     offloaded packet never comes back to Linux at all, so a DPD entry would
+ *     keep "hitting" a flow whose packets are gone. So DPD must be able to
+ *     stand down per flow, and the decision must be driven by evidence.
+ *
+ *     Evidence is conntrack: dpdfwd reads CTA_STATUS on every NEW/UPDATE and
+ *     maps IPS_HW_OFFLOAD -> DPD_PPE_OFFLOADED, IPS_OFFLOAD ->
+ *     DPD_PPE_YIELDED, neither -> DPD_PPE_SW_ACTIVE. The state is written into
+ *     dpd_flow_val.ct_cookie (reserved-but-unused since ABI 18, so the entry
+ *     stays 72 bytes and the hit path needs no extra lookup) through one
+ *     batched `dpdctl flows ppe -f` per second, never one fork per event.
+ *
+ *     Three behaviours, via cfg->ppe_mode:
+ *       OFF       never yield. x86/RK: no such hardware exists.
+ *       YIELD     stand down when the flow is OFFLOADED/YIELDED. Everything
+ *                 else stays DPD's.
+ *       FALLBACK  additionally take back a flow the hardware FAILED or DENIED.
+ *                 This is the meaningful "dual" mode: the hardware gets first
+ *                 refusal, DPD is the safety net when it breaks.
+ *     cfg->ppe_grace_ms keeps DPD off a freshly learned flow long enough for
+ *     the kernel to decide, so the two engines do not race on a new flow.
+ *
+ *     Measured on the IPQ60xx (2026-11-11, veth pair, iperf3):
+ *       yield    + OFFLOADED : ppe_yield 14 -> 76487, flow_hit frozen at
+ *                              147740, throughput unchanged (6.1 Gbit/s).
+ *       fallback + FAILED    : flow_hit resumed, 233903 -> 269085.
+ *       grace=2000 + UNKNOWN : ppe_grace 0 -> 38004, flow_hit +2 only.
+ *
+ *     New counters ST_PPE_YIELD / ST_PPE_GRACE. No map value changed size.
  */
-#define DPD_ABI_VERSION		21
+#define DPD_ABI_VERSION		22
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -413,6 +447,13 @@ struct dpd_config {
 	 * inclusive. 0 means "use the default" (20000..29999). */
 	__u32	nat_port_min;
 	__u32	nat_port_max;
+	/* ABI 22: software/hardware coexistence. ppe_mode is enum dpd_ppe_mode;
+	 * ppe_grace_ms is how long a freshly learned flow keeps yielding before
+	 * DPD may take it over, which gives the kernel time to hand the flow to
+	 * the flowtable/PPE. 0 = no grace (take over immediately unless the
+	 * hardware already claimed it). */
+	__u32	ppe_mode;
+	__u32	ppe_grace_ms;
 };
 
 enum dpd_stat_idx {
@@ -491,6 +532,12 @@ enum dpd_stat_idx {
 	 *			 * allocated by the egress program		*/
 	ST_NAT_EXHAUST,		/* ABI 20: every probe in the port range was
 	 *			 * taken; packet left un-NATed		*/
+	/* ABI 22: the software/hardware handover. YIELD = DPD stepped aside
+	 * because conntrack said the flow is hardware/flowtable offloaded;
+	 * GRACE = the flow is inside ppe_grace_ms, so DPD waits for the kernel
+	 * to make up its mind before taking it. */
+	ST_PPE_YIELD,
+	ST_PPE_GRACE,
 	ST__MAX,
 };
 
@@ -657,7 +704,9 @@ struct dpd_flow_val {
 	__u32	state;		/* enum dpd_flow_state			*/
 	__u32	action;		/* enum dpd_flow_action			*/
 	__u32	skb_priority;	/* cached skb->priority (QoS)		*/
-	__u32	ct_cookie;	/* 0 unless the optional bpf_ct path	*/
+	__u32	ct_cookie;	/* ABI 22: enum dpd_ppe_state (was reserved
+				 * for an optional bpf_ct path that was never
+				 * built). Reused so the entry stays 72 B. */
 	__u32	nat_flags;	/* DPD_NAT_* (sniffed, for observability) */
 	__u32	dscp;		/* cached DSCP (iph->tos >> 2)		*/
 	/* ABI 21: monotonic ms of the last einat-binding verification. The
@@ -666,6 +715,45 @@ struct dpd_flow_val {
 	__u32	nat_checked_ms;
 	__u64	packets;	/* per-flow counters (cfg->flow_counters) */
 	__u64	bytes;
+};
+
+/*
+ * ABI 22: software/hardware coexistence state, per flow.
+ *
+ * On a Qualcomm box the hardware (qca-ppe, or NSS+ECM) and DPD's TC datapath
+ * can both accelerate one connection. When they do, whichever touches the
+ * packet first wins and the other's accounting lies -- and on NSS the offloaded
+ * packet never returns to Linux at all, so a DPD entry would keep "hitting" a
+ * flow whose packets are gone.
+ *
+ * So DPD must be able to stand down *per flow*. dpdfwd learns the truth from
+ * conntrack (CTA_STATUS IPS_OFFLOAD / IPS_HW_OFFLOAD: the kernel telling us the
+ * flow was handed to a flowtable) and ORs the state into the flow entry. The
+ * hit path then yields instead of redirecting.
+ *
+ * Stored in dpd_flow_val.ct_cookie, reserved-but-unused since ABI 18, so no map
+ * value changed size (still 72 bytes) and the hit path needs no extra lookup.
+ */
+enum dpd_ppe_state {
+	DPD_PPE_UNKNOWN = 0,	/* nothing known yet: act per cfg->ppe_mode */
+	DPD_PPE_SW_ACTIVE,	/* DPD owns it, no hardware claim seen */
+	DPD_PPE_YIELDED,	/* DPD deliberately handed it back, waiting */
+	DPD_PPE_OFFLOADED,	/* hardware/flowtable owns it: never touch */
+	DPD_PPE_FAILED,		/* hardware tried and failed: DPD may take it */
+	DPD_PPE_DENIED,		/* hardware refused it: DPD may take it */
+};
+
+/* How the datapath treats a flow the hardware also claims.
+ *
+ *   OFF      ignore ppe state entirely (x86/RK default: no such hardware)
+ *   YIELD    stand down on OFFLOADED only; everything else is DPD's
+ *   FALLBACK also take over FAILED/DENIED, i.e. DPD is the safety net for a
+ *            hardware path that broke -- the actual "dual" mode
+ */
+enum dpd_ppe_mode {
+	DPD_PPE_OFF = 0,
+	DPD_PPE_YIELD,
+	DPD_PPE_FALLBACK,
 };
 
 /* ABI 21: how often the hit path re-verifies an einat binding for a NATed
