@@ -205,6 +205,20 @@ static int ppe_parse(const char *s, uint32_t *out)
 	return 0;
 }
 
+/* Per-flow hardware state (dpd_flow_val.ct_cookie). */
+static const char *ppe_state_name(uint32_t s)
+{
+	switch (s) {
+	case DPD_PPE_UNKNOWN:	return "unknown";
+	case DPD_PPE_SW_ACTIVE:	return "sw_active";
+	case DPD_PPE_YIELDED:	return "yielded";
+	case DPD_PPE_OFFLOADED:	return "offloaded";
+	case DPD_PPE_FAILED:	return "failed";
+	case DPD_PPE_DENIED:	return "denied";
+	default:		return "?";
+	}
+}
+
 static const char *policy_name(uint32_t p)
 {
 	switch (p) {
@@ -1601,7 +1615,7 @@ static int cmd_flows(int argc, char **argv)
 			printf("%s:%u > %s:%u\n", sa, ntohs(k.sport), da,
 			       ntohs(k.dport));
 			printf("%-10s fam=%u proto=%u egress=%-10s wan=%u epoch=%u "
-			       "cls=%s age=%llums "
+			       "cls=%s ppe=%s age=%llums "
 			       "dmac=%02x:%02x:%02x:%02x:%02x:%02x "
 			       "smac=%02x:%02x:%02x:%02x:%02x:%02x%s\n",
 			       ifname(k.ifindex), k.family, k.proto,
@@ -1610,6 +1624,7 @@ static int cmd_flows(int argc, char **argv)
 			       (unsigned)((v.wan & DPD_FLOW_EPOCH_MASK) >> 8),
 			       (v.flags & DPD_FLOW_F_L2) ? "l2" :
 			       (v.flags & DPD_FLOW_F_DEV) ? "dev" : "neigh",
+			       ppe_state_name(v.ct_cookie),
 			       (unsigned long long)age_ms,
 			       v.dmac[0], v.dmac[1], v.dmac[2],
 			       v.dmac[3], v.dmac[4], v.dmac[5],

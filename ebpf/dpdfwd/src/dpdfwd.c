@@ -57,6 +57,8 @@
 #define CT_DELETE_FILE "/tmp/dpd-ct-delete"
 #define CT_PPE_FILE "/tmp/dpd-ct-ppe"
 #define CT_PPE_MAX 128
+/* Sweep interval for /proc/net/nf_conntrack, see ppe_sweep(). */
+#define PPE_SWEEP_S 1
 #define DEBOUNCE_MS 300
 /* Neighbour churn: how long a *suspicious* one may wait before the epoch is
  * bumped, and the hard ceiling on how stale a cached MAC may get.
@@ -175,6 +177,7 @@ static struct ppe_pend ppe_pending[CT_PPE_MAX];
 static int ppe_pending_n;
 static int ppe_enabled = 1;	/* set from uci at startup */
 static unsigned long ppe_writes;
+static unsigned long ppe_swept;
 
 static struct ct_tuple ct_pending[CT_PENDING_MAX];
 static int ct_pending_n;
@@ -454,6 +457,17 @@ static void ct_queue(struct nlmsghdr *h)
  * datapath when the flowtable drops it (the kernel does that on route/link
  * changes, exactly where DPD's epoch also moves).
  */
+/* Stronger evidence of a hardware/flowtable claim must win. */
+static int ppe_rank(uint32_t s)
+{
+	switch (s) {
+	case DPD_PPE_OFFLOADED:	return 3;
+	case DPD_PPE_YIELDED:	return 2;
+	case DPD_PPE_SW_ACTIVE:	return 1;
+	default:		return 0;
+	}
+}
+
 static void ppe_update(const struct ct_tuple *t, uint32_t status)
 {
 	uint32_t want;
@@ -466,23 +480,147 @@ static void ppe_update(const struct ct_tuple *t, uint32_t status)
 	else
 		want = DPD_PPE_SW_ACTIVE;
 
-	/* Collapse repeated reports of the same tuple: ctnetlink resends
-	 * CTA_STATUS on every update of a live connection. */
+	/* One pending entry per tuple. Two sources feed this: the ctnetlink
+	 * event path (which almost never carries an offload bit, because the
+	 * kernel stops reporting once the flow leaves netfilter) and the
+	 * /proc sweep (which does). If both queue the same flow, the weaker
+	 * state must not overwrite the stronger one, or the datapath would be
+	 * told "nobody owns it" right after being told "a flowtable does". */
 	for (i = 0; i < ppe_pending_n; i++)
-		if (ppe_pending[i].state == want &&
-		    ppe_pending[i].t.family == t->family &&
+		if (ppe_pending[i].t.family == t->family &&
 		    ppe_pending[i].t.proto == t->proto &&
 		    ppe_pending[i].t.sport == t->sport &&
 		    ppe_pending[i].t.dport == t->dport &&
 		    !memcmp(ppe_pending[i].t.saddr, t->saddr, 16) &&
-		    !memcmp(ppe_pending[i].t.daddr, t->daddr, 16))
+		    !memcmp(ppe_pending[i].t.daddr, t->daddr, 16)) {
+			/* Rank: OFFLOADED(3) > YIELDED(2) > SW_ACTIVE(1). */
+			if (ppe_rank(want) > ppe_rank(ppe_pending[i].state))
+				ppe_pending[i].state = want;
 			return;
+		}
 
 	if (ppe_pending_n >= CT_PPE_MAX)
 		return;		/* next tick catches up */
 	ppe_pending[ppe_pending_n].t = *t;
 	ppe_pending[ppe_pending_n].state = want;
 	ppe_pending_n++;
+}
+
+/*
+ * Read the kernel's own offload flags out of /proc/net/nf_conntrack.
+ *
+ * Needed because ctnetlink does NOT deliver the transition: once a flow is
+ * handed to a flowtable its packets stop traversing netfilter, so no further
+ * CT UPDATE is emitted and CTA_STATUS with IPS_OFFLOAD is never seen. Measured
+ * on the IPQ60xx (2026-11-11): the proc table showed [OFFLOAD] for two flows
+ * while ct_offload stayed 0 for the whole connection.
+ *
+ * Line format (one entry per line, both directions on the same line):
+ *   ipv4 2 tcp 6 431999 ESTABLISHED
+ *       src=A dst=B sport=X dport=Y packets=.. [OFFLOAD]
+ *       src=B dst=A sport=Y dport=X packets=.. mark=0 ...
+ * Only the FIRST (original) direction is used, matching the event path.
+ */
+static void ppe_sweep(int dry)
+{
+	FILE *f;
+	char line[1024];
+
+	f = fopen("/proc/net/nf_conntrack", "r");
+	if (!f)
+		return;
+
+	while (fgets(line, sizeof(line), f)) {
+		struct ct_tuple t;
+		uint32_t st = 0;
+		char *p, *end;
+		int field = 0, addrs = 0;
+
+		if (strstr(line, "[HW_OFFLOAD]"))
+			st = IPS_HW_OFFLOAD;
+		else if (strstr(line, "[OFFLOAD]"))
+			st = IPS_OFFLOAD;
+		else
+			continue;
+
+		memset(&t, 0, sizeof(t));
+		/* Skip family / l3num / proto / timeout, then the rest is
+		 * key=value. Advance p past every skipped token, otherwise the
+		 * key loop starts on the numeric timeout and misreads it. */
+		p = line;
+		for (field = 0; field < 4; field++) {
+			size_t len;
+
+			end = p + strcspn(p, " \t\r\n");
+			len = (size_t)(end - p);
+			if (field == 0)
+				t.family = (len == 4 && !strncmp(p, "ipv6", 4))
+					   ? AF_INET6 : AF_INET;
+			else if (field == 2) {
+				if (len == 3 && !strncmp(p, "tcp", 3))
+					t.proto = IPPROTO_TCP;
+				else if (len == 3 && !strncmp(p, "udp", 3))
+					t.proto = IPPROTO_UDP;
+			}
+			if (!*end)
+				break;
+			p = end;
+			while (*p == ' ' || *p == '\t')
+				p++;
+		}
+		if (!t.proto)
+			continue;
+
+		while (*p) {
+			char key[16], val[64];
+			size_t vlen;
+			char *eq;
+
+			end = p + strcspn(p, " \t\r\n");
+			vlen = (size_t)(end - p);
+			eq = memchr(p, '=', vlen);
+			if (eq) {
+				size_t klen = (size_t)(eq - p);
+
+				vlen = (size_t)(end - eq - 1);
+				if (klen < sizeof(key) && vlen < sizeof(val)) {
+					memcpy(key, p, klen);
+					key[klen] = 0;
+					memcpy(val, eq + 1, vlen);
+					val[vlen] = 0;
+
+					if (!strcmp(key, "src")) {
+						if (inet_pton(t.family, val,
+							      t.saddr) == 1)
+							addrs |= 1;
+					} else if (!strcmp(key, "dst")) {
+						if (inet_pton(t.family, val,
+							      t.daddr) == 1)
+							addrs |= 2;
+					} else if (!strcmp(key, "sport")) {
+						t.sport = htons((uint16_t)
+								strtoul(val, NULL, 10));
+					} else if (!strcmp(key, "dport")) {
+						t.dport = htons((uint16_t)
+								strtoul(val, NULL, 10));
+					}
+				}
+			}
+			if (addrs == 3 && t.sport && t.dport)
+				break;
+			if (!*end)
+				break;
+			p = end;
+			while (*p == ' ' || *p == '\t')
+				p++;
+		}
+
+		if (addrs == 3 && t.sport && t.dport && !dry) {
+			ppe_swept++;
+			ppe_update(&t, st);
+		}
+	}
+	fclose(f);
 }
 
 /* One fork per tick, regardless of how many flows changed: the whole batch
@@ -509,7 +647,8 @@ static void ppe_flush(int dry)
 		inet_ntop(t->family, t->daddr, da, sizeof(da));
 		fprintf(f, "%u %s %u %s %u %s\n", ppe_pending[i].state,
 			t->proto == IPPROTO_UDP ? "udp" : "tcp",
-			t->sport, sa, t->dport, da);
+			(unsigned)ntohs(t->sport), sa,
+			(unsigned)ntohs(t->dport), da);
 	}
 	fclose(f);
 
@@ -1374,7 +1513,8 @@ static void publish(struct stats *st)
 		" \"neigh\": %lu, \"neigh_ignored\": %lu,"
 		" \"neigh_forced\": %lu, \"ct_new\": %lu, \"ct_update\": %lu,"
 		" \"ct_destroy\": %lu, \"ct_offload\": %lu,"
-		" \"ct_hw_offload\": %lu, \"ppe_writes\": %lu, \"epoch_bumps\": %lu,"
+		" \"ct_hw_offload\": %lu, \"ppe_writes\": %lu,"
+		" \"ppe_swept\": %lu, \"epoch_bumps\": %lu,"
 		" \"unknown\": %lu, \"errors\": %lu, \"ct_delete_batches\": %lu,"
 		" \"class_rules\": %lu, \"class_bad\": %lu,"
 		" \"class_applied_at\": %ld, \"class_error\": %lu,"
@@ -1387,7 +1527,7 @@ static void publish(struct stats *st)
 		st->addr, st->route, st->neigh, st->neigh_ignored,
 		st->neigh_forced, st->ct_new, st->ct_update,
 		st->ct_destroy, st->ct_offload, st->ct_hw_offload, ppe_writes,
-		st->bumps,
+		ppe_swept, st->bumps,
 		st->unknown, st->errors,
 		ct_delete_batches, st->class_rules, st->class_bad,
 		(long)st->class_applied_at, st->class_error,
@@ -1627,6 +1767,10 @@ int main(int argc, char **argv)
 		}
 		if (time(NULL) != last_ct_flush) {
 			ct_flush(dry);
+			/* The event stream cannot report an offload (see ppe_sweep),
+			 * so poll the table, then push whatever changed in one
+			 * batch. Both run on the same 1 s tick. */
+			ppe_sweep(dry);
 			ppe_flush(dry);
 			last_ct_flush = time(NULL);
 		}
