@@ -152,42 +152,32 @@ fi
 
 echo "== 7. IPQ/MTK 镜像不得携带 DPD 数据面（PPE/flowtable 独占加速） =="
 # IPQ/MTK 走内核 flowtable（IPQ 还有 PPE 硬件卸载），DPD 数据面不参与竞争。
-# 两个闸门：
-#   a) 包本身不允许被这些 target 选中（DEPENDS 里的 @!(TARGET_qualcommax)）；
-#   b) 镜像构建脚本不允许把 ebpf/ 拷进 IPQ/MTK 的包目录。
+# 检查的是**源码约定**，不需要构建产物：谁把闸门删掉，CI 立刻失败，而不是等
+# 烧到机器上才发现两套加速器抢同一条流。
 #
-# 这里检查的是**源码约定**，不需要构建产物：一旦有人把闸门删掉，CI 立刻失败，
-# 而不是等烧到机器上才发现两套加速器抢同一条流。
-DPD_PKGS="dpd-fastpath einat-ebpf dpdfwd dpd-honk dpd-acl dpd-qos dpd-mwan"
-leak_src=0
-for f in "$ROOT"/ebpf/router-dataplane/Makefile \
-	 "$ROOT"/ebpf/einat-ebpf/Makefile \
-	 "$ROOT"/ebpf/dpdfwd/Makefile \
-	 "$ROOT"/ebpf/dpd-acl/Makefile \
-	 "$ROOT"/ebpf/dpd-qos/Makefile \
-	 "$ROOT"/ebpf/dpd-mwan/Makefile \
-	 "$ROOT"/ebpf/dpd-honk/Makefile; do
-	[ -f "$f" ] || continue
-	name=$(sed -n 's/^[[:space:]]*PKG_NAME:=//p' "$f" | head -1)
-	dep=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)/\1/p' "$f" | head -1)
-	case "$dep" in
-	*TARGET_qualcommax*) ;;
-	*)
-		# 只有“能被所有 target 选中”的包才需要这个闸门。带
-		# @(x86_64||aarch64) 之类的包在 IPQ 上仍可能被选中（aarch64），
-		# 所以它们同样必须排除 qualcommax。
-		case "$dep" in
-		*@\(x86_64*aarch64*\)*|*@\(aarch64*x86_64*\)*)
-			bad "${f#$ROOT/}: $name 允许 aarch64 但没排除 TARGET_qualcommax"
-			leak_src=1
+# 真正的保护有三层，这里各查一层：
+#   a) IPQ/MTK 的 Config/*.txt 不得选中任何 DPD 数据面包（选中即冲突）；
+#   b) Packages.sh 的 ebpf/ 拷贝必须在 X86|ROCKCHIP 分支内；
+#   c) 带 BPF 对象的包（事后会被 tc 挂到设备上）必须排除 TARGET_qualcommax，
+#      因为 aarch64 的 IPQ 否则能直接装上。
+leak=0
+
+# a) configs
+for cfg in "$ROOT"/Config/IPQ*.txt "$ROOT"/Config/MEDIATEK*.txt \
+	   "$ROOT"/Config/AIROHA*.txt; do
+	[ -f "$cfg" ] || continue
+	while IFS= read -r pkg; do
+		case "$pkg" in
+		dpd-fastpath | einat-ebpf | router-acl | router-dataplane | dpdfwd)
+			bad "${cfg#$ROOT/} 选中了 $pkg（IPQ/MTK 的加速归 flowtable/PPE）"
+			leak=1
 			;;
 		esac
-		;;
-	esac
+	done < <(sed -n 's/^CONFIG_PACKAGE_\([^=]*\)=[ym]$/\1/p' "$cfg")
 done
-[ "$leak_src" = 0 ] && ok "dpd 数据面包排除了 TARGET_qualcommax"
+[ "$leak" = 0 ] && ok "IPQ/MTK 的 Config 没有选中 DPD 数据面包"
 
-# 构建脚本里 ebpf/ 只能进 X86/ROCKCHIP 分支
+# b) Packages.sh 的拷贝分支
 if awk '/^case "\$WRT_CONFIG" in/{on=1}
 	on && /^X86\|ROCKCHIP\)/{x86=1}
 	on && /ebpf\/ \$/ {if (!x86) exit 1}
@@ -195,7 +185,27 @@ if awk '/^case "\$WRT_CONFIG" in/{on=1}
 	ok "Packages.sh 的 ebpf/ 拷贝仍在 X86|ROCKCHIP 分支内"
 else
 	bad "Packages.sh 会把 ebpf/ 拷进非 X86/ROCKCHIP 的构建（IPQ/MTK 会捡到 DPD 数据面）"
+	leak=1
 fi
+
+# c) 装 BPF 对象的包必须排除 qualcommax。判定依据是源码里真有 *.bpf.c，
+# 而不是包名或 DEPENDS 里出现 bpf 字样（后者会把纯用户态包也算进来）。
+for d in "$ROOT"/ebpf/*/; do
+	[ -d "$d" ] || continue
+	name=$(basename "$d")
+	objs=$(find "$d" -name '*.bpf.c' 2>/dev/null | wc -l)
+	[ "$objs" -gt 0 ] || continue
+	dep=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)/\1/p' "$d/Makefile" 2>/dev/null |
+		head -1)
+	case "$dep" in
+	*TARGET_qualcommax*) ;;
+	*)
+		bad "ebpf/$name 安装 BPF 对象但没有排除 TARGET_qualcommax"
+		leak=1
+		;;
+	esac
+done
+[ "$leak" = 0 ] && ok "所有安装 BPF 对象的包都排除了 TARGET_qualcommax"
 
 echo
 if [ "$fails" != 0 ]; then

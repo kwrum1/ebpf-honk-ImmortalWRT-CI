@@ -25,7 +25,11 @@ define Package/router-acl
   CATEGORY:=Network
   TITLE:=eBPF WAN ACL (drop unsolicited inbound, escape conntrack)
   URL:=https://github.com/kwrum1/openwrt-honk
-  DEPENDS:=+libbpf +libelf +kmod-sched-core +kmod-sched-bpf +kmod-nft-core +tc-bpf $(BPF_DEPENDS)
+# IPQ/MTK: the kernel flowtable (and PP&E on IPQ) owns the WAN hook. A tc
+# classifier at pref 90 would run *ahead* of that offload decision and
+# could drop a packet the hardware path already accepted, so this package
+# is not installable on qualcommax at all.
+  DEPENDS:=@!(TARGET_qualcommax) +libbpf +libelf +kmod-sched-core +kmod-sched-bpf +kmod-nft-core +tc-bpf $(BPF_DEPENDS)
 endef
 
 define Package/router-acl/description
