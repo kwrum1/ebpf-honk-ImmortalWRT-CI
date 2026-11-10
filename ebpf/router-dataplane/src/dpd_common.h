@@ -227,8 +227,36 @@
  *      the policy layer drops it (measured: ICMP 0/3 vs 3/3).
  *      - cfg.flow_counters gains value 2 (sampled, 1/16 of hits). The field
  *      stays a __u32 at the same offset, so no layout or ABI change.
+ *
+ * 21: per-packet cost of the hit path, and flow-lifetime hygiene. No map
+ *     value grew: nat_checked_ms took the 4 bytes of alignment padding that
+ *     the __u64 packets/bytes already forced after dscp, so
+ *     sizeof(struct dpd_flow_val) stayed 72 and an in-place upgrade can reuse
+ *     the pinned map. The bump exists because dpd_pins_compat() must still
+ *     drop pins written by an object that predates the new semantics:
+ *
+ *     - dpd_flow_val.nat_checked_ms (DPD_NAT_CHECK_MS, 250 ms): the uplink
+ *       NAT gate used to do `bpf_map_lookup_elem(dpd_nat)` for every
+ *       forwarded packet of a NATed flow, purely to confirm einat's binding
+ *       still exists. It now does that at most once per 250 ms, well under
+ *       einat's binding lifetime: one hash lookup removed from roughly half
+ *       of all forward packets.
+ *     - FIN/RST releases BOTH directions. The reverse entry used to wait for
+ *       its own TTL, i.e. the longest-lived half of a closed connection.
+ *
+ *     Two ideas were tried and rejected, both measured on a 6.17 build host
+ *     with the real verifier, and both recorded here so they do not get
+ *     "optimised" back in:
+ *       - bpf_redirect_map()/DEVMAP: XDP-only. A sched_cls program cannot
+ *         call it ("program of this type cannot use helper
+ *         bpf_redirect_map#51"), so TC keeps bpf_redirect().
+ *       - bpf_ktime_get_coarse_ns() on the hit path: a DIFFERENT clock
+ *         domain from the bpf_ktime_get_ns() that stamps last_seen_ms. It
+ *         can lag by a tick, making age = now - last_seen negative, and a
+ *         negative age means "expired" -- every flow would be deleted on its
+ *         first lookup. One clock domain, always.
  */
-#define DPD_ABI_VERSION		20
+#define DPD_ABI_VERSION		21
 
 /* TC section names in the BPF object; files/dpd-fastpath.sh passes the right
  * one to tc(8) based on the ingress device type. L2 is the classic Ethernet
@@ -582,11 +610,15 @@ struct dpd_flow_key {
  * is what lets the hit path emit with bpf_redirect() instead of
  * bpf_redirect_neigh(); see dpd_emit_l2() in the BPF program.
  *
- * last_seen_ms is CLOCK_MONOTONIC in milliseconds (the same clock as
- * bpf_ktime_get_ns()), truncated to 32 bits: it wraps every ~49.7 days, so the
- * freshness test is done on the *signed difference* (age >= 0 && age < ttl),
+ * last_seen_ms is CLOCK_MONOTONIC in milliseconds from
+ * bpf_ktime_get_ns()/1e6, truncated to 32 bits: it wraps every ~49.7 days, so
+ * the freshness test is done on the *signed difference* (age >= 0 && age < ttl),
  * never on an absolute comparison. That buys us 4 bytes for smac without growing
  * the entry.
+ *
+ * EVERY reader and writer of last_seen_ms must use bpf_ktime_get_ns(). Do not
+ * substitute a coarse clock: CLOCK_MONOTONIC_COARSE is a different time base,
+ * it can be a tick behind, and a negative age is interpreted as "expired".
  *
  * flags carries DPD_FLOW_F_NO_NEIGH in bit 0 and the per-direction prime
  * counter in bits 8..15 (DPD_FLOW_PRIME_*). The counter is the reason a
@@ -627,11 +659,19 @@ struct dpd_flow_val {
 	__u32	skb_priority;	/* cached skb->priority (QoS)		*/
 	__u32	ct_cookie;	/* 0 unless the optional bpf_ct path	*/
 	__u32	nat_flags;	/* DPD_NAT_* (sniffed, for observability) */
-	__u16	dscp;		/* cached DSCP (iph->tos >> 2)		*/
-	__u16	_pad2;
+	__u32	dscp;		/* cached DSCP (iph->tos >> 2)		*/
+	/* ABI 21: monotonic ms of the last einat-binding verification. The
+	 * uplink NAT gate used to look dpd_nat up on every packet; it now does
+	 * that at most once per DPD_NAT_CHECK_MS. 0 = never checked. */
+	__u32	nat_checked_ms;
 	__u64	packets;	/* per-flow counters (cfg->flow_counters) */
 	__u64	bytes;
 };
+
+/* ABI 21: how often the hit path re-verifies an einat binding for a NATed
+ * uplink flow. 250 ms is far below einat's own binding lifetime and removes a
+ * hash lookup from every forward packet. */
+#define DPD_NAT_CHECK_MS	250
 
 /* ABI 18: userspace-written policy cache, keyed by the same 5-tuple as
  * dpd_flows (including ingress ifindex). The learn path copies action and

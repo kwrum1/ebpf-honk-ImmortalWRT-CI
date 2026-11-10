@@ -1024,6 +1024,11 @@ static __always_inline int dpd_emit_l2(struct __sk_buff *skb, __u32 ifindex,
 	__builtin_memcpy(eth->h_dest, dmac, ETH_ALEN);
 	__builtin_memcpy(eth->h_source, smac, ETH_ALEN);
 
+	/* bpf_redirect_map() would save the per-packet device lookup, but it
+	 * is an XDP helper: a sched_cls program cannot call it (the verifier
+	 * rejects the load with "program of this type cannot use helper
+	 * bpf_redirect_map"). TC has bpf_redirect() and bpf_redirect_neigh()
+	 * only, so this stays. */
 	if (bpf_redirect(ifindex, 0) != TC_ACT_REDIRECT)
 		return -1;
 	DPD_INC(st, ST_REDIRECT_OK);
@@ -1394,6 +1399,13 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 
 	/* ---- Mode B: try the self-learned shortcut first ---- */
 	if (cfg->mode == DPD_MODE_STATEFUL) {
+		/* One clock domain only: learn (line ~2021), the NAT stamp
+		 * and this read all use bpf_ktime_get_ns(). A coarse clock
+		 * here would be a different time base (MONOTONIC_COARSE can
+		 * lag by a tick), making age negative -- and a negative age
+		 * means "expired", so every flow would be dropped on its
+		 * first hit. The ~10 cycles are not worth that class of bug;
+		 * measure it properly before revisiting. */
 		__u32 now = (__u32)(bpf_ktime_get_ns() / 1000000ULL);
 		__u32 ttl = cfg->flow_ttl_ms;
 		struct dpd_flow_val *fval;
@@ -1493,8 +1505,27 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 
 				if ((void *)(th + 1) <= data_end &&
 				    (th->fin || th->rst)) {
+					/* ABI 21: release the reverse entry too.
+					 * It used to wait for its TTL, which is
+					 * the longest-lived half of a closed
+					 * connection. */
+					struct dpd_flow_key rk = fkey;
+					__u32 tp = rk.sport;
+					int wi;
+
 					fval->state = DPD_FLOW_STATE_FIN;
 					bpf_map_delete_elem(&dpd_flows, &fkey);
+					rk.ifindex = fval->egress_ifindex;
+					rk.sport = rk.dport;
+					rk.dport = tp;
+#pragma unroll
+					for (wi = 0; wi < 4; wi++) {
+						__u32 w = rk.saddr[wi];
+
+						rk.saddr[wi] = rk.daddr[wi];
+						rk.daddr[wi] = w;
+					}
+					bpf_map_delete_elem(&dpd_flows, &rk);
 					DPD_INC(st, ST_FLOW_FIN);
 					return TC_ACT_UNSPEC;
 				}
@@ -1566,7 +1597,9 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 			if (!cfg->nat_forward &&
 			    (fval->flags & DPD_FLOW_F_NAT) &&
 			    fkey.family == AF_INET &&
-			    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP)) {
+			    (fkey.proto == IPPROTO_TCP || fkey.proto == IPPROTO_UDP) &&
+			    (__u32)(now - fval->nat_checked_ms) >=
+					DPD_NAT_CHECK_MS) {
 				struct dpd_nat_key nk = {};
 				struct dpd_nat_val *nv;
 
@@ -1578,6 +1611,7 @@ static __always_inline int dpd_fastpath_common(struct __sk_buff *skb,
 					DPD_INC(st, ST_NAT_GONE);
 					return TC_ACT_UNSPEC;
 				}
+				fval->nat_checked_ms = now;
 			}
 
 			/* ABI 18: restore the QoS priority cached at learn time.

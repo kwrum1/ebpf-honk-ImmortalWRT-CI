@@ -239,28 +239,6 @@ dpd_nat_ingress_sync() {
 	return 0
 }
 
-# Devices this run has already put the classifier on, in attach order. Used by
-# dpd_attach_if() to skip a bridge port whose master is in here: the master's
-# ingress hook already sees the frame, and a port hook on top of it would run
-# the same program twice for one skb (measured on the N5000: `bpftool net show`
-# listed classifier/l2 on br-lan and on eth0/eth1/eth2, each with its own prog
-# id, so one bridged frame can be parsed and looked up twice).
-DPD_ATTACHED=""
-
-dpd_attached_add() {
-	case " $DPD_ATTACHED " in
-	*" $1 "*) return 0 ;;
-	esac
-	DPD_ATTACHED="$DPD_ATTACHED $1"
-}
-
-dpd_attached_has() {
-	case " $DPD_ATTACHED " in
-	*" $1 "*) return 0 ;;
-	esac
-	return 1
-}
-
 # Low-level attach to one device. No bridge recursion.
 dpd_attach_one() {
 	local dev="$1"
@@ -288,56 +266,27 @@ dpd_attach_one() {
 
 	# the program is loaded now, so the pin exists and the flags can land
 	dpd_teach_iface "$dev"
-	dpd_attached_add "$dev"
 	return 0
 }
 
-# Attach to a device and, when it is a bridge master, to its bridge ports --
-# the ports only with `option attach_bridge_ports '1'`.
-#
+# Attach to a device and, when it is a bridge master, to every bridge port.
 # A tc ingress filter on the bridge master does not see frames forwarded
 # between its ports: LAN clients enter on eth0, and without a filter there the
 # fast path never sees LAN->WAN traffic at all. Measured on the ESXi lab
 # 2026-11-08: pkt/hit stayed flat on br-lan until the filter was also attached
 # to eth0.
-#
-# Measured on the N5000 2026-11-10 (349 MB download, BPF run_cnt deltas):
-#   eth0 l2 +32114, br-lan l2 +1591.
-# The port hook is the primary LAN path; the master hook sees only ~5% of the
-# frames. Master-only is therefore NOT a win on this topology: it would lose
-# ~95% of LAN->WAN packets. Default is 1 (master + every port). Set 0 only for
-# a topology where the master hook provably sees the traffic; a port whose
-# master is already attached is then removed/skipped so the option really does
-# mean master-only.
 dpd_attach_if() {
-	local dev="$1" p master ports=1
+	local dev="$1" p
 
 	dpd_attach_one "$dev" || return 1
-	[ -d "/sys/class/net/$dev/brif" ] || return 0
-
-	config_load dpd_fastpath
-	config_get_bool ports global attach_bridge_ports 1
-	for p in /sys/class/net/"$dev"/brif/*; do
-		[ -e "$p" ] || continue
-		p=${p##*/}
-		[ "$p" = "$dev" ] && continue
-		# /sys/class/net/<port>/master is a symlink to the bridge device
-		master=$(readlink "/sys/class/net/$p/master" 2>/dev/null)
-		master=${master##*/}
-		# an unresolvable master is treated as this bridge
-		[ -n "$master" ] || master="$dev"
-		if [ "$ports" != 1 ] && dpd_attached_has "$master"; then
-			# A reload does not always run the detach path, so an
-			# older image's port hook may still be present. Remove
-			# it here: attach_bridge_ports=0 must actually mean
-			# master-only.
-			tc filter del dev "$p" ingress pref "$DPD_PREF" \
-				2>/dev/null
-			dpd_log "bridge $dev: port $p skipped, master $master already carries the hook (attach_bridge_ports=0)"
-			continue
-		fi
-		dpd_attach_one "$p" || dpd_log "bridge port $p attach failed"
-	done
+	if [ -d "/sys/class/net/$dev/brif" ]; then
+		for p in /sys/class/net/"$dev"/brif/*; do
+			[ -e "$p" ] || continue
+			p=${p##*/}
+			[ "$p" = "$dev" ] && continue
+			dpd_attach_one "$p" || dpd_log "bridge port $p attach failed"
+		done
+	fi
 	return 0
 }
 
@@ -348,10 +297,6 @@ dpd_detach_if() {
 	tc filter del dev "$dev" ingress pref "$DPD_PREF" 2>/dev/null
 	dpd_detach_nat_dn "$dev"
 	dpd_detach_egress "$dev"
-	# Bridge ports are swept unconditionally, not only with
-	# attach_bridge_ports=1: this is also what removes the port hooks an
-	# older image (master + ports) left behind, and every delete is
-	# idempotent.
 	if [ -d "/sys/class/net/$dev/brif" ]; then
 		for p in /sys/class/net/"$dev"/brif/*; do
 			[ -e "$p" ] || continue
@@ -627,6 +572,10 @@ dpd_gate_mode() {
 		code=mode-observe
 		why="configured mode is 'observe': telemetry only, by operator request"
 	elif dpd_mode_wants_accel "$mode"; then
+		if dpd_hw_offload_active; then
+			code=hw-offload
+			why="fw4 flow offloading (software or hardware) is enabled: the kernel flowtable/PPE already accelerates these flows, and DPD does not compete with it -- staying in observe"
+		fi
 		# Acceleration is a *forwarding* optimisation: it redirects LAN->WAN
 		# flows out of the uplink. With no uplink at all (WAN down, no cable,
 		# no lease yet) there is nothing to accelerate, and the program must
@@ -635,7 +584,7 @@ dpd_gate_mode() {
 		# it run. Measured on the lab VM (single-NIC, no WAN), stateless mode
 		# made every TCP/UDP connection *to the router* time out while ICMP
 		# still answered -- i.e. the box became unmanageable.
-		if ! dpd_has_uplink; then
+		if [ "$code" = "ok" ] && ! dpd_has_uplink; then
 			code=no-uplink
 			why="no uplink (no WAN device or no default route), so there is no forwarding path to accelerate and hooking the LAN would only steal traffic addressed to the router itself"
 		fi
@@ -693,6 +642,21 @@ dpd_gate_mode() {
 	dpd_gate_publish "$mode" observe "$code" "$why"
 	echo observe
 	return 0
+}
+
+# fw4 flow offloading means the kernel flowtable (and on PPE/NSS silicon, the
+# hardware) already owns the forwarding path. Two accelerators on one flow is
+# exactly the conflict this project refuses to create, so the gate downgrades
+# to observe instead of competing. The x86/RK images set flow_offloading=0, so
+# this is a no-op there; it exists for IPQ/MTK and for anyone who installs the
+# package on a stock image.
+dpd_hw_offload_active() {
+	local fo=0 fh=0
+
+	config_load firewall 2>/dev/null || true
+	config_get fo '@defaults[0]' flow_offloading 0
+	config_get fh '@defaults[0]' flow_offloading_hw 0
+	[ "$fo" = "1" ] || [ "$fh" = "1" ]
 }
 
 # Is there a real uplink to accelerate towards? A device that exists, is not
