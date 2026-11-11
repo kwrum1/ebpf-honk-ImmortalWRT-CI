@@ -45,22 +45,41 @@ CHIP_NEW = ("\t\t}));\n"
             "\t\t\t\t  + ' \\u00b7 v6 ' + pct(Number(es.bytes_hit_v6) || 0, Number(es.bytes_v6) || 0)\n"
             "\t\t\t\t: ((e.cfg || {}).mode || '\\u2014');\n"
             "\t\t\tvar ep = (e.maps || {}).ppe || null;\n"
-            "\t\t\tvar hw = ep ? (Number(ep.yielded_total) || 0) : 0;\n"
+            "\t\t\tvar eh = (e.maps || {}).ppe_hw || null;\n"
+            "\t\t\t/* Two flow tables, kept apart on purpose:\n"
+            "\t\t\t *   dpd_flows  what DPD's eBPF fastpath accelerates\n"
+            "\t\t\t *   PPE        the hardware L3 offload table (used/max)\n"
+            "\t\t\t * Adding them would claim hardware acceleration for flows\n"
+            "\t\t\t * the software path handles, so each gets its own line. */\n"
+            "\t\t\tvar dpdf = (Number(ef.v4) || 0) + (Number(ef.v6) || 0);\n"
+            "\t\t\tvar dpdmax = Number(ef.max_entries) || 0;\n"
+            "\t\t\tvar dpdline = 'DPD: ' + dpdf.toLocaleString() + '/'\n"
+            "\t\t\t\t+ dpdmax.toLocaleString()\n"
+            "\t\t\t\t+ ' (IPv4: ' + (Number(ef.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' IPv6: ' + (Number(ef.v6) || 0).toLocaleString() + ')';\n"
+            "\t\t\tvar ppeline = eh && eh.present\n"
+            "\t\t\t\t? 'PPE: ' + (Number(eh.used) || 0).toLocaleString() + '/'\n"
+            "\t\t\t\t  + (Number(eh.max) || 0).toLocaleString()\n"
+            "\t\t\t\t  + ' (IPv4: ' + (Number(eh.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t  + ' IPv6: ' + (Number(eh.v6) || 0).toLocaleString() + ')'\n"
+            "\t\t\t\t: '';\n"
             "\t\t\tvar reason = accel\n"
-            "\t\t\t\t? mode + ' \\u00b7 ' + (Number(ef.v4) || 0).toLocaleString()\n"
-            "\t\t\t\t  + ' / ' + (Number(ef.v6) || 0).toLocaleString() + ' \\u6d41'\n"
-            "\t\t\t\t  /* hardware/flowtable-owned flows, when this box has any */\n"
-            "\t\t\t\t  + (ep && hw > 0 ? ' \\u00b7 PPE ' + hw.toLocaleString() + ' \\u6d41' : '')\n"
+            "\t\t\t\t? mode + ' \\u00b7 ' + dpdline\n"
+            "\t\t\t\t  + (ppeline ? ' \\u00b7 ' + ppeline : '')\n"
             "\t\t\t\t: '\\u52a0\\u901f\\u5f15\\u64ce\\u672a\\u542f\\u52a8';\n"
             "\t\t\tthis.el.health.appendChild(E('div', { 'class': 'vt-chip vt-chip-' + level, 'role': 'listitem',\n"
             "\t\t\t\t'title': 'eBPF ' + mode + ' \\u00b7 v4 ' + (Number(ef.v4) || 0).toLocaleString()\n"
             "\t\t\t\t\t+ ' (\\u5360\\u6bd4 ' + pct(Number(es.bytes_hit_v4) || 0, Number(es.bytes_v4) || 0) + ')'\n"
             "\t\t\t\t\t+ ' \\u00b7 v6 ' + (Number(ef.v6) || 0).toLocaleString()\n"
             "\t\t\t\t\t+ ' (\\u5360\\u6bd4 ' + pct(Number(es.bytes_hit_v6) || 0, Number(es.bytes_v6) || 0) + ')'\n"
-            "\t\t\t\t\t+ (ep ? '\\n\\u786c\\u4ef6/flowtable \\u5df2\\u63a5\\u7ba1: ' + hw.toLocaleString()\n"
-            "\t\t\t\t\t\t+ ' \\u6d41 (offloaded ' + (Number(ep.offloaded) || 0).toLocaleString()\n"
-            "\t\t\t\t\t\t+ ' / yielded ' + (Number(ep.yielded) || 0).toLocaleString() + ')'\n"
-            "\t\t\t\t\t\t+ '\\nDPD \\u81ea\\u5df1\\u5728\\u8dd1: ' + (Number(ep.sw_active) || 0).toLocaleString() + ' \\u6d41'\n"
+            "\t\t\t\t\t+ (ep || eh ? '\\n' + dpdline\n"
+            "\t\t\t\t\t\t+ (ppeline ? '\\n' + ppeline : '')\n"
+            "\t\t\t\t\t\t+ (ep ? '\\n\\u786c\\u4ef6\\u72b6\\u6001: offloaded '\n"
+            "\t\t\t\t\t\t\t+ (Number(ep.offloaded) || 0).toLocaleString()\n"
+            "\t\t\t\t\t\t\t+ ' / yielded ' + (Number(ep.yielded) || 0).toLocaleString()\n"
+            "\t\t\t\t\t\t\t+ ' \\u00b7 DPD \\u81ea\\u5df1\\u5728\\u8dd1 '\n"
+            "\t\t\t\t\t\t\t+ (Number(ep.sw_active) || 0).toLocaleString() + ' \\u6d41'\n"
+            "\t\t\t\t\t\t: '') + ''\n"
             "\t\t\t\t\t\t: '') }, [\n"
             "\t\t\t\tE('span', { 'class': 'vt-chip-ico' }, [ icon(ic) ]),\n"
             "\t\t\t\tE('span', { 'class': 'vt-chip-main' }, [\n"
@@ -139,16 +158,28 @@ def main():
     except FileNotFoundError:
         pass
 
-    # 2) five health chips on one row for wired boxes (the theme's grid is 4)
+    # 2) Do NOT force a column count.
+    #
+    # Upstream v1.0.12 already has 2/3/6 columns. Adding a chip and pinning the
+    # grid to a fixed count made every chip narrower and truncated the label
+    # ("v4 86.7% · v6…", "flowtab…") at 1400px. Letting the theme's own rules
+    # apply means the extra chip simply wraps onto a second row, which stays
+    # readable at every width.
+    #
+    # The rule is still *removed* if an older build appended one, so upgrading
+    # in place repairs itself.
     css = (root.rstrip("/") + "/luci-app-vantage/htdocs/luci-static/"
            "resources/vantage/app.css")
     try:
         css_src = io.open(css, encoding="utf-8").read()
-        rule = ("\n@container vt (min-width: 1100px) { .vt-app.vt-wired .vt-health "
-                "{ grid-template-columns: repeat(5, minmax(0, 1fr)); } }\n")
-        if "repeat(5, minmax(0, 1fr))" not in css_src:
-            io.open(css, "a", encoding="utf-8", newline="\n").write(rule)
-            print("patch-vantage-overview: five-column health row for wired")
+        import re
+        trimmed = re.sub(
+            r"\n@container vt \(min-width: 1100px\) \{ \.vt-app\.vt-wired "
+            r"\.vt-health \{ grid-template-columns: repeat\(\d+, minmax\(0, 1fr\)\);"
+            r" \} \}\n", "", css_src)
+        if trimmed != css_src:
+            io.open(css, "w", encoding="utf-8", newline="\n").write(trimmed)
+            print("patch-vantage-overview: removed a hard-coded health column count")
     except FileNotFoundError:
         pass
 

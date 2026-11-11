@@ -57,12 +57,15 @@ if r.returncode != 0:
     sys.exit(1)
 print("ok:   the injected Vantage chip block parses")
 
-# The block must actually carry the hardware counters, or the dashboard change
-# silently did nothing.
-for key in ("ppe", "yielded_total", "sw_active"):
+# The block must report the two flow tables separately and use the PPE
+# occupancy format the operator asked for.
+for key in ("ppe_hw", "dpdline", "ppeline", "present", "IPv4"):
     if key not in block:
         sys.stderr.write("FAIL: injected block lacks '%s'\n" % key)
         sys.exit(1)
-print("ok:   it reads maps.ppe / yielded_total / sw_active")
+if "yielded_total" in block:
+    sys.stderr.write("FAIL: block still sums software+hardware into one number\n")
+    sys.exit(1)
+print("ok:   it reports DPD and PPE flow tables separately")
 sys.exit(0)
 PY
