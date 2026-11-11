@@ -17,6 +17,8 @@ import sys
 
 MARK = "/* ebpf-health-chip */"
 
+CSS_EXTRA = '\n/* ebpf-ppe-chip: five health cards on one row, compact, DPD/PPE aligned */\n.vt-health{grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px}\n.vt-health>.vt-chip{padding:8px 8px;gap:5px}\n.vt-health .vt-chip-ico{width:18px;height:18px;border-radius:6px}\n.vt-health .vt-chip-ico .vt-ico{width:13px;height:13px}\n.vt-health .vt-chip-title{font-size:10px;letter-spacing:.04em}\n.vt-health .vt-chip-value{font-size:14px;line-height:1.2}\n.vt-health .vt-chip-reason{display:block;overflow:visible;-webkit-line-clamp:unset;font-size:9.5px;line-height:1.45;margin-top:3px}\n.vt-dpd-row{display:flex;align-items:baseline;gap:6px;min-width:0}\n.vt-dpd-key{flex:0 0 22px;font-weight:650;color:var(--vt-text-3)}\n.vt-dpd-val{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}\n@media(max-width:1100px){.vt-health{grid-auto-flow:row;grid-auto-columns:auto;grid-template-columns:repeat(3,minmax(0,1fr))}}\n@media(max-width:760px){.vt-health{grid-template-columns:repeat(2,minmax(0,1fr))}}\n'
+
 SIG_OLD = ("\t\tvar sig = JSON.stringify(this.st.health.map(function(c) { return [ c.level, c.title, c.value, c.reason, c.detail, c.client, c.page ]; }));\n")
 SIG_NEW = ("\t\tvar sig = JSON.stringify(this.st.health.map(function(c) { return [ c.level, c.title, c.value, c.reason, c.detail, c.client, c.page ]; }))\n"
            "\t\t\t+ (this.ebpf ? JSON.stringify([ this.ebpf.cfg, this.ebpf.maps && this.ebpf.maps.flows,\n"
@@ -60,24 +62,35 @@ CHIP_NEW = ("\t\t}));\n"
             "\t\t\t * the software path handles, so each gets its own line. */\n"
             "\t\t\tvar dpdf = (Number(ef.v4) || 0) + (Number(ef.v6) || 0);\n"
             "\t\t\tvar dpdmax = Number(ef.max_entries) || 0;\n"
-            "\t\t\tvar dpdline = 'DPD: ' + dpdf.toLocaleString() + '/'\n"
-            "\t\t\t\t+ dpdmax.toLocaleString()\n"
+            "\t\t\tvar dpdline = 'DPD: ' + dpdf.toLocaleString() + '/' + dpdmax.toLocaleString()\n"
             "\t\t\t\t+ ' (IPv4: ' + (Number(ef.v4) || 0).toLocaleString()\n"
             "\t\t\t\t+ ' IPv6: ' + (Number(ef.v6) || 0).toLocaleString() + ')';\n"
             "\t\t\tvar ppeline = eh && eh.present\n"
             "\t\t\t\t? 'PPE: ' + (Number(eh.used) || 0).toLocaleString() + '/'\n"
-            "\t\t\t\t  + (Number(eh.max) || 0).toLocaleString()\n"
-            "\t\t\t\t  + ' (IPv4: ' + (Number(eh.v4) || 0).toLocaleString()\n"
-            "\t\t\t\t  + ' IPv6: ' + (Number(eh.v6) || 0).toLocaleString() + ')'\n"
+            "\t\t\t\t+ (Number(eh.max) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' (IPv4: ' + (Number(eh.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' IPv6: ' + (Number(eh.v6) || 0).toLocaleString() + ')'\n"
             "\t\t\t\t: '';\n"
-            "\t\t\t/* Show both tables whenever the program is hooked, not\n"
-            "\t\t\t * only while accelerating: in observe mode the PPE\n"
-            "\t\t\t * occupancy is still what the operator wants to see. */\n"
+            "\t\t\t/* two rows share a label column, so the numbers start at one x */\n"
+            "\t\t\tvar rows = [ E('span', { 'class': 'vt-dpd-row' }, [\n"
+            "\t\t\t\tE('span', { 'class': 'vt-dpd-key' }, [ 'DPD' ]),\n"
+            "\t\t\t\tE('span', { 'class': 'vt-dpd-val' }, [\n"
+            "\t\t\t\tdpdf.toLocaleString() + '/' + dpdmax.toLocaleString()\n"
+            "\t\t\t\t+ ' (IPv4: ' + (Number(ef.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' IPv6: ' + (Number(ef.v6) || 0).toLocaleString() + ')'\n"
+            "\t\t\t\t])\n"
+            "\t\t\t]) ];\n"
+            "\t\t\tif (ppeline)\n"
+            "\t\t\t\trows.push(E('span', { 'class': 'vt-dpd-row' }, [\n"
+            "\t\t\t\tE('span', { 'class': 'vt-dpd-key' }, [ 'PPE' ]),\n"
+            "\t\t\t\tE('span', { 'class': 'vt-dpd-val' }, [\n"
+            "\t\t\t\t(Number(eh.used) || 0).toLocaleString() + '/'\n"
+            "\t\t\t\t+ (Number(eh.max) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' (IPv4: ' + (Number(eh.v4) || 0).toLocaleString()\n"
+            "\t\t\t\t+ ' IPv6: ' + (Number(eh.v6) || 0).toLocaleString() + ')'\n"
+            "\t\t\t\t])\n"
+            "\t\t\t\t]));\n"
             "\t\t\tvar live = !!e.attached;\n"
-            "\t\t\tvar reason = live\n"
-            "\t\t\t\t? mode + ' \\u00b7 ' + dpdline\n"
-            "\t\t\t\t  + (ppeline ? ' \\u00b7 ' + ppeline : '')\n"
-            "\t\t\t\t: '\\u52a0\\u901f\\u5f15\\u64ce\\u672a\\u542f\\u52a8';\n"
             "\t\t\tthis.el.health.appendChild(E('div', { 'class': 'vt-chip vt-chip-' + level, 'role': 'listitem',\n"
             "\t\t\t\t'title': 'eBPF ' + mode + ' \\u00b7 v4 ' + (Number(ef.v4) || 0).toLocaleString()\n"
             "\t\t\t\t\t+ ' (\\u5360\\u6bd4 ' + pct(Number(es.bytes_hit_v4) || 0, Number(es.bytes_v4) || 0) + ')'\n"
@@ -95,10 +108,10 @@ CHIP_NEW = ("\t\t}));\n"
             "\t\t\t\tE('span', { 'class': 'vt-chip-ico' }, [ icon(ic) ]),\n"
             "\t\t\t\tE('span', { 'class': 'vt-chip-main' }, [\n"
             "\t\t\t\t\tE('span', { 'class': 'vt-chip-top' }, [\n"
-            "\t\t\t\t\t\tE('span', { 'class': 'vt-chip-title' }, [ 'eBPF' ]),\n"
+            "\t\t\t\t\t\tE('span', { 'class': 'vt-chip-title' }, [ 'DPD' ]),\n"
             "\t\t\t\t\t\tE('span', { 'class': 'vt-chip-value' }, [ value ])\n"
             "\t\t\t\t\t]),\n"
-            "\t\t\t\t\tE('span', { 'class': 'vt-chip-reason' }, [ reason ])\n"
+            "\t\t\t\t\tE('span', { 'class': 'vt-chip-reason' }, rows)\n"
             "\t\t\t\t])\n"
             "\t\t\t]));\n"
             "\t\t}\n"
@@ -191,6 +204,13 @@ def main():
         if trimmed != css_src:
             io.open(css, "w", encoding="utf-8", newline="\n").write(trimmed)
             print("patch-vantage-overview: removed a hard-coded health column count")
+        else:
+            trimmed = css_src
+
+        if "ebpf-ppe-chip" not in trimmed:
+            io.open(css, "w", encoding="utf-8", newline="\n").write(
+                trimmed + CSS_EXTRA)
+            print("patch-vantage-overview: health row laid out on one line")
     except FileNotFoundError:
         pass
 
