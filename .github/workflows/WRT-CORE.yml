@@ -175,6 +175,11 @@ jobs:
       - name: Verify drift
         run: bash Scripts/verify-drift.sh
 
+      # A text patch that produces broken JS would still build green and only
+      # fail in the browser, so syntax-check the injected dashboard block.
+      - name: Verify the Vantage dashboard patch produces valid JS
+        run: sh Scripts/check-vantage-patch.sh || [ $? = 77 ]
+
       - name: Restore Build Cache
         id: cache-restore
         if: ${{ !inputs.WRT_TEST }}
