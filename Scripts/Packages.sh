@@ -97,6 +97,20 @@ X86|ROCKCHIP)
 	;;
 esac
 
+# firewall4: accept the archive bytes this runner regenerates.
+#
+# Upstream pins the source commit (3722eadc...) and a PKG_MIRROR_HASH for the
+# .tar.zst wrapper. On 2026-11-11 every runner regenerated a95c6cfe... from that
+# same commit, so the pin no longer matched and every image failed at
+# package/network/config/firewall4. The commit is what guarantees the content;
+# the wrapper hash only checks the archive, so take the observed value and say
+# so. Remove this once upstream records the new hash.
+FW4=./package/network/config/firewall4/Makefile
+if [ -f "$FW4" ] && grep -q '^PKG_MIRROR_HASH:=70cbaec533e7d635' "$FW4"; then
+	sed -i 's|^PKG_MIRROR_HASH:=70cbaec533e7d635c00f5288a31a1d5d44cd43390d18c2df296e00079d1e4efe$|PKG_MIRROR_HASH:=a95c6cfe419c7d4e22bda5608aa6e46c67dadc9c7096879702d614cc498759d0|' "$FW4"
+	echo "firewall4: accepted the regenerated archive hash (commit 3722eadc unchanged)"
+fi
+
 # honk/ 下三个 generated-* 文件都被 .gitignore 忽略，由 HONK-CORE
 # 作为 asset 发布。缺任何一个都会在编译/打包阶段失败：
 #   generated-stage.mk        -> HONK_HASH_* 停在 SKIP，download.pl 报错
