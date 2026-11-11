@@ -44,6 +44,7 @@ USE_PROCD=1
 
 start_service() {
 	local enabled attach mode emode policy vlans redirect ttl refresh ipv6 ifaces i dev nok=0 pending=
+	local ppe_mode ppe_grace
 
 	config_load dpd_fastpath
 	config_get_bool enabled global enabled 1
@@ -57,6 +58,8 @@ start_service() {
 	config_get ifaces global interfaces 'lan'
 	config_get policy global policy 'allow_all'
 	config_get vlans global vlans ''
+	config_get ppe_mode global ppe_mode 'off'
+	config_get ppe_grace global ppe_grace_ms 0
 
 	if [ "$attach" != "1" ]; then
 		logger -t dpd-fastpath "attach disabled, not loading the program"
@@ -116,11 +119,6 @@ start_service() {
 	# at least one map may exist now
 	[ "$nok" -gt 0 ] && dpd_push_uci "$enabled" "$emode" "$redirect" "$ttl" "$policy" "$refresh" "$ipv6" "$mss"
 
-	# ABI 20: teach the router's own addresses; the miss path can then skip
-	# bpf_fib_lookup() for packets that can only be delivered locally.
-	# dpdfwd re-syncs on RTM_NEWADDR/DELADDR (PPPoE redial).
-	[ "$nok" -gt 0 ] && "$DPD_CTL" local sync >/dev/null 2>&1
-
 	# An image upgraded in place can carry a stale uplink attachment: the older
 	# 90-dpd-fastpath attached the uplink for telemetry while observing, and a
 	# filter that only counted then starts *accelerating* as soon as einat
@@ -141,8 +139,12 @@ start_service() {
 	procd_set_param term_timeout 3
 	procd_close_instance
 
+	# ABI 22: apply the handover policy now rather than waiting for the
+	# watchdog's first poll. dpdctl fails harmlessly if no map exists yet.
+	dpd_push_ppe "$ppe_mode" "$ppe_grace"
+
 	logger -t dpd-fastpath \
-		"started: attach=$attach enabled=$enabled mode=$mode effective=$emode policy=$policy vlans='$vlans' redirect=$redirect ifaces='$ifaces' attached=$nok pending='$pending'"
+		"started: attach=$attach enabled=$enabled mode=$mode effective=$emode policy=$policy vlans='$vlans' redirect=$redirect ifaces='$ifaces' attached=$nok pending='$pending' ppe_mode=$ppe_mode"
 	logger -t dpd-fastpath "chain: $(dpd_chain_summary)"
 	dpd_status_publish
 }

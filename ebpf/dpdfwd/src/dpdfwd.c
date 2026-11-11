@@ -53,6 +53,11 @@
 
 #define OUT_DIR "/var/run/dpd"
 #define OUT_FILE OUT_DIR "/flowd.json"
+/* The dashboard reads this one; writing it here means the snapshot exists
+ * wherever dpdfwd runs, not only when the init script is present. */
+#define UI_DIR "/var/run/ebpf"
+#define UI_FILE UI_DIR "/status.json"
+#define DPD_CTL_STATUS_S 2
 #define DPD_CTL "/usr/sbin/dpdctl"
 #define CT_DELETE_FILE "/tmp/dpd-ct-delete"
 #define CT_PPE_FILE "/tmp/dpd-ct-ppe"
@@ -1496,6 +1501,56 @@ static void bump_epoch(int dry, struct stats *st)
 		st->errors++;
 }
 
+/*
+ * Refresh /var/run/ebpf/status.json from `dpdctl status -j`.
+ *
+ * It runs on its own 2 s tick and writes through a temp file + rename, so a
+ * reader never sees half a JSON document. Failures are counted and otherwise
+ * ignored: a dashboard that cannot read the file shows the chip as unknown,
+ * which is the correct behaviour, and the datapath is unaffected.
+ */
+static void publish_status_json(struct stats *st)
+{
+	FILE *p;
+	char buf[16384];
+	size_t n;
+	int rc;
+
+	p = popen(DPD_CTL " status -j 2>/dev/null", "r");
+	if (!p) {
+		st->errors++;
+		return;
+	}
+	n = fread(buf, 1, sizeof(buf) - 1, p);
+	rc = pclose(p);
+	if (n == 0 || rc != 0) {
+		st->errors++;
+		return;
+	}
+	buf[n] = 0;
+
+	mkdir(UI_DIR, 0755);
+	{
+		FILE *f = fopen(UI_FILE ".tmp", "w");
+
+		if (!f) {
+			st->errors++;
+			return;
+		}
+		if (fwrite(buf, 1, n, f) != n) {
+			fclose(f);
+			unlink(UI_FILE ".tmp");
+			st->errors++;
+			return;
+		}
+		fclose(f);
+	}
+	if (rename(UI_FILE ".tmp", UI_FILE) != 0) {
+		unlink(UI_FILE ".tmp");
+		st->errors++;
+	}
+}
+
 static void publish(struct stats *st)
 {
 	char tmp[128];
@@ -1547,7 +1602,7 @@ int main(int argc, char **argv)
 	struct stats st = { 0 };
 	long long bump_at = 0;
 	long long last_neigh_bump = 0;
-	time_t next_publish = 0, last_ct_flush = 0, next_prune = 0;
+	time_t next_publish = 0, next_status = 0, last_ct_flush = 0, next_prune = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--dry-run"))
@@ -1778,6 +1833,10 @@ int main(int argc, char **argv)
 			system(DPD_CTL " flows prune " PRUNE_AGE_STR
 			       " >/dev/null 2>&1");
 			next_prune = time(NULL) + PRUNE_S;
+		}
+		if (time(NULL) >= next_status) {
+			publish_status_json(&st);
+			next_status = time(NULL) + DPD_CTL_STATUS_S;
 		}
 		if (time(NULL) >= next_publish) {
 			publish(&st);

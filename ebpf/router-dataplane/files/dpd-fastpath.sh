@@ -707,6 +707,25 @@ dpd_has_uplink() {
 	return 1
 }
 
+# ABI 22: publish the software/hardware handover policy.
+#
+# One function because the uci name and the ABI name differ ('dual' is what an
+# operator writes; DPD_PPE_FALLBACK is what the program stores), and because
+# both publication paths -- start_service() and dpd_gate_refresh_uci() -- must
+# agree. Before this existed, a boot applied the policy only when the gate
+# watchdog made its first 20 s poll, so for that window ppe_mode still held
+# whatever was in the map (0 = off) no matter what uci said.
+dpd_push_ppe() {
+	local ppe_mode="$1" ppe_grace="$2"
+
+	case "$ppe_mode" in
+	dual|fallback)	"$DPD_CTL" set ppe fallback 2>/dev/null ;;
+	yield)		"$DPD_CTL" set ppe yield 2>/dev/null ;;
+	*)		"$DPD_CTL" set ppe off 2>/dev/null ;;
+	esac
+	"$DPD_CTL" set grace "$ppe_grace" 2>/dev/null
+}
+
 # Re-evaluate the gates from uci and publish the result.
 #
 # Single source of truth for "what is the datapath allowed to do right now".
@@ -744,13 +763,8 @@ dpd_gate_refresh_uci() {
 	# ABI 22: the software/hardware handover. 'dual' shares the box with
 	# qca-ppe/NSS; 'off' (the default on x86/RK, where no such hardware
 	# exists) leaves the datapath unaware of it.
-	case "$ppe_mode" in
-	dual|fallback)	"$DPD_CTL" set ppe fallback 2>/dev/null ;;
-	yield)		"$DPD_CTL" set ppe yield 2>/dev/null ;;
-	*)		"$DPD_CTL" set ppe off 2>/dev/null ;;
-	esac
 	config_get ppe_grace global ppe_grace_ms 0
-	"$DPD_CTL" set grace "$ppe_grace" 2>/dev/null
+	dpd_push_ppe "$ppe_mode" "$ppe_grace"
 	"$DPD_CTL" set class "$class_enable" 2>/dev/null
 	case "$nat_ingress" in
 	dpd)	"$DPD_CTL" set nat_ingress 1 2>/dev/null ;;
