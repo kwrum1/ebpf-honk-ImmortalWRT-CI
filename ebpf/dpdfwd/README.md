@@ -1,5 +1,10 @@
 # dpdfwd — DPD Flow Manager
 
+> **源码不在本仓库。** `src/` 与 `files/` 在构建时由 `Scripts/Fetch-DPD.sh`
+> 从 `kwrum1/dpd-fw` 的 `arm` 分支（`packaging/dpdfwd/`）拉取，本仓只保留
+> Makefile。这样 `dpdfwd.c` 只有一份，不会再和固件里的副本漂移。
+
+
 Control-plane daemon for DPD-FW.
 
 ## Implemented (MVP)

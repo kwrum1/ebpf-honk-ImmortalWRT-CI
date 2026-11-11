@@ -1,5 +1,9 @@
 # router-dataplane (`dpd-fastpath`)
 
+> **源码不在本仓库。** `src/` 与 `files/` 在构建时由 `Scripts/Fetch-DPD.sh`
+> 从 `kwrum1/dpd-fw` 的 `arm` 分支（`packaging/router-dataplane/`）拉取，
+> 本仓只保留 Makefile。这样 `dpdctl.c` 只有一份，不会再和固件里的副本漂移。
+
 eBPF 数据面快路径。一个 TC-ingress eBPF 程序 + 一个 userspace 控制工具
 （`dpdctl`），目的是**把「已经建立连接的家用转发」从内核 netfilter 栈里摘出来**，
 走 FIB 查表 + 直接重定向。

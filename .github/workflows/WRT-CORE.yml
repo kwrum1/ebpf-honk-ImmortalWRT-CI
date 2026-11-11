@@ -72,6 +72,12 @@ jobs:
       - name: Checkout Projects
         uses: actions/checkout@v4
 
+      # The dataplane sources are not vendored here: dpd-fw owns them and
+      # publishes the package-shaped tree on its `arm` branch. Pin DPD_REF to
+      # an arm commit for a reproducible release build.
+      - name: Fetch DPD dataplane sources
+        run: sh Scripts/Fetch-DPD.sh
+
       - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
