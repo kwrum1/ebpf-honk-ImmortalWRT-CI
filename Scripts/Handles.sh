@@ -52,10 +52,15 @@ fi
 # Add the eBPF acceleration chip to the Vantage dashboard's health row (the
 # theme's own overview page). X86/ROCKCHIP only: the other targets have no dpd
 # and use the theme exactly as upstream ships it.
+# X86/RK: the DPD chip (DPD table + PPE table).
+# IPQ60xx/IPQ807x: the same chip, PPE-only -- those images ship no dpdfwd, so
+# the patch falls back to reading the driver's active_flows from debugfs. The
+# ACL it writes grants both paths.
 if [[ "${WRT_THEME}" == "vantage" && -d ./luci-theme-vantage/luci-app-vantage ]] &&
-   [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
+   [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ||
+      "${WRT_CONFIG}" == IPQ60XX* || "${WRT_CONFIG}" == IPQ807X* ]]; then
 	if ! python3 "$GITHUB_WORKSPACE/Scripts/patch-vantage-overview.py" "$PKG_PATH/luci-theme-vantage"; then
-		echo "!! vantage: could not add the eBPF line (overview.js anchors drifted?)" >&2
+		echo "!! vantage: could not add the DPD/PPE line (overview.js anchors drifted?)" >&2
 		exit 1
 	fi
 fi

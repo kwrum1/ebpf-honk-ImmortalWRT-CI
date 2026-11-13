@@ -29,7 +29,12 @@ define Package/dpd-fastpath
   CATEGORY:=Network
   TITLE:=eBPF TC ingress fastpath (dpd)
   URL:=https://github.com/kwrum1/openwrt-honk
-  DEPENDS:=@!(TARGET_qualcommax) +libbpf +libelf +kmod-sched-core +kmod-sched-bpf +tc-bpf $(BPF_DEPENDS)
+  # The program is target-agnostic. qualcommax used to be excluded because the
+  # kernel's PPE/NSS owns forwarding there; the package is still wanted on
+  # IPQ60xx/IPQ807x so dpdctl can read the hardware table and the dashboard can
+  # show it. On those images the gate keeps the datapath in observe (no einat),
+  # so this does not compete with the hardware engine.
+  DEPENDS:=+libbpf +libelf +kmod-sched-core +kmod-sched-bpf +tc-bpf $(BPF_DEPENDS)
 endef
 
 define Package/dpd-fastpath/description

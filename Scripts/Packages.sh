@@ -295,9 +295,23 @@ X86|ROCKCHIP)
 		fi
 	fi
 	;;
+IPQ60XX*|IPQ807X*)
+	# PPE targets: install only the read side so the dashboard can show the
+	# hardware table. dpdctl reads /sys/kernel/debug/*.ppe/active_flows and
+	# dpdfwd publishes /var/run/ebpf/status.json; the datapath attaches in
+	# observe (these images have no einat), so NSS/PPE forwarding is untouched.
+	EBPF_ROOT="$GITHUB_WORKSPACE/ebpf"
+	rm -rf ./package/ebpf
+	mkdir -p ./package/ebpf
+	cp -rf "$EBPF_ROOT/router-dataplane" "$EBPF_ROOT/dpdfwd" ./package/ebpf/
+	find ./package/ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
+		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
+	echo " "
+	echo "ebpf status packages installed for $WRT_CONFIG (observe + PPE table)"
+	;;
 *)
-	# IPQ / MTK / PPE keep their stock NSS/PPE datapath and the stock package
-	# set; the eBPF packages are not installed at all.
+	# MTK and the rest keep their stock datapath and package set; the eBPF
+	# packages are not installed at all.
 	echo " "
 	echo "ebpf datapath: $WRT_CONFIG uses the stock path, packages skipped"
 	;;
