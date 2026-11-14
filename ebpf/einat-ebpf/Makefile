@@ -85,7 +85,10 @@ define Package/einat-ebpf
   SUBMENU:=Routing and Redirection
   TITLE:=eBPF-based Endpoint-Independent (Full Cone) NAT
   URL:=https://github.com/EHfive/einat-ebpf
-  DEPENDS:=@(x86_64||aarch64) @!(TARGET_qualcommax) +kmod-sched-core +kmod-sched-bpf +@KERNEL_DEBUG_INFO_BTF
+  # aarch64 covers IPQ60xx/IPQ807x too: einat is the NAT half of the soft
+  # datapath there, and the ABI 22 ppe_mode handover decides per flow whether
+  # DPD or the hardware engine owns it.
+  DEPENDS:=@(x86_64||aarch64) +kmod-sched-core +kmod-sched-bpf +@KERNEL_DEBUG_INFO_BTF
   PROVIDES:=einat
 endef
 

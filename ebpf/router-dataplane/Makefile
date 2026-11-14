@@ -138,6 +138,8 @@ define Package/dpd-fastpath/install
 	$(INSTALL_BIN) ./files/dpd-regress.sh $(1)/usr/libexec/dpd-regress.sh
 	$(INSTALL_DATA) ./files/dpd_fastpath.config $(1)/etc/config/dpd_fastpath
 	$(INSTALL_DATA) ./files/90-dpd-fastpath $(1)/etc/hotplug.d/iface/90-dpd-fastpath
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/99-dpd-ppe-defaults $(1)/etc/uci-defaults/99-dpd-ppe-defaults
 endef
 
 $(eval $(call BuildPackage,dpd-fastpath))

@@ -90,6 +90,8 @@ function generate_config() {
     cat >> "$config_file" <<'EOF'
 CONFIG_PACKAGE_dpd-fastpath=y
 CONFIG_PACKAGE_dpdfwd=y
+CONFIG_PACKAGE_einat-ebpf=y
+CONFIG_PACKAGE_bpftool-minimal=y
 EOF
     ;;
   esac

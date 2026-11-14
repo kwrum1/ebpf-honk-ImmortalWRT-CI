@@ -303,7 +303,7 @@ IPQ60XX*|IPQ807X*)
 	EBPF_ROOT="$GITHUB_WORKSPACE/ebpf"
 	rm -rf ./package/ebpf
 	mkdir -p ./package/ebpf
-	cp -rf "$EBPF_ROOT/router-dataplane" "$EBPF_ROOT/dpdfwd" ./package/ebpf/
+	cp -rf "$EBPF_ROOT/router-dataplane" "$EBPF_ROOT/dpdfwd" "$EBPF_ROOT/einat-ebpf" ./package/ebpf/
 	find ./package/ebpf -type f \( -name '*.sh' -o -name '*.init' -o -name '*-dpd-fastpath' \) \
 		-exec sed -i 's/\r$//' {} \; -exec chmod 0755 {} \;
 	echo " "

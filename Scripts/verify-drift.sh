@@ -150,16 +150,19 @@ else
 	fi
 fi
 
-echo "== 7. IPQ/MTK 只允许只读 DPD 状态包（PPE/flowtable 独占转发） =="
-# IPQ/MTK 走内核 flowtable（IPQ 还有 PPE 硬件卸载），DPD 数据面不参与竞争。
-# 检查的是**源码约定**，不需要构建产物：谁把闸门删掉，CI 立刻失败，而不是等
-# 烧到机器上才发现两套加速器抢同一条流。
+echo "== 7. IPQ/MTK：软件 DPD 与硬件 PPE 共存（ppe_mode=fallback） =="
+# IPQ60xx/IPQ807x now run both engines: einat owns NAT, router-dataplane
+# accelerates the flows the hardware did not take, and dpdfwd publishes the
+# snapshot the dashboard reads. ABI 22 ppe_mode=fallback is what keeps them
+# apart per flow (hardware first, DPD takes back FAILED/DENIED).
 #
-# 真正的保护有三层，这里各查一层：
-#   a) IPQ/MTK 的 Config/*.txt 不得选中任何 DPD 数据面包（选中即冲突）；
-#   b) Packages.sh 的 ebpf/ 拷贝必须在 X86|ROCKCHIP 分支内；
-#   c) 带 BPF 对象的包（事后会被 tc 挂到设备上）必须排除 TARGET_qualcommax，
-#      因为 aarch64 的 IPQ 否则能直接装上。
+# Checked here:
+#   a) Config/*.txt do not select the stack (Settings.sh adds it for IPQ only,
+#      so MTK and an operator-edited Config stay stock);
+#   b) Packages.sh copies router-dataplane + dpdfwd + einat-ebpf for IPQ and
+#      nothing from the router-* forwarding stack;
+#   c) Settings.sh enables exactly those plus bpftool;
+#   d) the package ships the ppe_mode=fallback uci-defaults.
 leak=0
 
 # a) configs
@@ -169,69 +172,65 @@ for cfg in "$ROOT"/Config/IPQ*.txt "$ROOT"/Config/MEDIATEK*.txt \
 	while IFS= read -r pkg; do
 		case "$pkg" in
 		dpd-fastpath | einat-ebpf | router-acl | router-dataplane | dpdfwd)
-			bad "${cfg#$ROOT/} 选中了 $pkg（IPQ/MTK 的加速归 flowtable/PPE）"
+			bad "${cfg#$ROOT/} 选择了 $pkg：IPQ/MTK 的加速栈由 Settings.sh 按目标决定"
 			leak=1
 			;;
 		esac
 	done < <(sed -n 's/^CONFIG_PACKAGE_\([^=]*\)=[ym]$/\1/p' "$cfg")
 done
-[ "$leak" = 0 ] && ok "IPQ/MTK 的 Config 没有选中 DPD 数据面包"
+[ "$leak" = 0 ] && ok "IPQ/MTK 的 Config 没有选中加速栈"
 
-# b) Packages.sh 的拷贝分支
-if awk '/^case "\$WRT_CONFIG" in/{on=1}
-	on && /^X86\|ROCKCHIP\)/{x86=1}
-	on && /ebpf\/ \$/ {if (!x86) exit 1}
-	on && /^esac/{on=0; x86=0}' "$ROOT/Scripts/Packages.sh"; then
-	ok "Packages.sh 的 ebpf/ 拷贝仍在 X86|ROCKCHIP 分支内"
-else
-	bad "Packages.sh 会把 ebpf/ 拷进非 X86/ROCKCHIP 的构建（IPQ/MTK 会捡到 DPD 数据面）"
-	leak=1
-fi
-
-# c) IPQ60xx/IPQ807x may install the *read* side only: router-dataplane
-#    (dpdctl reads the PPE table from debugfs) and dpdfwd (publishes
-#    status.json). Anything that could take the forwarding path over --
-#    einat, router-acl, router-qos, router-dns, router-tuning -- must stay
-#    out. The init gate keeps DPD in observe without einat, so the kernel
-#    NSS/PPE path remains the only accelerator.
-ipq_branch=$(awk '/^IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /cp -rf/{print} on && /;;/{exit}' \
+# b) Packages.sh: the IPQ branch copies the soft datapath, not the router stack
+ipq_cp=$(awk '/^IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /cp -rf/{print} on && /;;/{exit}' \
 	"$ROOT/Scripts/Packages.sh")
-case "$ipq_branch" in
-*router-dataplane*) ;;
-*)
-	bad "Packages.sh 的 IPQ 分支缺少 router-dataplane（概况页需要 dpdctl 读 PPE）"
-	leak=1
-	;;
-esac
-case "$ipq_branch" in
-*dpdfwd*) ;;
-*)
-	bad "Packages.sh 的 IPQ 分支缺少 dpdfwd（status.json 无人发布）"
-	leak=1
-	;;
-esac
-for pkg in einat router-acl router-qos router-dns router-tuning; do
-	case "$ipq_branch" in
+for pkg in router-dataplane dpdfwd einat-ebpf; do
+	case "$ipq_cp" in
+	*"$pkg"*) ;;
+	*)
+		bad "Packages.sh 的 IPQ 分支缺少 $pkg"
+		leak=1
+		;;
+	esac
+done
+for pkg in router-acl router-qos router-dns router-tuning; do
+	case "$ipq_cp" in
 	*"$pkg"*)
-		bad "Packages.sh 的 IPQ 分支包含 $pkg：IPQ 只允许只读的 router-dataplane/dpdfwd"
+		bad "Packages.sh 的 IPQ 分支包含 $pkg：只允许 DPD/NAT 数据面"
 		leak=1
 		;;
 	esac
 done
 
-# Settings.sh must enable exactly those two for IPQ, not the acceleration
-# stack (einat would compete with NSS/PPE for the forwarding path).
+# c) Settings.sh: enable exactly the stack + the gate's bpftool
 ipq_cfg=$(awk '/IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /^CONFIG_PACKAGE_/{print} on && /^    ;;/{exit}' \
 	"$ROOT/Scripts/Settings.sh")
-for pkg in einat-ebpf router-acl luci-app-ebpf dpd-honk dpd-napi; do
+for pkg in dpd-fastpath dpdfwd einat-ebpf bpftool-minimal; do
 	case "$ipq_cfg" in
-	*"$pkg"*)
-		bad "Settings.sh 给 IPQ 选了 $pkg：只允许 dpd-fastpath/dpdfwd"
+	*"$pkg=y"*) ;;
+	*)
+		bad "Settings.sh 没有给 IPQ 选 $pkg"
 		leak=1
 		;;
 	esac
 done
-[ "$leak" = 0 ] && ok "IPQ 只安装只读状态包（router-dataplane + dpdfwd）"
+for pkg in router-acl router-qos router-dns router-tuning luci-app-ebpf dpd-honk dpd-napi; do
+	case "$ipq_cfg" in
+	*"$pkg=y"*)
+		bad "Settings.sh 给 IPQ 选了 $pkg：不在共存范围内"
+		leak=1
+		;;
+	esac
+done
+
+# d) the fallback default ships with the dataplane package
+ppe_defaults="$ROOT/ebpf/router-dataplane/files/99-dpd-ppe-defaults"
+if [ -f "$ppe_defaults" ] && grep -q "ppe_mode=.fallback." "$ppe_defaults"; then
+	ok "IPQ 默认 ppe_mode=fallback（硬件优先，DPD 接管失败流）"
+else
+	bad "缺少 ebpf/router-dataplane/files/99-dpd-ppe-defaults 或未设置 fallback"
+	leak=1
+fi
+[ "$leak" = 0 ] && ok "IPQ 启用软件 DPD + 硬件 PPE 共存（fallback）"
 
 echo
 if [ "$fails" != 0 ]; then
