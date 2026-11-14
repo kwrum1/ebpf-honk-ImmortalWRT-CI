@@ -139,10 +139,10 @@ index fc6228a..aa6fce4 100644
      fallback: direct
  }
 diff --git a/honk/files/control.sh b/honk/files/control.sh
-index 2658df5..130311d 100644
+index dd4e14c..75fb27b 100755
 --- a/honk/files/control.sh
 +++ b/honk/files/control.sh
-@@ -67,7 +67,18 @@ system_config_readonly() {
+@@ -74,7 +74,18 @@ system_config_readonly() {
  }
  
  no_honk_resources() {
@@ -162,18 +162,7 @@ index 2658df5..130311d 100644
  	for link in dae0 dae0peer; do
  		ip link show "$link" >/dev/null 2>&1 && { fail "$link 已存在（上次没有正常退出），请先停止服务或执行系统恢复"; return 1; }
  	done
-@@ -150,6 +161,10 @@ check_config() {
- 	valid_clash_api || { fail "Clash API 设置不合法（端口 1024-65535，密钥 6-128 位）"; return 1; }
- }
- 
-+nfqueue_required() {
-+	grep -qE '^[[:space:]]*nfqueue_enable:[[:space:]]*true' /etc/honk/system.dae 2>/dev/null
-+}
-+
- # 顺序同 honk-core：设了 HONK_VMLINUX_BTF 就只认它
- kernel_btf_path() {
- 	if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
-@@ -167,15 +182,7 @@ check_kernel() {
+@@ -174,15 +185,7 @@ check_kernel() {
  	kernel=$(uname -r | cut -d- -f1)
  	major=$(printf '%s' "$kernel" | cut -d. -f1)
  	minor=$(printf '%s' "$kernel" | cut -d. -f2)
@@ -190,31 +179,18 @@ index 2658df5..130311d 100644
  	if ! kernel_btf_path >/dev/null; then
  		if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
  			kernel_error=kernel_btf_override_invalid
-@@ -189,8 +196,10 @@ check_kernel() {
- 	[ -d /sys/fs/bpf ] && grep -q ' /sys/fs/bpf bpf ' /proc/mounts || { kernel_error=bpffs_not_mounted; fail "bpffs 未挂载到 /sys/fs/bpf，请检查内核或手工挂载"; return 1; }
- 	command -v ip >/dev/null 2>&1 || { kernel_error=ip_full_missing; fail "缺少 ip 命令（装 ip-full）"; return 1; }
- 	command -v modprobe >/dev/null 2>&1 || { kernel_error=kmod_missing; fail "缺少 modprobe 命令（装 kmod）"; return 1; }
--	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
--		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth / kmod-nft-queue 已安装"; return 1; }
-+	modules="sch_ingress cls_bpf veth"
-+	nfqueue_required && modules="$modules nft_queue nfnetlink_queue"
-+	for module in $modules; do
-+		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth 已安装"; return 1; }
- 	done
- }
- 
-@@ -300,7 +309,9 @@ preflight() {
+@@ -312,7 +315,9 @@ preflight() {
  
  prepare_runtime() {
  	preflight || return 1
 -	for module in sch_ingress cls_bpf veth nft_queue nfnetlink_queue; do
 +	modules="sch_ingress cls_bpf veth"
-+	nfqueue_required && modules="$modules nft_queue nfnetlink_queue"
++	nfqueue_enabled && modules="$modules nft_queue nfnetlink_queue"
 +	for module in $modules; do
  		module_loaded "$module" || modprobe "$module" || { fail "无法加载内核模块 $module，请确认对应 kmod 包已安装"; return 1; }
  	done
  	mkdir -p /etc/honk/state || { fail "无法创建状态目录（/etc/honk/state），请检查磁盘空间与权限"; return 1; }
-@@ -1226,10 +1237,33 @@ recover() {
+@@ -1240,10 +1245,33 @@ recover() {
  			return 1
  		fi
  	fi
@@ -249,7 +225,7 @@ index 2658df5..130311d 100644
  case "$1" in
  	check)
  		preflight
-@@ -1259,8 +1293,11 @@ case "$1" in
+@@ -1273,8 +1301,11 @@ case "$1" in
  	recover)
  		recover
  		;;
