@@ -79,18 +79,16 @@ function generate_config() {
         "$GITHUB_WORKSPACE/Config/GENERAL-STOCK.txt" > "$config_file"
   fi
 
-  # IPQ60xx/IPQ807x: the Vantage dashboard's chip shows the hardware PPE table,
-  # which it reads from status.json. That file is published by dpdfwd, so these
-  # two read-side packages must be in the image even though the stock config
-  # does not select the eBPF datapath. Packages.sh installs only these two for
-  # these targets; the datapath stays in observe (no einat), so NSS/PPE
-  # forwarding is untouched.
+  # IPQ60xx/IPQ807x: DPD runs the soft datapath and owns NAT. The hardware
+  # flowtable cannot offload a conntrack-free NAT (RustDesk stalls in LAST_ACK
+  # with offloading on), so the package's uci-defaults turns offloading and
+  # masquerade off and points nat_forward/nat_ingress at DPD. Only these two
+  # packages plus bpftool are installed; einat and the router-* stack stay out.
   case "$WRT_CONFIG" in
   IPQ60XX*|IPQ807X*)
     cat >> "$config_file" <<'EOF'
 CONFIG_PACKAGE_dpd-fastpath=y
 CONFIG_PACKAGE_dpdfwd=y
-CONFIG_PACKAGE_einat-ebpf=y
 CONFIG_PACKAGE_bpftool-minimal=y
 EOF
     ;;

@@ -183,7 +183,7 @@ done
 # b) Packages.sh: the IPQ branch copies the soft datapath, not the router stack
 ipq_cp=$(awk '/^IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /cp -rf/{print} on && /;;/{exit}' \
 	"$ROOT/Scripts/Packages.sh")
-for pkg in router-dataplane dpdfwd einat-ebpf; do
+for pkg in router-dataplane dpdfwd; do
 	case "$ipq_cp" in
 	*"$pkg"*) ;;
 	*)
@@ -192,7 +192,7 @@ for pkg in router-dataplane dpdfwd einat-ebpf; do
 		;;
 	esac
 done
-for pkg in router-acl router-qos router-dns router-tuning; do
+for pkg in einat router-acl router-qos router-dns router-tuning; do
 	case "$ipq_cp" in
 	*"$pkg"*)
 		bad "Packages.sh 的 IPQ 分支包含 $pkg：只允许 DPD/NAT 数据面"
@@ -204,7 +204,7 @@ done
 # c) Settings.sh: enable exactly the stack + the gate's bpftool
 ipq_cfg=$(awk '/IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /^CONFIG_PACKAGE_/{print} on && /^    ;;/{exit}' \
 	"$ROOT/Scripts/Settings.sh")
-for pkg in dpd-fastpath dpdfwd einat-ebpf bpftool-minimal; do
+for pkg in dpd-fastpath dpdfwd bpftool-minimal; do
 	case "$ipq_cfg" in
 	*"$pkg=y"*) ;;
 	*)
@@ -213,7 +213,7 @@ for pkg in dpd-fastpath dpdfwd einat-ebpf bpftool-minimal; do
 		;;
 	esac
 done
-for pkg in router-acl router-qos router-dns router-tuning luci-app-ebpf dpd-honk dpd-napi; do
+for pkg in einat-ebpf router-acl router-qos router-dns router-tuning luci-app-ebpf dpd-honk dpd-napi; do
 	case "$ipq_cfg" in
 	*"$pkg=y"*)
 		bad "Settings.sh 给 IPQ 选了 $pkg：不在共存范围内"
@@ -224,7 +224,9 @@ done
 
 # d) the fallback default ships with the dataplane package
 ppe_defaults="$ROOT/ebpf/router-dataplane/files/99-dpd-ppe-defaults"
-if [ -f "$ppe_defaults" ] && grep -q "ppe_mode=.fallback." "$ppe_defaults"; then
+if [ -f "$ppe_defaults" ] && grep -q "ppe_mode=.fallback." "$ppe_defaults" &&
+   grep -q "nat_forward=.dpd." "$ppe_defaults" &&
+   grep -q "flow_offloading=.0." "$ppe_defaults"; then
 	ok "IPQ 默认 ppe_mode=fallback（硬件优先，DPD 接管失败流）"
 else
 	bad "缺少 ebpf/router-dataplane/files/99-dpd-ppe-defaults 或未设置 fallback"
