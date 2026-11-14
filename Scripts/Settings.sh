@@ -65,12 +65,14 @@ function generate_config() {
   config_file=".config"
 
   # 配置来源按目标分开：
-  #   X86 / ROCKCHIP -> GENERAL.txt        （ebpf 数据面 + 魔改 UI/DNS）
-  #   其它           -> GENERAL-STOCK.txt  （原版逻辑：NSS、原版 honk、原版包集）
-  # TEST 只吃自己那份，不拼 GENERAL。
+  #   X86 / ROCKCHIP / IPQ60XX / IPQ807X -> GENERAL.txt（ebpf 栈 + UI/DNS）
+  #   其它                               -> GENERAL-STOCK.txt（原版包集）
+  # IPQ 与 X86/RK 同口径：einat+DPD+honk p1+luci-app-ebpf 一致，只在运行时
+  # 用 PPE 默认值关掉 L3 flow offload（硬件无法卸载 BPF NAT）。
   if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" > "$config_file"
-  elif [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ]]; then
+  elif [[ "${WRT_CONFIG}" == "X86" || "${WRT_CONFIG}" == "ROCKCHIP" ||
+          "${WRT_CONFIG}" == IPQ60XX* || "${WRT_CONFIG}" == IPQ807X* ]]; then
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL.txt" > "$config_file"
 
@@ -78,21 +80,6 @@ function generate_config() {
     cat "$GITHUB_WORKSPACE/Config/${WRT_CONFIG}.txt" \
         "$GITHUB_WORKSPACE/Config/GENERAL-STOCK.txt" > "$config_file"
   fi
-
-  # IPQ60xx/IPQ807x: DPD runs the soft datapath and owns NAT. The hardware
-  # flowtable cannot offload a conntrack-free NAT (RustDesk stalls in LAST_ACK
-  # with offloading on), so the package's uci-defaults turns offloading and
-  # masquerade off and points nat_forward/nat_ingress at DPD. Only these two
-  # packages plus bpftool are installed; einat and the router-* stack stay out.
-  case "$WRT_CONFIG" in
-  IPQ60XX*|IPQ807X*)
-    cat >> "$config_file" <<'EOF'
-CONFIG_PACKAGE_dpd-fastpath=y
-CONFIG_PACKAGE_dpdfwd=y
-CONFIG_PACKAGE_bpftool-minimal=y
-EOF
-    ;;
-  esac
 
   # skb recycler
   enable_skb_recycler "$config_file"

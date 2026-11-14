@@ -150,91 +150,42 @@ else
 	fi
 fi
 
-echo "== 7. IPQ/MTK：软件 DPD 与硬件 PPE 共存（ppe_mode=fallback） =="
-# IPQ60xx/IPQ807x now run both engines: einat owns NAT, router-dataplane
-# accelerates the flows the hardware did not take, and dpdfwd publishes the
-# snapshot the dashboard reads. ABI 22 ppe_mode=fallback is what keeps them
-# apart per flow (hardware first, DPD takes back FAILED/DENIED).
-#
-# Checked here:
-#   a) Config/*.txt do not select the stack (Settings.sh adds it for IPQ only,
-#      so MTK and an operator-edited Config stay stock);
-#   b) Packages.sh copies router-dataplane + dpdfwd + einat-ebpf for IPQ and
-#      nothing from the router-* forwarding stack;
-#   c) Settings.sh enables exactly those plus bpftool;
-#   d) the package ships the ppe_mode=fallback uci-defaults.
+echo "== 7. IPQ 与 X86/RK 同口径；PPE 硬件优先 =="
+# IPQ uses the same package set and Vantage patch as X86/RK (GENERAL.txt,
+# full ebpf tree, honk p1), plus PPE/QoS from its own config. At runtime the
+# PPE defaults keep L3 offload on and disable einat: the hardware offload
+# bypasses TCX, so a conntrack-free NAT would corrupt the offloaded flow.
 leak=0
 
-# a) configs
-for cfg in "$ROOT"/Config/IPQ*.txt "$ROOT"/Config/MEDIATEK*.txt \
-	   "$ROOT"/Config/AIROHA*.txt; do
-	[ -f "$cfg" ] || continue
-	while IFS= read -r pkg; do
-		case "$pkg" in
-		dpd-fastpath | einat-ebpf | router-acl | router-dataplane | dpdfwd)
-			bad "${cfg#$ROOT/} 选择了 $pkg：IPQ/MTK 的加速栈由 Settings.sh 按目标决定"
-			leak=1
-			;;
-		esac
-	done < <(sed -n 's/^CONFIG_PACKAGE_\([^=]*\)=[ym]$/\1/p' "$cfg")
-done
-[ "$leak" = 0 ] && ok "IPQ/MTK 的 Config 没有选中加速栈"
-
-# b) Packages.sh: the IPQ branch copies the soft datapath, not the router stack
-ipq_cp=$(awk '/^IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /cp -rf/{print} on && /;;/{exit}' \
-	"$ROOT/Scripts/Packages.sh")
-for pkg in router-dataplane dpdfwd; do
-	case "$ipq_cp" in
-	*"$pkg"*) ;;
-	*)
-		bad "Packages.sh 的 IPQ 分支缺少 $pkg"
-		leak=1
-		;;
-	esac
-done
-for pkg in einat router-acl router-qos router-dns router-tuning; do
-	case "$ipq_cp" in
-	*"$pkg"*)
-		bad "Packages.sh 的 IPQ 分支包含 $pkg：只允许 DPD/NAT 数据面"
-		leak=1
-		;;
-	esac
-done
-
-# c) Settings.sh: enable exactly the stack + the gate's bpftool
-ipq_cfg=$(awk '/IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /^CONFIG_PACKAGE_/{print} on && /^    ;;/{exit}' \
-	"$ROOT/Scripts/Settings.sh")
-for pkg in dpd-fastpath dpdfwd bpftool-minimal; do
-	case "$ipq_cfg" in
-	*"$pkg=y"*) ;;
-	*)
-		bad "Settings.sh 没有给 IPQ 选 $pkg"
-		leak=1
-		;;
-	esac
-done
-for pkg in einat-ebpf router-acl router-qos router-dns router-tuning luci-app-ebpf dpd-honk dpd-napi; do
-	case "$ipq_cfg" in
-	*"$pkg=y"*)
-		bad "Settings.sh 给 IPQ 选了 $pkg：不在共存范围内"
-		leak=1
-		;;
-	esac
-done
-
-# d) the fallback default ships with the dataplane package
-ppe_defaults="$ROOT/ebpf/router-dataplane/files/99-dpd-ppe-defaults"
-if [ -f "$ppe_defaults" ] && grep -q "ppe_mode=.fallback." "$ppe_defaults" &&
-   grep -q "nat_forward=.dpd." "$ppe_defaults" &&
-   grep -q "flow_offloading=.0." "$ppe_defaults"; then
-	ok "IPQ 默认 ppe_mode=fallback（硬件优先，DPD 接管失败流）"
+if grep -qF 'IPQ60XX* || "${WRT_CONFIG}" == IPQ807X*' \
+	"$ROOT/Scripts/Settings.sh"; then
+	ok "Settings.sh: IPQ 与 X86/RK 同走 GENERAL.txt 分支"
 else
-	bad "缺少 ebpf/router-dataplane/files/99-dpd-ppe-defaults 或未设置 fallback"
+	bad "Settings.sh: IPQ 没有并入 GENERAL.txt 分支"
 	leak=1
 fi
-[ "$leak" = 0 ] && ok "IPQ 启用软件 DPD + 硬件 PPE 共存（fallback）"
 
-echo
+n=$(grep -cF "X86|ROCKCHIP|IPQ60XX*|IPQ807X*" "$ROOT/Scripts/Packages.sh")
+if [ "$n" -ge 3 ]; then
+	ok "Packages.sh: IPQ 与 X86/RK 共用 ebpf 拷贝/honk 补丁/core 分支（$n 处）"
+else
+	bad "Packages.sh: IPQ 未完全并入 X86/RK 分支（找到 $n 处，需要 3）"
+	leak=1
+fi
+
+ppe_defaults="$ROOT/ebpf/router-dataplane/files/99-dpd-ppe-defaults"
+if [ -f "$ppe_defaults" ] &&
+   grep -q "ppe_mode=.fallback." "$ppe_defaults" &&
+   grep -q "einat.config.enabled=.0." "$ppe_defaults" &&
+   grep -q "flow_offloading=.1." "$ppe_defaults" &&
+   grep -q "masq=.1." "$ppe_defaults"; then
+	ok "PPE 默认：硬件卸载开、einat 停用、masq 开（硬件优先）"
+else
+	bad "99-dpd-ppe-defaults 不是硬件优先口径（ppe_mode/einat/offload/masq）"
+	leak=1
+fi
+[ "$leak" = 0 ] && ok "IPQ 与 X86/RK 同口径，PPE 硬件优先"
+
 if [ "$fails" != 0 ]; then
 	echo "verify-drift: FAILED ($fails)"
 	exit 1
