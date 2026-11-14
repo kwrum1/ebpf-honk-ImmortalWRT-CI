@@ -150,7 +150,7 @@ else
 	fi
 fi
 
-echo "== 7. IPQ/MTK 镜像不得携带 DPD 数据面（PPE/flowtable 独占加速） =="
+echo "== 7. IPQ/MTK 只允许只读 DPD 状态包（PPE/flowtable 独占转发） =="
 # IPQ/MTK 走内核 flowtable（IPQ 还有 PPE 硬件卸载），DPD 数据面不参与竞争。
 # 检查的是**源码约定**，不需要构建产物：谁把闸门删掉，CI 立刻失败，而不是等
 # 烧到机器上才发现两套加速器抢同一条流。
@@ -188,24 +188,50 @@ else
 	leak=1
 fi
 
-# c) 装 BPF 对象的包必须排除 qualcommax。判定依据是源码里真有 *.bpf.c，
-# 而不是包名或 DEPENDS 里出现 bpf 字样（后者会把纯用户态包也算进来）。
-for d in "$ROOT"/ebpf/*/; do
-	[ -d "$d" ] || continue
-	name=$(basename "$d")
-	objs=$(find "$d" -name '*.bpf.c' 2>/dev/null | wc -l)
-	[ "$objs" -gt 0 ] || continue
-	dep=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)/\1/p' "$d/Makefile" 2>/dev/null |
-		head -1)
-	case "$dep" in
-	*TARGET_qualcommax*) ;;
-	*)
-		bad "ebpf/$name 安装 BPF 对象但没有排除 TARGET_qualcommax"
+# c) IPQ60xx/IPQ807x may install the *read* side only: router-dataplane
+#    (dpdctl reads the PPE table from debugfs) and dpdfwd (publishes
+#    status.json). Anything that could take the forwarding path over --
+#    einat, router-acl, router-qos, router-dns, router-tuning -- must stay
+#    out. The init gate keeps DPD in observe without einat, so the kernel
+#    NSS/PPE path remains the only accelerator.
+ipq_branch=$(awk '/^IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /cp -rf/{print} on && /;;/{exit}' \
+	"$ROOT/Scripts/Packages.sh")
+case "$ipq_branch" in
+*router-dataplane*) ;;
+*)
+	bad "Packages.sh 的 IPQ 分支缺少 router-dataplane（概况页需要 dpdctl 读 PPE）"
+	leak=1
+	;;
+esac
+case "$ipq_branch" in
+*dpdfwd*) ;;
+*)
+	bad "Packages.sh 的 IPQ 分支缺少 dpdfwd（status.json 无人发布）"
+	leak=1
+	;;
+esac
+for pkg in einat router-acl router-qos router-dns router-tuning; do
+	case "$ipq_branch" in
+	*"$pkg"*)
+		bad "Packages.sh 的 IPQ 分支包含 $pkg：IPQ 只允许只读的 router-dataplane/dpdfwd"
 		leak=1
 		;;
 	esac
 done
-[ "$leak" = 0 ] && ok "所有安装 BPF 对象的包都排除了 TARGET_qualcommax"
+
+# Settings.sh must enable exactly those two for IPQ, not the acceleration
+# stack (einat would compete with NSS/PPE for the forwarding path).
+ipq_cfg=$(awk '/IPQ60XX\*\|IPQ807X\*\)/{on=1} on && /^CONFIG_PACKAGE_/{print} on && /^    ;;/{exit}' \
+	"$ROOT/Scripts/Settings.sh")
+for pkg in einat-ebpf router-acl luci-app-ebpf dpd-honk dpd-napi; do
+	case "$ipq_cfg" in
+	*"$pkg"*)
+		bad "Settings.sh 给 IPQ 选了 $pkg：只允许 dpd-fastpath/dpdfwd"
+		leak=1
+		;;
+	esac
+done
+[ "$leak" = 0 ] && ok "IPQ 只安装只读状态包（router-dataplane + dpdfwd）"
 
 echo
 if [ "$fails" != 0 ]; then
