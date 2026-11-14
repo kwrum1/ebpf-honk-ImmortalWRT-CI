@@ -87,7 +87,7 @@ UPDATE_PACKAGE "honk" "kenzok8/openwrt-honk" "main" "pkg"
 # failed hunk or a missing anchor stops the build here instead of shipping a
 # half-patched honk.
 case "$WRT_CONFIG" in
-X86|ROCKCHIP|IPQ60XX*|IPQ807X*)
+X86|ROCKCHIP)
 	if ! patch -p1 -d ./package --no-backup-if-mismatch \
 		-i "$GITHUB_WORKSPACE/patches/honk/honk-x86rk.patch"; then
 		echo "!! honk: x86/RK patch did not apply; upstream hunks moved (see patches/honk/README.md)" >&2
@@ -199,7 +199,7 @@ fetch_honk_stage() {
 	fi
 }
 case "$WRT_CONFIG" in
-X86|ROCKCHIP|IPQ60XX*|IPQ807X*) fetch_honk_stage ;;
+X86|ROCKCHIP) fetch_honk_stage ;;
 esac
 # Honk 所需的 GeoIP / GeoSite 数据包
 UPDATE_PACKAGE "v2ray-geodata" "kenzok8/wall" "main" "pkg" "v2ray-geoip v2ray-geosite"
@@ -230,7 +230,7 @@ UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 # $GITHUB_WORKSPACE/ebpf -- and from nowhere else: a second copy in this
 # repository used to shadow it and shipped whatever it happened to contain.
 case "$WRT_CONFIG" in
-X86|ROCKCHIP|IPQ60XX*|IPQ807X*)
+X86|ROCKCHIP)
 	EBPF_ROOT="$GITHUB_WORKSPACE/ebpf"
 
 	if [ ! -d "$EBPF_ROOT/router-dataplane" ]; then

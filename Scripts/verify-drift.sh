@@ -150,41 +150,54 @@ else
 	fi
 fi
 
-echo "== 7. IPQ 与 X86/RK 同口径；PPE 硬件优先 =="
-# IPQ uses the same package set and Vantage patch as X86/RK (GENERAL.txt,
-# full ebpf tree, honk p1), plus PPE/QoS from its own config. At runtime the
-# PPE defaults keep L3 offload on and disable einat: the hardware offload
-# bypasses TCX, so a conntrack-free NAT would corrupt the offloaded flow.
+echo "== 7. IPQ/MTK 纯 PPE/flowtable，不安装 DPD =="
+# IPQ/MTK keep the kernel flowtable/PPE datapath; the eBPF stack (einat +
+# DPD) is x86/ROCKCHIP only. A DPD package next to the hardware offload
+# would either compete for the flow or be bypassed by it.
 leak=0
 
-if grep -qF 'IPQ60XX* || "${WRT_CONFIG}" == IPQ807X*' \
-	"$ROOT/Scripts/Settings.sh"; then
-	ok "Settings.sh: IPQ 与 X86/RK 同走 GENERAL.txt 分支"
+# a) no IPQ/MTK/AIROHA config may select the DPD stack
+for cfg in "$ROOT"/Config/IPQ*.txt "$ROOT"/Config/MEDIATEK*.txt \
+	   "$ROOT"/Config/AIROHA*.txt; do
+	[ -f "$cfg" ] || continue
+	while IFS= read -r pkg; do
+		case "$pkg" in
+		dpd-fastpath | einat-ebpf | router-acl | router-dataplane | dpdfwd)
+			bad "${cfg#$ROOT/} 选中了 $pkg：IPQ/MTK 只跑 PPE/flowtable"
+			leak=1
+			;;
+		esac
+	done < <(sed -n 's/^CONFIG_PACKAGE_\([^=]*\)=[ym]$/\1/p' "$cfg")
+done
+[ "$leak" = 0 ] && ok "IPQ/MTK 的 Config 没有选中 DPD 数据面"
+
+# b) Packages.sh copies ebpf/ only inside the X86|ROCKCHIP branch
+if awk '/^case "\$WRT_CONFIG" in/{on=1}
+	on && /^X86\|ROCKCHIP\)/{x86=1}
+	on && /ebpf\/ \$/ {if (!x86) exit 1}
+	on && /^esac/{on=0; x86=0}' "$ROOT/Scripts/Packages.sh"; then
+	ok "Packages.sh 的 ebpf/ 拷贝只在 X86|ROCKCHIP 分支"
 else
-	bad "Settings.sh: IPQ 没有并入 GENERAL.txt 分支"
+	bad "Packages.sh 会把 ebpf/ 拷进非 X86/ROCKCHIP 的构建"
 	leak=1
 fi
 
-n=$(grep -cF "X86|ROCKCHIP|IPQ60XX*|IPQ807X*" "$ROOT/Scripts/Packages.sh")
-if [ "$n" -ge 3 ]; then
-	ok "Packages.sh: IPQ 与 X86/RK 共用 ebpf 拷贝/honk 补丁/core 分支（$n 处）"
-else
-	bad "Packages.sh: IPQ 未完全并入 X86/RK 分支（找到 $n 处，需要 3）"
-	leak=1
-fi
-
-ppe_defaults="$ROOT/ebpf/router-dataplane/files/99-dpd-ppe-defaults"
-if [ -f "$ppe_defaults" ] &&
-   grep -q "ppe_mode=.fallback." "$ppe_defaults" &&
-   grep -q "einat.config.enabled=.0." "$ppe_defaults" &&
-   grep -q "flow_offloading=.1." "$ppe_defaults" &&
-   grep -q "masq=.1." "$ppe_defaults"; then
-	ok "PPE 默认：硬件卸载开、einat 停用、masq 开（硬件优先）"
-else
-	bad "99-dpd-ppe-defaults 不是硬件优先口径（ppe_mode/einat/offload/masq）"
-	leak=1
-fi
-[ "$leak" = 0 ] && ok "IPQ 与 X86/RK 同口径，PPE 硬件优先"
+# c) every package that installs a BPF object excludes qualcommax
+for d in "$ROOT"/ebpf/*/; do
+	[ -d "$d" ] || continue
+	objs=$(find "$d" -name "*.bpf.c" 2>/dev/null | wc -l)
+	[ "$objs" -gt 0 ] || continue
+	dep=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)/\1/p' "$d/Makefile" 2>/dev/null | head -1)
+	case "$dep" in
+	*TARGET_qualcommax*) ;;
+	*)
+		bad "ebpf/$(basename "$d") 安装 BPF 对象但没有排除 TARGET_qualcommax"
+		leak=1
+		;;
+	esac
+done
+[ "$leak" = 0 ] && ok "所有安装 BPF 对象的包都排除了 TARGET_qualcommax"
+[ "$leak" = 0 ] && ok "IPQ/MTK 保持纯 PPE/flowtable"
 
 if [ "$fails" != 0 ]; then
 	echo "verify-drift: FAILED ($fails)"
