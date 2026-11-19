@@ -18,7 +18,7 @@ MK=${1:-./package/honk/Makefile}
 # The p1 patch (direct-classified flows back to the classic TC chain) is
 # written against this commit. Bump only together with the patch; the
 # HONK-CORE workflow fails loudly when the anchors drift.
-CORE=64848881b7304e250e7a25422f4f1d86a5975eca
+CORE=8919784a6fe11fd8c6b9516b79f5553b93810ab2
 
 grep -q '^CORE_COMMIT:=' "$MK" || {
 	echo "honk: CORE_COMMIT anchor missing in $MK" >&2
